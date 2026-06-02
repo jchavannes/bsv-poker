@@ -7,7 +7,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseCard, type Card, type Ruleset, type Action } from '@bsv-poker/protocol-types';
+import { parseCard, type Card, type Ruleset } from '@bsv-poker/protocol-types';
 import { createHoldem } from '@bsv-poker/game-holdem';
 import {
   evaluate,
