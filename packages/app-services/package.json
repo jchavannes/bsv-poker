@@ -1,0 +1,18 @@
+{
+  "name": "@bsv-poker/app-services",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@bsv-poker/protocol-types": "workspace:*",
+    "@bsv-poker/engine": "workspace:*",
+    "@bsv-poker/game-holdem": "workspace:*",
+    "@bsv-poker/ui-core": "workspace:*"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "name": "@bsv-poker/client-web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@bsv-poker/protocol-types": "workspace:*",
+    "@bsv-poker/hand-eval": "workspace:*",
+    "@bsv-poker/engine": "workspace:*",
+    "@bsv-poker/game-holdem": "workspace:*",
+    "@bsv-poker/ui-core": "workspace:*",
+    "@bsv-poker/app-services": "workspace:*",
+    "react": "^18",
+    "react-dom": "^18"
+  },
+  "devDependencies": {
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "@vitejs/plugin-react": "^4",
+    "vite": "^5"
+  }
+}
