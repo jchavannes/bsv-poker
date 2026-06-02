@@ -1,0 +1,10 @@
+# Keep the Docker build context small + reproducible (the image rebuilds dist itself).
+**/node_modules
+**/dist
+**/target
+apps/client-desktop/src-tauri/target
+.git
+*.log
+vm/.data
+**/*.exe
+**/*.msi
