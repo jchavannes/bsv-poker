@@ -65,7 +65,13 @@ export function HandViewer(props: { seat: SeatVM }): React.JSX.Element {
   );
 }
 
-export function SeatRing(props: { seats: readonly SeatVM[] }): React.JSX.Element {
+export function SeatRing(props: {
+  seats: readonly SeatVM[];
+  /** Optional per-seat label override (e.g. an opponent's id in networked play). Defaults to
+   * "(you)" for the hero and "(bot)" otherwise — the original hot-seat-vs-bot behaviour. */
+  seatLabel?: (seat: SeatVM) => string;
+}): React.JSX.Element {
+  const label = props.seatLabel ?? ((s: SeatVM) => (s.isHero ? '(you)' : '(bot)'));
   return (
     <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
       {props.seats.map((s) => (
@@ -82,7 +88,7 @@ export function SeatRing(props: { seats: readonly SeatVM[] }): React.JSX.Element
           }}
         >
           <div style={{ fontWeight: 700 }}>
-            Seat {s.seat} {s.isHero ? '(you)' : '(bot)'} {s.isButton ? '🔘' : ''}
+            Seat {s.seat} {label(s)} {s.isButton ? '🔘' : ''}
           </div>
           <div>Stack: {s.stack}</div>
           <div>In front: {s.committedThisRound}</div>

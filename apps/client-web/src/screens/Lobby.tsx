@@ -22,11 +22,12 @@ export function Lobby(props: { onStart: (form: TableCreateForm) => void }): Reac
   return (
     <div style={{ maxWidth: 520, margin: '40px auto', padding: 16 }}>
       <MainnetBanner regtest={true} />
-      <h1>BSV Poker — Local Table</h1>
+      <h1>BSV Poker — Practice vs bot (offline)</h1>
       <p style={{ color: '#aaa' }}>
         Heads-up No-Limit Texas Hold'em vs a simple bot, played hot-seat in your browser on the
-        real game engine. Multi-client play over the relay and the on-chain crypto/transactions
-        are a later phase (§A2.3) and are not wired here.
+        real game engine — no relay needed. For real multiplayer over the relay, go back and
+        Connect to a relay. The on-chain crypto/transactions are the Node SDK path (§A2.3) and are
+        not wired into this browser bundle.
       </p>
 
       <div role="group" aria-label="create table" style={{ display: 'grid', gap: 10 }}>
