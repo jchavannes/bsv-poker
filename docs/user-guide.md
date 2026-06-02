@@ -26,9 +26,19 @@ malicious player can freeze the table — every decision has a timeout default.
    deterministic; final balances are shown.
 7. You can **export the transcript** and replay the hand offline — it reconstructs byte-identically.
 
-## Variants
-Texas Hold'em (Phase 1), plus Omaha, Seven-Card Stud, Five-Card Draw, and Razz as game modules.
-Blackjack is a separate, later track (its dealerless model differs from the poker shuffle).
+## Choosing a game, funds, and multiplayer
+- **Pick a variant** when you create a table: Texas Hold'em, Omaha (incl. Hi-Lo), Seven-Card
+  Stud, Five-Card Draw, or Razz — and the seat count (2 up to the variant's max). Blackjack is a
+  separate later track (its dealerless model differs from the poker shuffle).
+- **Wallet — add and remove funds.** Your wallet shows a balance; **Add funds** credits it
+  (regtest/play-money now; a real on-chain deposit is the live path), and **Withdraw** removes
+  funds to an address. Joining a table **buys in** for the table's starting stack from your
+  balance; leaving **cashes out** the remaining stack back to your wallet. Amounts are whole
+  satoshis (no fractional outputs).
+- **Multiplayer rooms.** Connect to a relay, see the **lobby** of open tables, **create** one
+  (others join from the list) or **join** an existing one. A **waiting room** shows players
+  filling the seats; when the table is full everyone is seated and the hand begins — real
+  player-vs-player mental poker over the relay. (There's also an offline practice-vs-bot mode.)
 
 ## Your keys
 Your keys live behind a custody boundary and never reach the page. In the default software custody
