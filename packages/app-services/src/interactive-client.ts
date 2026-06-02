@@ -12,6 +12,7 @@
 import {
   type Action,
   type Card,
+  type GameState,
   type LegalActions,
   type Ruleset,
   sha256,
@@ -19,8 +20,8 @@ import {
   hexToBytes,
   ByteWriter,
 } from '@bsv-poker/protocol-types';
-import { createHoldem, type HoldemState } from '@bsv-poker/game-holdem';
 import type { RelayClient } from './network.ts';
+import { createGameModule, type GenericGameModule } from './game-registry.ts';
 
 export interface TablePlayer {
   readonly seat: number;
@@ -38,7 +39,7 @@ interface Envelope {
 }
 
 export interface ClientUpdate {
-  readonly state: HoldemState;
+  readonly state: GameState;
   readonly mySeat: number;
   readonly yourTurn: boolean;
   readonly legal: LegalActions | null;
@@ -80,8 +81,8 @@ export class InteractiveNetworkedTableClient {
   private unsub: (() => void) | null = null;
   private listeners: Array<(u: ClientUpdate) => void> = [];
   private pendingAction: ((a: Action) => void) | null = null;
-  private module: ReturnType<typeof createHoldem> | null = null;
-  private state: HoldemState | null = null;
+  private module: GenericGameModule | null = null;
+  private state: GameState | null = null;
 
   constructor(opts: {
     relay: RelayClient;
@@ -115,7 +116,7 @@ export class InteractiveNetworkedTableClient {
     }
   }
 
-  getState(): HoldemState | null {
+  getState(): GameState | null {
     return this.state;
   }
 
@@ -174,7 +175,7 @@ export class InteractiveNetworkedTableClient {
   }
 
   /** Run the hand: subscribe, handshake, deal, then drive turns until the hand completes. */
-  async play(): Promise<HoldemState> {
+  async play(): Promise<GameState> {
     this.unsub = this.relay.subscribe(this.tableId, (text) => {
       try {
         const env = JSON.parse(text) as Envelope;
@@ -207,7 +208,7 @@ export class InteractiveNetworkedTableClient {
       for (const e of entropies) for (const b of e) w.u8(b);
       const deck: Card[] = seededShuffle(sha256(w.toBytes()), 52);
 
-      this.module = createHoldem({ deck });
+      this.module = createGameModule(this.ruleset.variant, deck);
       this.state = this.module.init(
         this.ruleset,
         this.seats.map((s) => ({ seat: s.seat, stack: s.stack })),

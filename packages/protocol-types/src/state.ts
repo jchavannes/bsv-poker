@@ -56,6 +56,11 @@ export interface GameState {
   readonly board: readonly Card[];
   readonly betting: BettingState;
   readonly pots: readonly Pot[];
+  /**
+   * Engine-known hole cards per seat (concealed at the UI/custody boundary; a client renders
+   * only its OWN seat's cards via the viewer path, core §11.5). Present once cards are dealt.
+   */
+  readonly hole?: Readonly<Record<number, readonly Card[]>>;
   /** True once the hand has reached a terminal phase. */
   readonly handComplete: boolean;
 }

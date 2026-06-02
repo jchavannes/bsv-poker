@@ -13,6 +13,11 @@
     "@bsv-poker/protocol-types": "workspace:*",
     "@bsv-poker/engine": "workspace:*",
     "@bsv-poker/game-holdem": "workspace:*",
+    "@bsv-poker/game-omaha": "workspace:*",
+    "@bsv-poker/game-stud": "workspace:*",
+    "@bsv-poker/game-draw": "workspace:*",
+    "@bsv-poker/game-razz": "workspace:*",
+    "@bsv-poker/hand-eval": "workspace:*",
     "@bsv-poker/ui-core": "workspace:*"
   }
 }
