@@ -123,13 +123,23 @@ function run(script: Script, stack: Stack, ctx: ScriptContext): EvalResult {
           stack.push(FALSE);
           break;
         case OP.OP_1:
-          stack.push(Uint8Array.of(1));
-          break;
         case OP.OP_2:
-          stack.push(Uint8Array.of(2));
-          break;
         case OP.OP_3:
-          stack.push(Uint8Array.of(3));
+        case OP.OP_4:
+        case OP.OP_5:
+        case OP.OP_6:
+        case OP.OP_7:
+        case OP.OP_8:
+        case OP.OP_9:
+        case OP.OP_10:
+        case OP.OP_11:
+        case OP.OP_12:
+        case OP.OP_13:
+        case OP.OP_14:
+        case OP.OP_15:
+        case OP.OP_16:
+          // Small-int push opcodes OP_1..OP_16 push their value (0x51..0x60 → 1..16).
+          stack.push(Uint8Array.of((item as number) - 0x50));
           break;
         case OP.OP_DUP: {
           const v = pop();

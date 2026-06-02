@@ -45,8 +45,8 @@ export function branchBindingPrefix(b: BranchBinding): Script {
 /** Funding: N-of-N multisig over player buy-ins; binds gid+rulesetHash (core §6.6). */
 export function fundingLocking(b: BranchBinding, pubKeys: readonly Uint8Array[]): Script {
   const n = pubKeys.length;
-  if (n < 1 || n > 3) throw new Error('Phase-1 funding supports 1..3 of N via small ints');
-  const nOp = [OP.OP_1, OP.OP_2, OP.OP_3][n - 1]!;
+  if (n < 1 || n > 16) throw new Error('funding supports 1..16-of-N (CHECKMULTISIG small ints)');
+  const nOp = 0x50 + n; // OP_1..OP_16 = 0x51..0x60
   return [...branchBindingPrefix(b), nOp, ...pubKeys, nOp, OP.OP_CHECKMULTISIG];
 }
 /** Unlocking for the N-of-N funding multisig: OP_0 (legacy dummy) then the N signatures. */
