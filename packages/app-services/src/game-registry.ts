@@ -67,17 +67,21 @@ export interface PlannedGameProfile {
  * (P7/P8). Blackjack is dealerless and needs its own concealment/settlement model (core D7); it is
  * NOT smuggled into the poker pipeline.
  */
-export const PLANNED_GAMES: readonly PlannedGameProfile[] = [
-  {
-    id: 'blackjack',
-    label: 'Blackjack (dealerless)',
-    status: 'planned',
-    reason: 'dealerless blackjack needs its own concealment + settlement model (core D7); protocol model DECISION REQUIRED (REQ-APP-219)',
-    controls: ['hit', 'stand', 'double', 'split', 'insurance'],
-    dealerArea: true,
-    interPlayerPot: false,
-  },
-];
+export const PLANNED_GAMES: readonly PlannedGameProfile[] = [];
+
+/**
+ * Blackjack is now IMPLEMENTED as its own dealerless module (`@bsv-poker/game-blackjack`) — the deck
+ * drives a deterministic dealer (hit-to-17), player-vs-dealer, no inter-player pot, hit/stand/double.
+ * It is NOT in the poker GameModule pipeline (core D7), so it is exposed here as a distinct game.
+ */
+export const BLACKJACK = {
+  id: 'blackjack',
+  label: 'Blackjack (dealerless)',
+  status: 'playable' as const,
+  controls: ['hit', 'stand', 'double'] as const,
+  dealerArea: true,
+  interPlayerPot: false,
+};
 
 /** A planned game cannot be instantiated until its protocol model is fixed — fail-closed (P7/P8). */
 export function createPlannedGame(id: string): never {

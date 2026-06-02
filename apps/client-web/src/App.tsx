@@ -102,7 +102,7 @@ export function App(): React.JSX.Element {
   // Connecting to the relay is automatic plumbing — NOT a user action. The bundled-local relay
   // (loopback) is reached on launch and the player lands straight in the lobby.
   const [screen, setScreen] = useState<Screen>({ kind: 'lobby' });
-  const [relay, setRelay] = useState('http://localhost:8091');
+  const [relay, setRelay] = useState('http://127.0.0.1:8091');
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
   const lobbyRef = useRef<LobbyClient | null>(null);

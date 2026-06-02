@@ -122,32 +122,52 @@ impl Supervisor {
     }
 }
 
+/// Resolve a bundled service binary: prefer the Tauri resource dir (installed app), fall back to the
+/// exe's own directory (dev/release run), then the bare name (PATH).
+fn resolve_bin(app: &tauri::AppHandle, bin: &str) -> std::path::PathBuf {
+    use tauri::Manager;
+    if let Ok(dir) = app.path().resource_dir() {
+        let p = dir.join(bin);
+        if p.exists() {
+            return p;
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let p = dir.join(bin);
+            if p.exists() {
+                return p;
+            }
+        }
+    }
+    std::path::PathBuf::from(bin)
+}
+
 /// Spawn one bundled service binary bound to loopback (REQ-APP-027/028, §A10.7).
-fn spawn_service(bin: &str, addr: &str) -> Result<Child, String> {
-    Command::new(bin)
+fn spawn_service(app: &tauri::AppHandle, bin: &str, addr: &str) -> Result<Child, String> {
+    Command::new(resolve_bin(app, bin))
         .arg("-addr")
         .arg(addr)
         .spawn()
         .map_err(|e| format!("failed to spawn {bin}: {e}"))
 }
 
-#[tauri::command]
-fn services_start(app: tauri::AppHandle, sup: State<Supervisor>) -> Result<bool, String> {
-    // Ordered startup: node → indexer → relay (node is the bonded-subsat-channel embedded node,
-    // bound by the adapter; here we supervise the indexer and relay binaries).
+/// Ordered startup (node → indexer → relay) with the bounded restart policy. Used both by the
+/// `services_start` IPC command and the automatic launch bootstrap, so services come up with no
+/// user action (REQ-APP-020/021).
+fn run_startup(app: &tauri::AppHandle, sup: &Supervisor) -> Result<bool, String> {
     *sup.lifecycle.lock().unwrap() = LifecycleState::StartIndexer;
-    emit_status(&app, "indexer", "starting", None, 0);
-
+    emit_status(app, "indexer", "starting", None, 0);
     let mut started_indexer = false;
     for attempt in 0..MAX_RESTARTS {
-        match spawn_service("indexer", INDEXER_ADDR) {
+        match spawn_service(app, "indexer-go.exe", INDEXER_ADDR) {
             Ok(child) => {
                 *sup.indexer.lock().unwrap() = Some(child);
-                emit_status(&app, "indexer", "healthy", None, attempt);
+                emit_status(app, "indexer", "healthy", None, attempt);
                 started_indexer = true;
                 break;
             }
-            Err(e) => emit_status(&app, "indexer", "failed", Some(e), attempt),
+            Err(e) => emit_status(app, "indexer", "failed", Some(e), attempt),
         }
     }
     if !started_indexer {
@@ -156,17 +176,17 @@ fn services_start(app: tauri::AppHandle, sup: State<Supervisor>) -> Result<bool,
     }
 
     *sup.lifecycle.lock().unwrap() = LifecycleState::StartRelay;
-    emit_status(&app, "relay", "starting", None, 0);
+    emit_status(app, "relay", "starting", None, 0);
     let mut started_relay = false;
     for attempt in 0..MAX_RESTARTS {
-        match spawn_service("relay", RELAY_ADDR) {
+        match spawn_service(app, "relay-go.exe", RELAY_ADDR) {
             Ok(child) => {
                 *sup.relay.lock().unwrap() = Some(child);
-                emit_status(&app, "relay", "healthy", None, attempt);
+                emit_status(app, "relay", "healthy", None, attempt);
                 started_relay = true;
                 break;
             }
-            Err(e) => emit_status(&app, "relay", "failed", Some(e), attempt),
+            Err(e) => emit_status(app, "relay", "failed", Some(e), attempt),
         }
     }
     if !started_relay {
@@ -176,6 +196,11 @@ fn services_start(app: tauri::AppHandle, sup: State<Supervisor>) -> Result<bool,
 
     *sup.lifecycle.lock().unwrap() = LifecycleState::Ready;
     Ok(true)
+}
+
+#[tauri::command]
+fn services_start(app: tauri::AppHandle, sup: State<Supervisor>) -> Result<bool, String> {
+    run_startup(&app, &sup)
 }
 
 #[tauri::command]
@@ -247,8 +272,13 @@ fn main() {
             config_set_network
         ])
         .setup(|app| {
-            // Ordered startup begins at launch; the UI gates play until READY (REQ-APP-023).
-            let _ = app.handle();
+            // Ordered startup begins automatically at launch — no user action (REQ-APP-020). The UI
+            // gates play until READY (REQ-APP-023). A spawn failure leaves the lifecycle Degraded;
+            // the UI surfaces it rather than crashing.
+            use tauri::Manager;
+            let handle = app.handle().clone();
+            let sup = app.state::<Supervisor>();
+            let _ = run_startup(&handle, &sup);
             Ok(())
         })
         .run(tauri::generate_context!())

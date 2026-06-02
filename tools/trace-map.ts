@@ -172,7 +172,7 @@ export const TRACE_MAP: Readonly<Record<string, Trace>> = {
   'REQ-APP-216': { files: ['packages/ui-core/src/view-models/bet-sizing.ts'], tests: ['packages/ui-core/test/table-room-vm.test.ts'] },
   'REQ-APP-217': { files: ['packages/ui-core/src/view-models/table-layout.ts'], tests: ['packages/ui-core/test/table-room-vm.test.ts'] },
   'REQ-APP-220': { files: ['packages/game-holdem/src/holdem.ts'], tests: ['packages/game-holdem/test/holdem.test.ts'] },
-  'REQ-APP-219': { files: ['packages/app-services/src/game-registry.ts'], tests: ['packages/app-services/test/blackjack-reservation.test.ts'] },
+  'REQ-APP-219': { files: ['packages/game-blackjack/src/blackjack.ts', 'packages/app-services/src/game-registry.ts'], tests: ['packages/game-blackjack/test/blackjack.test.ts', 'packages/app-services/test/blackjack-reservation.test.ts'] },
   'REQ-APP-043': { files: ['packages/adapters/src/real-node.ts'], tests: ['tools/node-e2e.ts'] },
   'REQ-APP-080': { files: ['packages/ui-core/src/view-models/signing.ts'], tests: ['packages/ui-core/test/showdown-signing-lobby-vm.test.ts'] },
   'REQ-APP-094': { files: ['apps/client-desktop/src-tauri/tauri.conf.json', 'apps/client-desktop/src-tauri/src/main.rs'], tests: ['apps/client-desktop/src-tauri/src/main.rs'] },

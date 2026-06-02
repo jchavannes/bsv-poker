@@ -109,6 +109,12 @@ importers:
         specifier: workspace:*
         version: link:../protocol-types
 
+  packages/game-blackjack:
+    dependencies:
+      '@bsv-poker/protocol-types':
+        specifier: workspace:*
+        version: link:../protocol-types
+
   packages/game-draw:
     dependencies:
       '@bsv-poker/engine':

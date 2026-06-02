@@ -19,12 +19,16 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8091 http://127.0.0.1:8092 http://127.0.0.1:18332"
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:8091 http://127.0.0.1:8092 http://127.0.0.1:18332 http://localhost:8091 http://localhost:8092 http://localhost:18332"
     }
   },
   "bundle": {
     "active": true,
     "targets": ["msi", "nsis"],
-    "icon": ["icons/icon.ico"]
+    "icon": ["icons/icon.ico"],
+    "resources": {
+      "../../relay-go/relay-go.exe": "relay-go.exe",
+      "../../indexer-go/indexer-go.exe": "indexer-go.exe"
+    }
   }
 }
