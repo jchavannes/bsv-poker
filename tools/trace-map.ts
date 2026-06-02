@@ -20,6 +20,7 @@ export const TRACE_MAP: Readonly<Record<string, Trace>> = {
   'REQ-POKER-004': { files: ['packages/hand-eval/src/high.ts'], tests: ['packages/hand-eval/test/vectors.test.ts'] },
   'REQ-POKER-005': { files: ['packages/hand-eval/src/high.ts'], tests: ['packages/hand-eval/test/vectors.test.ts'] },
   'REQ-POKER-006': { files: ['packages/hand-eval/src/low.ts'], tests: ['packages/hand-eval/test/vectors.test.ts'] },
+  'REQ-FSM-007': { files: ['packages/hand-eval/src/low.ts'], tests: ['packages/hand-eval/test/vectors.test.ts'] },
   'REQ-POKER-007': { files: ['packages/hand-eval/src/high.ts'], tests: ['packages/hand-eval/test/vectors.test.ts'] },
   'REQ-POKER-008': { files: ['packages/engine/src/betting.ts'], tests: ['packages/engine/test/betting.test.ts'] },
   'REQ-POKER-009': { files: ['packages/engine/src/betting.ts'], tests: ['packages/engine/test/betting.test.ts'] },

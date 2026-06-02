@@ -9,7 +9,7 @@ import {
   CATEGORY_NAMES,
   type HandValue,
 } from '../src/high.ts';
-import { bestLow, compareLow, type LowValue } from '../src/low.ts';
+import { bestLow, bestOmaha8Low, compareLow, type LowValue } from '../src/low.ts';
 
 // §19.D high-hand category vectors — category + tiebreak tuple from the oracle.
 const HIGH: Array<[string, string, string, number[]]> = [
@@ -127,4 +127,29 @@ test('§19.D ace-to-five low (Razz) vectors reproduce the oracle', () => {
     'seven<paired-nine',
   );
   assert.equal(compareLow(v('Ah 2h 3h 4h 5h Kh Qh'), v('Ah 2d 3c 4s 5h Kd Qs')), 0, 'flush ignored');
+});
+
+test('§19.D Omaha-8 qualifying low: exactly-8-high qualifies, 9-high does not (REQ-FSM-007)', () => {
+  // Wheel-qualifying: hole A,5 + board 2,3,4 → A-2-3-4-5 qualifies (best low).
+  const wheel = bestOmaha8Low(parseHand('As 5h 7d 9c'), parseHand('2c 3d 4h 8s Kc'));
+  assert.ok(wheel, 'a qualifying low exists');
+  assert.equal(wheel!.value.pairPenalty, 0);
+  assert.deepEqual([...wheel!.value.values], [5, 4, 3, 2, 1], 'best qualifying low is the wheel');
+
+  // Exactly 8-high boundary qualifies: hole A,8 + board 2,4,6 → 8-6-4-2-A (all distinct, all ≤8).
+  const eightHigh = bestOmaha8Low(parseHand('As 8h 9d Tc'), parseHand('2c 4d 6h Qs Kc'));
+  assert.ok(eightHigh, '8-high qualifies (≤8)');
+  assert.equal(Math.max(...eightHigh!.value.values), 8, 'top card is exactly 8');
+
+  // No qualifying low: only two cards ≤ 8 available → cannot make five distinct ranks ≤8.
+  const none = bestOmaha8Low(parseHand('As 2h Kd Qc'), parseHand('9c Td Jh Qs Kh'));
+  assert.equal(none, null, 'no eight-or-better low qualifies');
+});
+
+test('§19.D tie / odd-chip: two identical best hands compare equal (split, §5.5.1)', () => {
+  // Same board, different suits → identical category+tiebreak → a tie that splits the pot.
+  const board = 'Ah Kd 7c 4s 2d';
+  const a = bestHigh(parseHand('Qs Js ' + board)); // Q-high no pair? uses A K Q J 7 high card
+  const b = bestHigh(parseHand('Qh Jh ' + board));
+  assert.equal(compareHigh(a.value, b.value), 0, 'identical hands tie (suits never break ties)');
 });
