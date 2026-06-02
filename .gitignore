@@ -4,7 +4,9 @@ dist/
 .DS_Store
 coverage/
 vm/.data/
-apps/relay-go/relay
-apps/indexer-go/indexer
+# Go build artifacts (binaries), NOT the relay/ and indexer/ package subdirectories.
+*.exe
+apps/relay-go/relay-go
+apps/indexer-go/indexer-go
 *.log
 .env.local
