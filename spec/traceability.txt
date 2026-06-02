@@ -87,12 +87,12 @@ REQ-TEST-006: traced -> [packages/sdk/test/adversarial.test.ts] tests [packages/
 REQ-TEST-007: planned (later phase)
 REQ-TX-001: traced -> [packages/script-templates-ts/src/interpreter.ts] tests [packages/script-templates-ts/test/templates.test.ts]
 REQ-TX-002: traced -> [packages/tx-builder/src/txbuilder.ts] tests [packages/tx-builder/test/txbuilder.test.ts]
-REQ-TX-003: planned (later phase)
+REQ-TX-003: traced -> [packages/tx-builder/src/fallback.ts] tests [packages/tx-builder/test/fallback.test.ts]
 REQ-TX-004: traced -> [packages/script-templates-ts/src/opcodes.ts] tests [packages/script-templates-ts/test/templates.test.ts]
 REQ-TX-005: traced -> [packages/script-templates-ts/src/templates.ts] tests [packages/tx-builder/test/txbuilder.test.ts]
-REQ-TX-006: planned (later phase)
+REQ-TX-006: traced -> [packages/tx-builder/src/fallback.ts, packages/engine/src/fsm.ts] tests [packages/tx-builder/test/fallback.test.ts, packages/sdk/test/adversarial.test.ts]
 REQ-TX-007: planned (later phase)
-REQ-TX-008: planned (later phase)
+REQ-TX-008: traced -> [packages/tx-builder/src/fallback.ts] tests [packages/tx-builder/test/fallback.test.ts]
 REQ-TX-009: planned (later phase)
 REQ-TX-010: traced -> [packages/script-templates-ts/src/templates.ts, tools/lint-opreturn.ts] tests [packages/script-templates-ts/test/templates.test.ts]
 REQ-TX-011: traced -> [packages/script-templates-ts/src/script.ts] tests [packages/script-templates-ts/test/templates.test.ts]
