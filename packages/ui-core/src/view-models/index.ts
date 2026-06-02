@@ -3,3 +3,6 @@ export * from './showdown.ts';
 export * from './signing.ts';
 export * from './lobby.ts';
 export * from './network-lobby.ts';
+export * from './table-layout.ts';
+export * from './bet-sizing.ts';
+export * from './wallet-panel.ts';

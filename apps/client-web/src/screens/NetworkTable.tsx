@@ -31,9 +31,7 @@ import {
 } from '@bsv-poker/ui-core/view-models';
 import {
   MainnetBanner,
-  SeatRing,
-  Board,
-  PotDisplay,
+  PokerTable,
   ActionBar,
   TimerBanner,
   SigningModal,
@@ -46,7 +44,8 @@ export function NetworkTable(props: {
   tableId: string;
   tableName: string;
   seated: SeatedResult;
-  onLeave: () => void;
+  /** Cash out the hero's remaining stack (final or current) to the wallet, then leave. */
+  onLeave: (heroStack: number) => void;
 }): React.JSX.Element {
   const { seated } = props;
   const heroSeat = seated.mySeat;
@@ -91,7 +90,9 @@ export function NetworkTable(props: {
     client
       .play()
       .then((s) => {
-        if (!cancelled) setFinalState(s);
+        // The interactive client is variant-generic (GameState); this screen renders the
+        // holdem-shaped projection. The runtime shape matches; narrow at the boundary.
+        if (!cancelled) setFinalState(s as HoldemState);
       })
       .catch((e) => {
         if (!cancelled) setError((e as Error).message);
@@ -104,8 +105,9 @@ export function NetworkTable(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const state = update?.state ?? null;
-  const heroHole = state ? (state.hole[heroSeat] ?? []) : [];
+  // GameState (variant-generic) narrowed to the holdem-shaped state this screen renders.
+  const state = (update?.state ?? null) as HoldemState | null;
+  const heroHole = state ? (state.hole?.[heroSeat] ?? []) : [];
   const legal = update?.yourTurn ? client.legalActions() : null;
 
   const vm = useMemo(() => {
@@ -151,8 +153,14 @@ export function NetworkTable(props: {
   const showdown = finalState ? showdownViewModel(finalState, startingStacks) : null;
   const settlement = finalState ? settlementViewModel(finalState, startingStacks) : null;
 
+  // Hero's remaining stack to cash back into the wallet on leave (final state if the hand
+  // completed, else the live state, else the starting buy-in).
+  const heroStack =
+    (finalState ?? state)?.seats.find((s) => s.seat === heroSeat)?.stack ??
+    (startingStacks.get(heroSeat) ?? 0);
+
   return (
-    <div style={{ maxWidth: 760, margin: '20px auto', padding: 16, display: 'grid', gap: 12 }}>
+    <div style={{ maxWidth: 860, margin: '20px auto', padding: 16, display: 'grid', gap: 12 }}>
       <MainnetBanner regtest={ruleset.currency === 'play-regtest'} />
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -160,8 +168,8 @@ export function NetworkTable(props: {
           {props.tableName} — blinds {ruleset.blinds.smallBlind}/{ruleset.blinds.bigBlind}
           {state ? ` (phase ${state.phase})` : ''}
         </h2>
-        <button type="button" onClick={props.onLeave}>
-          Leave
+        <button type="button" onClick={() => props.onLeave(heroStack)}>
+          Cash out &amp; leave
         </button>
       </div>
 
@@ -174,12 +182,7 @@ export function NetworkTable(props: {
 
       {vm && (
         <>
-          <SeatRing seats={vm.seats} seatLabel={seatLabel} />
-          <div>
-            <div style={{ color: '#aaa', fontSize: 13 }}>Community</div>
-            <Board board={vm.board} />
-          </div>
-          <PotDisplay pots={vm.pots} total={vm.totalPot} />
+          <PokerTable vm={vm} seatLabel={seatLabel} />
           <TimerBanner timer={vm.timer} />
 
           {!finalState ? (
@@ -190,6 +193,7 @@ export function NetworkTable(props: {
                 betAmount={betAmount}
                 onBetAmountChange={setBetAmount}
                 onAction={requestAction}
+                pot={vm.totalPot}
               />
             ) : (
               <div role="group" aria-label="actions" style={{ color: '#999', padding: 8 }}>
@@ -204,8 +208,12 @@ export function NetworkTable(props: {
                 Hand complete. A networked table plays one hand per session (the deck handshake is
                 per-hand); return to the lobby to play another.
               </p>
-              <button type="button" onClick={props.onLeave} style={{ padding: '8px 16px', fontSize: 16 }}>
-                Back to lobby
+              <button
+                type="button"
+                onClick={() => props.onLeave(heroStack)}
+                style={{ padding: '8px 16px', fontSize: 16 }}
+              >
+                Cash out &amp; back to lobby
               </button>
             </div>
           )}

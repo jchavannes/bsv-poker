@@ -17,6 +17,8 @@ export interface TableMeta {
   readonly bigBlind: number;
   readonly startingStack: number;
   readonly maxSeats: number;
+  /** Omaha Hi-Lo split (Omaha-8, REQ-FSM-007) — only meaningful for the omaha variant. */
+  readonly hiLo?: boolean;
 }
 
 export interface OpenTable {
@@ -51,7 +53,7 @@ export function rulesetFromMeta(meta: TableMeta): Ruleset {
     signingMode: 'A',
     currency: 'play-regtest',
     suitTiebreakHouseRule: false,
-    hiLo: false,
+    hiLo: meta.variant === 'omaha' ? (meta.hiLo ?? false) : false,
   };
 }
 

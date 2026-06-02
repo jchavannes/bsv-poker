@@ -9,15 +9,31 @@
  * on-chain custody/identity path is the Node SDK path (§A2.3), not this browser bundle.
  */
 
+/** Variant ids (structural mirror of protocol-types' Variant — ui-core stays import-light). */
+export type VariantId = 'holdem' | 'omaha' | 'stud' | 'draw' | 'razz';
+
+/** Seat-range metadata per variant (structural mirror of app-services VARIANT_INFO so the
+ * view-model can validate seat counts without importing app-services). The app passes the real
+ * VARIANT_INFO labels into the UI; these bounds keep the pure validation self-contained. */
+export const VARIANT_SEAT_RANGE: Record<VariantId, { readonly minSeats: number; readonly maxSeats: number }> = {
+  holdem: { minSeats: 2, maxSeats: 9 },
+  omaha: { minSeats: 2, maxSeats: 9 },
+  stud: { minSeats: 2, maxSeats: 8 },
+  draw: { minSeats: 2, maxSeats: 6 },
+  razz: { minSeats: 2, maxSeats: 8 },
+};
+
 /** The TableMeta shape consumed by app-services LobbyClient (kept structural to avoid importing
  * app-services into ui-core — ui-core must stay free of app-services). */
 export interface NetworkTableMeta {
   readonly name: string;
-  readonly variant: 'holdem';
+  readonly variant: VariantId;
   readonly smallBlind: number;
   readonly bigBlind: number;
   readonly startingStack: number;
   readonly maxSeats: number;
+  /** Omaha hi-lo split toggle (only meaningful for omaha). Carried in the meta for display. */
+  readonly hiLo?: boolean;
 }
 
 export interface SessionIdentity {
@@ -29,10 +45,13 @@ export interface SessionIdentity {
 
 export interface NetworkTableForm {
   readonly name: string;
+  readonly variant: VariantId;
   readonly smallBlind: number;
   readonly bigBlind: number;
   readonly startingStack: number;
   readonly maxSeats: number;
+  /** Omaha hi-lo split (ignored for other variants). */
+  readonly hiLo?: boolean;
 }
 
 export interface NetworkTableValidation {
@@ -78,21 +97,28 @@ export function validateNetworkTable(form: NetworkTableForm): NetworkTableValida
   if (!(form.startingStack >= form.bigBlind * 2)) {
     errors.push('Starting stack must be at least two big blinds.');
   }
-  if (!(Number.isInteger(form.maxSeats) && form.maxSeats >= 2 && form.maxSeats <= 9)) {
-    errors.push('Seats must be a whole number between 2 and 9.');
+  const range = VARIANT_SEAT_RANGE[form.variant];
+  if (!range) {
+    errors.push('Unknown variant.');
+  } else if (
+    !(Number.isInteger(form.maxSeats) && form.maxSeats >= range.minSeats && form.maxSeats <= range.maxSeats)
+  ) {
+    errors.push(`Seats must be a whole number between ${range.minSeats} and ${range.maxSeats} for this variant.`);
   }
   return { ok: errors.length === 0, errors };
 }
 
-/** Assemble the relay TableMeta from a validated form (Hold'em only in this phase). */
+/** Assemble the relay TableMeta from a validated form (any of the five variants). */
 export function metaFromNetworkForm(form: NetworkTableForm): NetworkTableMeta {
+  const hiLo = form.variant === 'omaha' ? Boolean(form.hiLo) : false;
   return {
     name: form.name.trim(),
-    variant: 'holdem',
+    variant: form.variant,
     smallBlind: form.smallBlind,
     bigBlind: form.bigBlind,
     startingStack: form.startingStack,
     maxSeats: form.maxSeats,
+    hiLo,
   };
 }
 

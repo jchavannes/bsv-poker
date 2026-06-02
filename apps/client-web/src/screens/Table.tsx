@@ -18,9 +18,7 @@ import {
 } from '@bsv-poker/ui-core/view-models';
 import {
   MainnetBanner,
-  SeatRing,
-  Board,
-  PotDisplay,
+  PokerTable,
   ActionBar,
   TimerBanner,
   SigningModal,
@@ -31,7 +29,8 @@ import {
 export function Table(props: {
   client: LocalTableClient;
   ruleset: Ruleset;
-  onLeave: () => void;
+  /** Cash out the hero's remaining stack to the wallet, then leave. */
+  onLeave: (heroStack: number) => void;
 }): React.JSX.Element {
   const { client, ruleset } = props;
   const heroSeat = client.getHeroSeat();
@@ -99,25 +98,22 @@ export function Table(props: {
     ? settlementViewModel(state, client.getStartingStacks())
     : null;
 
+  const heroStack = state.seats.find((s) => s.seat === heroSeat)?.stack ?? 0;
+
   return (
-    <div style={{ maxWidth: 760, margin: '20px auto', padding: 16, display: 'grid', gap: 12 }}>
+    <div style={{ maxWidth: 860, margin: '20px auto', padding: 16, display: 'grid', gap: 12 }}>
       <MainnetBanner regtest={ruleset.currency === 'play-regtest'} />
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h2 style={{ margin: 0 }}>
           Hold'em — blinds {ruleset.blinds.smallBlind}/{ruleset.blinds.bigBlind} (phase {state.phase})
         </h2>
-        <button type="button" onClick={props.onLeave}>
-          Leave
+        <button type="button" onClick={() => props.onLeave(heroStack)}>
+          Cash out &amp; leave
         </button>
       </div>
 
-      <SeatRing seats={vm.seats} />
-      <div>
-        <div style={{ color: '#aaa', fontSize: 13 }}>Community</div>
-        <Board board={vm.board} />
-      </div>
-      <PotDisplay pots={vm.pots} total={vm.totalPot} />
+      <PokerTable vm={vm} />
       <TimerBanner timer={vm.timer} />
 
       {!state.handComplete ? (
@@ -127,6 +123,7 @@ export function Table(props: {
           betAmount={betAmount}
           onBetAmountChange={setBetAmount}
           onAction={requestAction}
+          pot={vm.totalPot}
         />
       ) : (
         <div style={{ display: 'grid', gap: 8 }}>

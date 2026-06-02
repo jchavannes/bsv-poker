@@ -34,31 +34,32 @@ test('generateIdentity defaults to platform crypto and yields distinct pubs', ()
 
 test('validateNetworkTable rejects bad input and accepts a sane table', () => {
   assert.equal(
-    validateNetworkTable({ name: '', smallBlind: 1, bigBlind: 2, startingStack: 100, maxSeats: 2 }).ok,
+    validateNetworkTable({ name: '', variant: 'holdem', smallBlind: 1, bigBlind: 2, startingStack: 100, maxSeats: 2 }).ok,
     false,
   );
   assert.equal(
-    validateNetworkTable({ name: 'T', smallBlind: 0, bigBlind: 2, startingStack: 100, maxSeats: 2 }).ok,
+    validateNetworkTable({ name: 'T', variant: 'holdem', smallBlind: 0, bigBlind: 2, startingStack: 100, maxSeats: 2 }).ok,
     false,
   );
   assert.equal(
-    validateNetworkTable({ name: 'T', smallBlind: 2, bigBlind: 2, startingStack: 100, maxSeats: 2 }).ok,
+    validateNetworkTable({ name: 'T', variant: 'holdem', smallBlind: 2, bigBlind: 2, startingStack: 100, maxSeats: 2 }).ok,
     false,
   );
   assert.equal(
-    validateNetworkTable({ name: 'T', smallBlind: 1, bigBlind: 2, startingStack: 3, maxSeats: 2 }).ok,
+    validateNetworkTable({ name: 'T', variant: 'holdem', smallBlind: 1, bigBlind: 2, startingStack: 3, maxSeats: 2 }).ok,
     false,
   );
   assert.equal(
-    validateNetworkTable({ name: 'T', smallBlind: 1, bigBlind: 2, startingStack: 100, maxSeats: 1 }).ok,
+    validateNetworkTable({ name: 'T', variant: 'holdem', smallBlind: 1, bigBlind: 2, startingStack: 100, maxSeats: 1 }).ok,
     false,
   );
   assert.equal(
-    validateNetworkTable({ name: 'T', smallBlind: 1, bigBlind: 2, startingStack: 100, maxSeats: 10 }).ok,
+    validateNetworkTable({ name: 'T', variant: 'holdem', smallBlind: 1, bigBlind: 2, startingStack: 100, maxSeats: 10 }).ok,
     false,
   );
   const ok = validateNetworkTable({
     name: '  Friday  ',
+    variant: 'holdem',
     smallBlind: 1,
     bigBlind: 2,
     startingStack: 100,
@@ -68,9 +69,10 @@ test('validateNetworkTable rejects bad input and accepts a sane table', () => {
   assert.deepEqual(ok.errors, []);
 });
 
-test('metaFromNetworkForm trims the name and fixes variant to holdem', () => {
+test('metaFromNetworkForm trims the name and carries the chosen variant', () => {
   const meta = metaFromNetworkForm({
     name: '  HU  ',
+    variant: 'holdem',
     smallBlind: 1,
     bigBlind: 2,
     startingStack: 100,
