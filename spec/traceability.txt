@@ -120,7 +120,7 @@ REQ-APP-002: traced -> [packages/app-services/src/network.ts] tests [packages/ap
 REQ-APP-003: traced -> [packages/ui-core/src/view-models/table.ts] tests [packages/ui-core/test/table-vm.test.ts]
 REQ-APP-010: planned (later phase)
 REQ-APP-011: planned (later phase)
-REQ-APP-012: planned (later phase)
+REQ-APP-012: traced -> [packages/adapters/src/index.ts, packages/adapters/src/contracts.ts] tests [packages/adapters/test/architecture.test.ts]
 REQ-APP-020: planned (later phase)
 REQ-APP-021: planned (later phase)
 REQ-APP-022: planned (later phase)

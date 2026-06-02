@@ -94,6 +94,7 @@ export const TRACE_MAP: Readonly<Record<string, Trace>> = {
   'REQ-PROD-008': { files: ['packages/ui-core/src/view-models/showdown.ts'], tests: ['packages/ui-core/test/showdown-signing-lobby-vm.test.ts'] },
   'REQ-PROD-010': { files: ['packages/sdk/src/table.ts', 'packages/app-services/src/transcript.ts'], tests: ['packages/sdk/test/table.test.ts'] },
   'REQ-PROD-012': { files: ['packages/app-services/src/network-gate.ts'], tests: ['packages/app-services/test/network-gate.test.ts'] },
+  'REQ-APP-012': { files: ['packages/adapters/src/index.ts', 'packages/adapters/src/contracts.ts'], tests: ['packages/adapters/test/architecture.test.ts'] },
   'REQ-PROD-002': { files: ['packages/ui-core/src/view-models/lobby.ts', 'packages/app-services/src/local-table-client.ts'], tests: ['packages/app-services/test/local-table-client.test.ts'] },
   'REQ-PROD-003': { files: ['packages/ui-core/src/view-models/lobby.ts'], tests: ['packages/ui-core/test/showdown-signing-lobby-vm.test.ts'] },
   'REQ-PROD-004': { files: ['packages/ui-core/src/view-models/table.ts'], tests: ['packages/ui-core/test/table-vm.test.ts'] },
