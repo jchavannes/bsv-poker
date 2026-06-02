@@ -61,11 +61,33 @@ export class RealBsvNode {
     return r.height as number;
   }
 
-  /** Mine a regtest block paying out to `payoutPubHex` (compressed secp256k1 pubkey hex). */
-  async generateBlock(payoutPubHex: string): Promise<{ blockHash: string; txs: number }> {
+  /** Mine a regtest block paying out to `payoutPubHex`; returns the coinbase txid too. */
+  async generateBlock(
+    payoutPubHex: string,
+  ): Promise<{ blockHash: string; txs: number; coinbaseTxid: string }> {
     const r = await this.call({ cmd: 'node.generate', payout_pk_hex: payoutPubHex });
     if (!r.ok) throw new Error(`node.generate failed: ${JSON.stringify(r)}`);
-    return { blockHash: r.block_hash as string, txs: r.txs as number };
+    return { blockHash: r.block_hash as string, txs: r.txs as number, coinbaseTxid: (r.coinbase_txid as string) ?? '' };
+  }
+
+  /** Submit a raw (signed) tx; the node validates it through its REAL Script interpreter. */
+  async submitTx(rawTxHex: string): Promise<{ ok: boolean; reason: string; txid: string }> {
+    const r = await this.call({ cmd: 'node.submit', raw_tx_hex: rawTxHex });
+    return { ok: r.ok === true, reason: (r.reason as string) ?? '', txid: (r.txid as string) ?? '' };
+  }
+
+  /** Read-only UTXO status for an outpoint (REQ-NET-004 against the real node). */
+  async outpointStatus(txidHex: string, vout: number): Promise<{ unspent: boolean; value: number }> {
+    const r = await this.call({ cmd: 'node.outpoint', txid_hex: txidHex, vout });
+    if (!r.ok) throw new Error(`node.outpoint failed: ${JSON.stringify(r)}`);
+    return { unspent: r.unspent === true, value: (r.value as number) ?? 0 };
+  }
+
+  /** The current size of the node's UTXO set. */
+  async utxoCount(): Promise<number> {
+    const r = await this.call({ cmd: 'node.utxo_count' });
+    if (!r.ok) throw new Error(`node.utxo_count failed: ${JSON.stringify(r)}`);
+    return r.count as number;
   }
 
   async status(): Promise<NodeResponse> {

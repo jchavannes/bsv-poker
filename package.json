@@ -26,7 +26,8 @@
     "reconnect-e2e": "node tools/reconnect-e2e.ts",
     "microbet-e2e": "node tools/microbet-e2e.ts",
     "wallet-e2e": "node tools/wallet-e2e.ts",
-    "ci": "node tools/ci.ts"
+    "ci": "node tools/ci.ts",
+    "onchain-e2e": "node tools/onchain-e2e.ts"
   },
   "devDependencies": {
     "@types/node": "22",
