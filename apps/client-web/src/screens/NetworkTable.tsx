@@ -87,18 +87,22 @@ export function NetworkTable(props: {
       if (!u.complete) setStatus('');
     });
     let cancelled = false;
+    // A continuous table: play hand after hand (fresh shuffle, carried stacks, rotating button)
+    // until the player leaves (client.abort()) or the table can't continue.
     client
-      .play()
-      .then((s) => {
+      .playSession({ maxHands: 100 })
+      .then(() => {
         // The interactive client is variant-generic (GameState); this screen renders the
         // holdem-shaped projection. The runtime shape matches; narrow at the boundary.
-        if (!cancelled) setFinalState(s as HoldemState);
+        const s = client.getState();
+        if (!cancelled && s) setFinalState(s as HoldemState);
       })
       .catch((e) => {
         if (!cancelled) setError((e as Error).message);
       });
     return () => {
       cancelled = true;
+      client.abort();
       off();
     };
     // client is stable for the life of this component.

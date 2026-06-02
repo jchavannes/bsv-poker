@@ -22,6 +22,7 @@
     "multiplayer-e2e": "node tools/multiplayer-e2e.ts",
     "lobby-e2e": "node tools/lobby-e2e.ts",
     "multi-e2e": "node tools/multi-e2e.ts",
+    "session-e2e": "node tools/session-e2e.ts",
     "microbet-e2e": "node tools/microbet-e2e.ts",
     "wallet-e2e": "node tools/wallet-e2e.ts",
     "ci": "node tools/ci.ts"

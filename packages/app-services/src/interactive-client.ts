@@ -31,6 +31,8 @@ export interface TablePlayer {
 interface Envelope {
   t: 'commit' | 'reveal' | 'action';
   seat: number;
+  /** Hand index within the session — separates each hand's commits/reveals/actions. */
+  hand: number;
   c?: string;
   r?: string;
   kind?: Action['kind'];
@@ -83,6 +85,7 @@ export class InteractiveNetworkedTableClient {
   private pendingAction: ((a: Action) => void) | null = null;
   private module: GenericGameModule | null = null;
   private state: GameState | null = null;
+  private aborted = false;
 
   constructor(opts: {
     relay: RelayClient;
@@ -105,6 +108,11 @@ export class InteractiveNetworkedTableClient {
     return () => {
       this.listeners = this.listeners.filter((x) => x !== cb);
     };
+  }
+
+  /** Stop a running session (e.g. the player leaves the table); the current hand finishes. */
+  abort(): void {
+    this.aborted = true;
   }
 
   /** Submit the local player's action when it is their turn (no-op otherwise). */
@@ -149,8 +157,8 @@ export class InteractiveNetworkedTableClient {
   private received(pred: (e: Envelope) => boolean): Envelope | undefined {
     return this.inbox.find(pred);
   }
-  private peerActions(seat: number): Envelope[] {
-    return this.inbox.filter((e) => e.t === 'action' && e.seat === seat);
+  private peerActions(seat: number, hand: number): Envelope[] {
+    return this.inbox.filter((e) => e.t === 'action' && e.seat === seat && e.hand === hand);
   }
   private async awaitCond(done: () => boolean, timeoutMs: number): Promise<void> {
     const deadline = Date.now() + timeoutMs;
@@ -174,84 +182,136 @@ export class InteractiveNetworkedTableClient {
     }
   }
 
-  /** Run the hand: subscribe, handshake, deal, then drive turns until the hand completes. */
-  async play(): Promise<GameState> {
+  private subscribe(): void {
+    if (this.unsub) return;
     this.unsub = this.relay.subscribe(this.tableId, (text) => {
       try {
         const env = JSON.parse(text) as Envelope;
-        if (process.env.MP_DEBUG) console.error(`[icx seat${this.mySeat}] rx ${env.t} seat=${env.seat}`);
+        if (process.env.MP_DEBUG) console.error(`[icx seat${this.mySeat}] rx ${env.t} h${env.hand} seat=${env.seat}`);
         this.inbox.push(env);
       } catch {
         /* keepalive */
       }
     });
-    if (process.env.MP_DEBUG) console.error(`[icx seat${this.mySeat}] subscribed to ${this.tableId}`);
-    try {
-      const commitEnv: Envelope = { t: 'commit', seat: this.mySeat, c: bytesToHex(sha256(this.entropy)) };
-      const revealEnv: Envelope = { t: 'reveal', seat: this.mySeat, r: bytesToHex(this.entropy) };
-      const allCommits = (): boolean =>
-        this.seats.every((s) => this.received((e) => e.t === 'commit' && e.seat === s.seat));
-      const allReveals = (): boolean =>
-        this.seats.every((s) => this.received((e) => e.t === 'reveal' && e.seat === s.seat));
-      await this.gossip([commitEnv], allCommits);
-      // keep re-sending the commit alongside the reveal so late-subscribing peers still get it
-      await this.gossip([commitEnv, revealEnv], allReveals);
-      const entropies: Uint8Array[] = [];
-      for (const s of this.seats) {
-        const commit = this.received((e) => e.t === 'commit' && e.seat === s.seat)!;
-        const reveal = this.received((e) => e.t === 'reveal' && e.seat === s.seat)!;
-        const r = hexToBytes(reveal.r!);
-        if (bytesToHex(sha256(r)) !== commit.c) throw new Error(`bad reveal for seat ${s.seat}`);
-        entropies.push(r);
-      }
-      const w = new ByteWriter();
-      for (const e of entropies) for (const b of e) w.u8(b);
-      const deck: Card[] = seededShuffle(sha256(w.toBytes()), 52);
+  }
 
-      this.module = createGameModule(this.ruleset.variant, deck);
-      this.state = this.module.init(
-        this.ruleset,
-        this.seats.map((s) => ({ seat: s.seat, stack: s.stack })),
-      );
+  /** Run ONE hand at `handNo` over `seats` with `buttonIndex`, using `entropy` for the shuffle. */
+  private async playOneHand(
+    handNo: number,
+    seats: TablePlayer[],
+    buttonIndex: number,
+    entropy: Uint8Array,
+  ): Promise<GameState> {
+    const commitEnv: Envelope = { t: 'commit', seat: this.mySeat, hand: handNo, c: bytesToHex(sha256(entropy)) };
+    const revealEnv: Envelope = { t: 'reveal', seat: this.mySeat, hand: handNo, r: bytesToHex(entropy) };
+    const has = (t: 'commit' | 'reveal', seat: number): boolean =>
+      !!this.received((e) => e.t === t && e.seat === seat && e.hand === handNo);
+    await this.gossip([commitEnv], () => seats.every((s) => has('commit', s.seat)));
+    await this.gossip([commitEnv, revealEnv], () => seats.every((s) => has('reveal', s.seat)));
+
+    const entropies: Uint8Array[] = [];
+    for (const s of seats) {
+      const commit = this.received((e) => e.t === 'commit' && e.seat === s.seat && e.hand === handNo)!;
+      const reveal = this.received((e) => e.t === 'reveal' && e.seat === s.seat && e.hand === handNo)!;
+      const r = hexToBytes(reveal.r!);
+      if (bytesToHex(sha256(r)) !== commit.c) throw new Error(`bad reveal for seat ${s.seat}`);
+      entropies.push(r);
+    }
+    const w = new ByteWriter();
+    for (const e of entropies) for (const b of e) w.u8(b);
+    const deck: Card[] = seededShuffle(sha256(w.toBytes()), 52);
+
+    this.module = createGameModule(this.ruleset.variant, deck, buttonIndex);
+    this.state = this.module.init(this.ruleset, seats.map((s) => ({ seat: s.seat, stack: s.stack })));
+    this.emit();
+
+    const cursor = new Map<number, number>();
+    while (!this.state.handComplete) {
+      const toAct = this.state.betting.toAct;
+      if (toAct === null) break;
+      if (toAct === this.mySeat) {
+        const action = await new Promise<Action>((res) => {
+          this.pendingAction = res;
+          this.emit(); // your turn (legal actions in the update)
+        });
+        this.state = this.module.apply(this.state, action);
+        await this.publish({
+          t: 'action',
+          seat: this.mySeat,
+          hand: handNo,
+          kind: action.kind,
+          amount: action.amount,
+          ...(action.discard ? { discard: action.discard } : {}),
+        });
+      } else {
+        const seen = cursor.get(toAct) ?? 0;
+        await this.awaitCond(() => this.peerActions(toAct, handNo).length > seen, 120000);
+        const env = this.peerActions(toAct, handNo)[seen]!;
+        cursor.set(toAct, seen + 1);
+        this.state = this.module.apply(this.state, {
+          kind: env.kind!,
+          seat: toAct,
+          amount: env.amount ?? 0,
+          ...(env.discard ? { discard: env.discard } : {}),
+        });
+      }
       this.emit();
+    }
+    this.emit(true);
+    return this.state;
+  }
 
-      const cursor = new Map<number, number>();
-      while (!this.state.handComplete) {
-        const toAct = this.state.betting.toAct;
-        if (toAct === null) break;
-        if (toAct === this.mySeat) {
-          // Set the pending resolver BEFORE emitting, so a handler that calls submitAction()
-          // synchronously inside onUpdate is not dropped.
-          const action = await new Promise<Action>((res) => {
-            this.pendingAction = res;
-            this.emit(); // your turn (legal actions in the update)
-          });
-          this.state = this.module.apply(this.state, action);
-          await this.publish({
-            t: 'action',
-            seat: this.mySeat,
-            kind: action.kind,
-            amount: action.amount,
-            ...(action.discard ? { discard: action.discard } : {}),
-          });
-        } else {
-          const seen = cursor.get(toAct) ?? 0;
-          await this.awaitCond(() => this.peerActions(toAct).length > seen, 60000);
-          const env = this.peerActions(toAct)[seen]!;
-          cursor.set(toAct, seen + 1);
-          this.state = this.module.apply(this.state, {
-            kind: env.kind!,
-            seat: toAct,
-            amount: env.amount ?? 0,
-            ...(env.discard ? { discard: env.discard } : {}),
-          });
-        }
-        this.emit();
-      }
-      this.emit(true);
-      return this.state;
+  /** Single hand (subscribe + one hand at index 0, button 0). */
+  async play(): Promise<GameState> {
+    this.subscribe();
+    try {
+      return await this.playOneHand(0, this.seats, 0, this.entropy);
     } finally {
       this.unsub?.();
+      this.unsub = null;
     }
   }
+
+  /**
+   * Continuous table: play hand after hand — fresh per-hand entropy (REQ-CRYPTO-010), carried
+   * stacks, rotating button — until `maxHands`, only one player has chips, or this player busts.
+   * onUpdate fires throughout (state.handNumber distinguishes hands).
+   */
+  async playSession(opts?: { maxHands?: number }): Promise<void> {
+    const maxHands = opts?.maxHands ?? Number.POSITIVE_INFINITY;
+    this.subscribe();
+    // running stacks per ORIGINAL seat number, carried hand to hand
+    const stacks = new Map<number, number>(this.seats.map((s) => [s.seat, s.stack]));
+    let button = 0;
+    try {
+      for (let hand = 0; hand < maxHands; hand++) {
+        if (this.aborted) break;
+        const participants = this.seats.filter((s) => (stacks.get(s.seat) ?? 0) > 0);
+        if (participants.length < 2) break; // table can't continue
+        if (!participants.some((p) => p.seat === this.mySeat)) break; // I busted → I'm out
+        const seats: TablePlayer[] = participants.map((s) => ({ seat: s.seat, stack: stacks.get(s.seat)! }));
+        const buttonIndex = button % seats.length;
+        // fresh, per-hand entropy bound to the hand index (a new N-party shuffle each hand)
+        const handEntropy = sha256(concat(this.entropy, u32(hand)));
+        const final = await this.playOneHand(hand, seats, buttonIndex, handEntropy);
+        for (const s of final.seats) stacks.set(s.seat, s.stack);
+        button += 1;
+      }
+    } finally {
+      this.unsub?.();
+      this.unsub = null;
+    }
+  }
+}
+
+function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+function u32(n: number): Uint8Array {
+  const w = new ByteWriter();
+  w.u32(n);
+  return w.toBytes();
 }
