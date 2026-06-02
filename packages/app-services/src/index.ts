@@ -14,3 +14,5 @@ export * from './network-gate.ts';
 export * from './observability.ts';
 export * from './persistence.ts';
 export * from './message-validation.ts';
+export * from './errors.ts';
+export * from './network-modes.ts';

@@ -132,8 +132,8 @@ REQ-APP-027: traced -> [apps/client-desktop/src-tauri/src/main.rs] tests [apps/c
 REQ-APP-028: traced -> [apps/client-desktop/src-tauri/src/main.rs] tests [apps/client-desktop/src-tauri/src/main.rs]
 REQ-APP-029: traced -> [packages/app-services/src/network-gate.ts] tests [packages/app-services/test/network-gate.test.ts]
 REQ-APP-030: traced -> [packages/app-services/src/network-gate.ts] tests [packages/app-services/test/network-gate.test.ts]
-REQ-APP-040: planned (later phase)
-REQ-APP-041: planned (later phase)
+REQ-APP-040: traced -> [packages/app-services/src/network-modes.ts] tests [packages/app-services/test/errors-modes.test.ts]
+REQ-APP-041: traced -> [packages/app-services/src/network-modes.ts] tests [packages/app-services/test/errors-modes.test.ts]
 REQ-APP-042: traced -> [apps/client-web/src/App.tsx] tests [tests/web-interaction-rules.test.ts]
 REQ-APP-043: traced -> [packages/adapters/src/real-node.ts] tests [tools/node-e2e.ts]
 REQ-APP-044: planned (later phase)
@@ -148,7 +148,7 @@ REQ-APP-070: traced -> [packages/app-services/src/network.ts, apps/relay-go/rela
 REQ-APP-071: traced -> [packages/app-services/src/lobby.ts, packages/app-services/src/network.ts] tests [tools/lobby-e2e.ts]
 REQ-APP-072: traced -> [packages/app-services/src/network.ts] tests [packages/app-services/test/network.test.ts]
 REQ-APP-073: traced -> [packages/app-services/src/network.ts] tests [packages/app-services/test/network.test.ts]
-REQ-APP-074: planned (later phase)
+REQ-APP-074: traced -> [packages/app-services/src/network-modes.ts] tests [packages/app-services/test/errors-modes.test.ts]
 REQ-APP-075: traced -> [packages/app-services/src/interactive-client.ts] tests [tools/reconnect-e2e.ts]
 REQ-APP-076: planned (later phase)
 REQ-APP-080: traced -> [packages/ui-core/src/view-models/signing.ts] tests [packages/ui-core/test/showdown-signing-lobby-vm.test.ts]
@@ -167,7 +167,7 @@ REQ-APP-103: traced -> [packages/app-services/src/message-validation.ts] tests [
 REQ-APP-104: planned (later phase)
 REQ-APP-105: planned (later phase)
 REQ-APP-106: traced -> [packages/app-services/src/network-gate.ts] tests [packages/app-services/test/network-gate.test.ts]
-REQ-APP-110: planned (later phase)
+REQ-APP-110: traced -> [packages/app-services/src/errors.ts] tests [packages/app-services/test/errors-modes.test.ts]
 REQ-APP-111: traced -> [packages/engine/src/fsm.ts] tests [packages/sdk/test/adversarial.test.ts]
 REQ-APP-112: traced -> [packages/app-services/src/network-gate.ts] tests [packages/app-services/test/network-gate.test.ts]
 REQ-APP-113: traced -> [packages/tx-builder/src/fallback.ts] tests [packages/tx-builder/test/fallback.test.ts]
