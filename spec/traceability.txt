@@ -118,7 +118,7 @@ REQ-WALLET-005: traced -> [packages/adapters/src/real-channel.ts, tools/microbet
 REQ-APP-001: traced -> [packages/wallet-custody/src/custody.ts] tests [packages/wallet-custody/test/custody.test.ts]
 REQ-APP-002: traced -> [packages/app-services/src/network.ts] tests [packages/app-services/test/network.test.ts]
 REQ-APP-003: traced -> [packages/ui-core/src/view-models/table.ts] tests [packages/ui-core/test/table-vm.test.ts]
-REQ-APP-010: planned (later phase)
+REQ-APP-010: traced -> [packages/engine/src/fsm.ts, packages/sdk/src/table.ts] tests [packages/sdk/test/table.test.ts]
 REQ-APP-011: planned (later phase)
 REQ-APP-012: traced -> [packages/adapters/src/index.ts, packages/adapters/src/contracts.ts] tests [packages/adapters/test/architecture.test.ts]
 REQ-APP-020: planned (later phase)
@@ -147,14 +147,14 @@ REQ-APP-060: planned (later phase)
 REQ-APP-070: planned (later phase)
 REQ-APP-071: planned (later phase)
 REQ-APP-072: planned (later phase)
-REQ-APP-073: planned (later phase)
+REQ-APP-073: traced -> [packages/app-services/src/network.ts] tests [packages/app-services/test/network.test.ts]
 REQ-APP-074: planned (later phase)
-REQ-APP-075: planned (later phase)
+REQ-APP-075: traced -> [packages/app-services/src/interactive-client.ts] tests [tools/reconnect-e2e.ts]
 REQ-APP-076: planned (later phase)
 REQ-APP-080: planned (later phase)
-REQ-APP-081: planned (later phase)
-REQ-APP-082: planned (later phase)
-REQ-APP-083: planned (later phase)
+REQ-APP-081: traced -> [packages/wallet-custody/src/custody.ts] tests [packages/wallet-custody/test/custody.test.ts]
+REQ-APP-082: traced -> [packages/ui-core/src/view-models/signing.ts] tests [packages/ui-core/test/showdown-signing-lobby-vm.test.ts]
+REQ-APP-083: traced -> [packages/adapters/src/real-va.ts] tests [packages/adapters/test/conformance.test.ts]
 REQ-APP-090: traced -> [packages/tx-builder/src/wire.ts, tools/perf-suite.ts] tests [tools/perf-suite.ts]
 REQ-APP-091: traced -> [packages/tx-builder/src/fallback.ts, packages/engine/src/fsm.ts] tests [packages/sdk/test/adversarial.test.ts]
 REQ-APP-092: traced -> [packages/hand-eval/src/high.ts, tools/perf-suite.ts] tests [tools/perf-suite.ts]
