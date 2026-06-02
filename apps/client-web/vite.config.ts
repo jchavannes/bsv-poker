@@ -7,6 +7,9 @@ import react from '@vitejs/plugin-react';
 // referenced anywhere in this bundle.
 export default defineConfig({
   plugins: [react()],
+  // Relative asset paths so the bundle loads inside the Tauri webview (absolute /assets/* do not
+  // resolve under the tauri:// asset protocol → an empty window). Harmless for the web server too.
+  base: './',
   build: {
     target: 'es2022',
     outDir: 'dist',
