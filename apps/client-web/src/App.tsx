@@ -19,7 +19,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   LobbyClient,
-  LocalTableClient,
   RelayClient,
   WalletService,
   type WalletPersistence,
@@ -29,28 +28,23 @@ import {
   type TableMeta,
 } from '@bsv-poker/app-services';
 import {
-  rulesetFromForm,
   generateIdentity,
   buyInCheck,
   type NetworkTableForm,
   type SessionIdentity,
 } from '@bsv-poker/ui-core/view-models';
-import type { Ruleset } from '@bsv-poker/protocol-types';
 import { Connect } from './screens/Connect.tsx';
 import { NetworkLobby } from './screens/NetworkLobby.tsx';
 import { WaitingRoom } from './screens/WaitingRoom.tsx';
 import { NetworkTable } from './screens/NetworkTable.tsx';
-import { Lobby } from './screens/Lobby.tsx';
-import { Table } from './screens/Table.tsx';
-import type { TableCreateForm } from '@bsv-poker/ui-core/view-models';
 
+// Bots are NOT in this app — they are separate remote players over the relay (tools/bot-daemon.ts).
+// An in-process bot would share state with the human (a cheat), so there is no local-bot path here.
 type Screen =
   | { kind: 'connect' }
   | { kind: 'lobby' }
   | { kind: 'waiting' }
-  | { kind: 'networkTable'; tableId: string; tableName: string; seated: SeatedResult }
-  | { kind: 'practiceForm' }
-  | { kind: 'practiceTable'; client: LocalTableClient; ruleset: Ruleset };
+  | { kind: 'networkTable'; tableId: string; tableName: string; seated: SeatedResult };
 
 function metaFromForm(form: NetworkTableForm): TableMeta {
   // The form carries the chosen variant + hi-lo; the relay client is variant-generic so the
@@ -228,24 +222,6 @@ export function App(): React.JSX.Element {
     setScreen({ kind: 'lobby' });
   }, [wallet]);
 
-  function startPractice(form: TableCreateForm, botOpponents: number): void {
-    const ruleset = rulesetFromForm(form);
-    // Buy in for the practice table too (blocked if balance too low).
-    const check = buyInCheck(wallet.getBalance(), ruleset.minBuyIn);
-    if (!check.canAfford) {
-      setConnectError(check.message);
-      setScreen({ kind: lobbyRef.current ? 'lobby' : 'connect' });
-      return;
-    }
-    wallet.buyIn(ruleset.minBuyIn, 'practice');
-    activeTableId.current = 'practice';
-    activeBuyIn.current = ruleset.minBuyIn;
-    // The human chose how many bots; they always play seat 0, bots fill the rest.
-    const seatCount = Math.max(2, Math.min(9, botOpponents + 1));
-    const client = new LocalTableClient({ ruleset, heroSeat: 0, seatCount });
-    setScreen({ kind: 'practiceTable', client, ruleset });
-  }
-
   switch (screen.kind) {
     case 'connect':
       return (
@@ -255,7 +231,6 @@ export function App(): React.JSX.Element {
           connecting={connecting}
           error={connectError}
           onConnect={(base) => void connect(base)}
-          onPractice={() => setScreen({ kind: 'practiceForm' })}
         />
       );
 
@@ -270,7 +245,6 @@ export function App(): React.JSX.Element {
           createError={connectError}
           onCreate={(form) => void createTable(form)}
           onJoin={joinTable}
-          onPractice={() => setScreen({ kind: 'practiceForm' })}
           onDisconnect={() => {
             lobbyRef.current = null;
             setScreen({ kind: 'connect' });
@@ -297,27 +271,6 @@ export function App(): React.JSX.Element {
           tableId={screen.tableId}
           tableName={screen.tableName}
           seated={screen.seated}
-          wallet={wallet}
-          walletState={walletState}
-          onLeave={cashOutAndLeave}
-        />
-      );
-
-    case 'practiceForm':
-      return (
-        <Lobby
-          wallet={wallet}
-          walletState={walletState}
-          onStart={startPractice}
-          onBack={() => setScreen(lobbyRef.current ? { kind: 'lobby' } : { kind: 'connect' })}
-        />
-      );
-
-    case 'practiceTable':
-      return (
-        <Table
-          client={screen.client}
-          ruleset={screen.ruleset}
           wallet={wallet}
           walletState={walletState}
           onLeave={cashOutAndLeave}

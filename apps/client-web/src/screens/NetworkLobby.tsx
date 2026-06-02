@@ -41,7 +41,6 @@ export function NetworkLobby(props: {
   createError: string | null;
   onCreate: (form: NetworkTableForm) => void;
   onJoin: (table: OpenTable) => void;
-  onPractice: () => void;
   onDisconnect: () => void;
 }): React.JSX.Element {
   const { lobby, wallet, walletState } = props;
@@ -233,13 +232,11 @@ export function NetworkLobby(props: {
       </section>
 
       <section style={{ border: '1px solid #444', borderRadius: 8, padding: 12 }}>
-        <h2 style={{ margin: 0, fontSize: 18 }}>Offline</h2>
+        <h2 style={{ margin: 0, fontSize: 18 }}>Bots</h2>
         <p style={{ color: '#999', marginTop: 6 }}>
-          Heads-up Hold'em vs a simple bot, on the real engine — no relay needed.
+          Bots are separate remote players — run one in its own window and it joins your table over
+          the relay like any opponent: <code>node tools/bot-daemon.ts --relay {props.relay} --gui 9100</code>
         </p>
-        <button type="button" onClick={props.onPractice} style={{ padding: '8px 16px', fontSize: 16 }}>
-          Practice vs bot
-        </button>
       </section>
     </div>
   );

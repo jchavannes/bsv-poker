@@ -9,7 +9,6 @@ export function Connect(props: {
   defaultRelay: string;
   identityId: string;
   onConnect: (relay: string) => void;
-  onPractice: () => void;
   connecting: boolean;
   error: string | null;
 }): React.JSX.Element {
@@ -53,9 +52,6 @@ export function Connect(props: {
           style={{ padding: '8px 16px', fontSize: 16 }}
         >
           {props.connecting ? 'Connecting…' : 'Connect'}
-        </button>
-        <button type="button" onClick={props.onPractice} style={{ padding: '8px 16px', fontSize: 16 }}>
-          Practice vs bot (offline)
         </button>
       </div>
     </div>
