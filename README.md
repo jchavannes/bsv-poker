@@ -1,5 +1,7 @@
 # bsv-poker
 
+[![CI](https://github.com/prof-faustus/bsv-poker/actions/workflows/ci.yml/badge.svg)](https://github.com/prof-faustus/bsv-poker/actions/workflows/ci.yml)
+
 A dealerless, non-custodial multiplayer **poker** platform on **Bitcoin SV** (post-Genesis,
 regtest by default). Built to the specifications in [`/spec`](./spec):
 
