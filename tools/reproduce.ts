@@ -20,6 +20,8 @@ import {
   settlementLocking,
   fairPlayLocking,
   fairPlayCommitment,
+  fairPlayEcLocking,
+  shuffleKeyCommitment,
   scriptSizeBytes,
   revealCommitment,
 } from '@bsv-poker/script-templates-ts';
@@ -109,6 +111,7 @@ function generate(): unknown {
     ),
     settlement: scriptSizeBytes(settlementLocking(FIXED_BINDING, PUB)),
     fairPlayPerCard: scriptSizeBytes(fairPlayLocking(FIXED_BINDING, fairPlayCommitment(PUB), PUB)),
+    fairPlayEcPerCard: scriptSizeBytes(fairPlayEcLocking(FIXED_BINDING, shuffleKeyCommitment(12345n))),
   };
   // §19.C per-hand transaction-count envelope for heads-up Hold'em (structurally derived from
   // §19.E: 1 funding + 2 entropy commits + shuffle-stage commits + 1 deal + 3 board reveals +

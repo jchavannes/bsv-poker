@@ -15,6 +15,18 @@
 | settlement | **147** | binding + `<winnerPub> OP_CHECKSIG` |
 | **fair-play (per card)** | **175** | binding + `OP_IF OP_DUP OP_HASH160 <cmt> OP_EQUALVERIFY OP_CHECKSIG OP_ELSE <pub> OP_CHECKSIG OP_ENDIF` |
 
+## In-script EC fair-play — IMPLEMENTED (v2, post-Genesis opcodes available now)
+
+The earlier HASH160-only fair-play was a fallback. The **real in-script EC derivation** is now
+implemented (`fairPlayEcLocking`, **measured 231 bytes** per card): the unlocking reveals the
+shuffle-key scalar `x` and `y`; the script verifies **(a)** `SHA-256(x)` equals the commitment
+(the party did not swap keys) and **(b)** the point is genuinely on secp256k1 —
+`y² ≡ x³ + 7 (mod p)` — computed in-script with the post-Genesis big-integer opcodes
+`OP_MUL`/`OP_MOD`/`OP_ADD`/`OP_NUMEQUALVERIFY` over the 256-bit field prime. A mismatched key or
+a forged off-curve `y` fails **inside** the interpreter (REQ-CRYPTO-006/009, P9). This is the
+GB2616862 shuffle-key/curve relation (§4.2) enforced on-chain; full in-script scalar-mult
+(`P = s·G`) remains a further upgrade.
+
 ## Fair-play scaling decision (REQ-CRYPTO-009 / RT-01 M3)
 
 GB2616862's worked fair-play script is a long nested `OP_IF/OP_ELSE` for **3 elements / 2 parties**.

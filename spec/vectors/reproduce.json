@@ -176,7 +176,8 @@
     "funding2of2": 183,
     "revealOrTimeout": 220,
     "settlement": 147,
-    "fairPlayPerCard": 175
+    "fairPlayPerCard": 175,
+    "fairPlayEcPerCard": 231
   },
   "perHandTxEnvelope": {
     "funding": 1,

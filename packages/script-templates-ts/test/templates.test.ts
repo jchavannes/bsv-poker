@@ -164,3 +164,56 @@ test('byte-size measurement (REQ-TX-011 / §19.C): sizes are computed, not asser
   assert.equal(bindingBytes(BIND).length, 8 + 32 + 4 + 32 + 1 + 32);
   for (const [, v] of Object.entries(sizes)) assert.ok(v > 0 && Number.isInteger(v));
 });
+
+test('in-script EC fair-play: committed on-curve shuffle key verifies; cheats fail INSIDE the interpreter (REQ-CRYPTO-006/009, §19.C)', async () => {
+  const {
+    SECP256K1_P,
+    shuffleKeyPoint,
+    shuffleKeyCommitment,
+    fairPlayEcLocking,
+    fairPlayEcUnlocking,
+  } = await import('../src/templates.ts');
+
+  // pick a scalar that is a valid shuffle-key x-coordinate (s^3+7 is a QR)
+  let s = 12345678901234567890n;
+  let pt = shuffleKeyPoint(s);
+  while (!pt) {
+    s += 1n;
+    pt = shuffleKeyPoint(s);
+  }
+  // the point really is on the curve
+  assert.equal((pt.y * pt.y) % SECP256K1_P, (((pt.x * pt.x % SECP256K1_P) * pt.x) % SECP256K1_P + 7n) % SECP256K1_P);
+
+  const locking = fairPlayEcLocking(BIND, shuffleKeyCommitment(s));
+
+  // positive: reveal the genuine committed key + its on-curve y → accepted
+  assert.equal(evaluate(fairPlayEcUnlocking(pt.x, pt.y), locking, ctx).ok, true);
+
+  // cheat 1: a DIFFERENT scalar (committed to a different key) → SHA256(x) mismatch fails inside
+  let s2 = s + 1000n;
+  let pt2 = shuffleKeyPoint(s2);
+  while (!pt2) {
+    s2 += 1n;
+    pt2 = shuffleKeyPoint(s2);
+  }
+  assert.equal(evaluate(fairPlayEcUnlocking(pt2.x, pt2.y), locking, ctx).ok, false);
+
+  // cheat 2: the committed x but a FORGED y not on the curve → curve check fails inside
+  assert.equal(evaluate(fairPlayEcUnlocking(pt.x, pt.y + 1n), locking, ctx).ok, false);
+});
+
+test('interpreter big-integer ops: 256-bit OP_MUL/OP_MOD round-trip', async () => {
+  const { encodeScriptNum, SECP256K1_P } = await import('../src/templates.ts');
+  // (p-1) * 2 mod p == p-2  → exercises >256-bit intermediate then OP_MOD
+  const locking = [
+    encodeScriptNum(SECP256K1_P - 1n),
+    encodeScriptNum(2n),
+    OP.OP_MUL,
+    encodeScriptNum(SECP256K1_P),
+    OP.OP_MOD,
+    encodeScriptNum(SECP256K1_P - 2n),
+    OP.OP_NUMEQUALVERIFY,
+    OP.OP_1,
+  ];
+  assert.equal(evaluate([], locking, ctx).ok, true);
+});

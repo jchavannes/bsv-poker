@@ -145,6 +145,12 @@ function run(script: Script, stack: Stack, ctx: ScriptContext): EvalResult {
           stack.push(a, b);
           break;
         }
+        case OP.OP_OVER: {
+          const a = pop();
+          const b = pop();
+          stack.push(b, a, b);
+          break;
+        }
         case OP.OP_EQUAL: {
           const a = pop();
           const b = pop();
@@ -175,6 +181,36 @@ function run(script: Script, stack: Stack, ctx: ScriptContext): EvalResult {
           stack.push(encodeNum(a + b));
           break;
         }
+        case OP.OP_SUB: {
+          const b = num(pop());
+          const a = num(pop());
+          stack.push(encodeNum(a - b));
+          break;
+        }
+        case OP.OP_MUL: {
+          const a = num(pop());
+          const b = num(pop());
+          stack.push(encodeNum(a * b));
+          break;
+        }
+        case OP.OP_MOD: {
+          const b = num(pop());
+          const a = num(pop());
+          if (b === 0n) return { ok: false, reason: 'OP_MOD by zero' };
+          // Euclidean-positive modulo (operands here are positive field values).
+          let r = a % b;
+          if (r < 0n) r += b < 0n ? -b : b;
+          stack.push(encodeNum(r));
+          break;
+        }
+        case OP.OP_NUMEQUAL: {
+          stack.push(num(pop()) === num(pop()) ? TRUE : FALSE);
+          break;
+        }
+        case OP.OP_NUMEQUALVERIFY: {
+          if (num(pop()) !== num(pop())) return { ok: false, reason: 'OP_NUMEQUALVERIFY failed' };
+          break;
+        }
         case OP.OP_CHECKSIG: {
           const pub = pop();
           const sig = pop();
@@ -188,10 +224,10 @@ function run(script: Script, stack: Stack, ctx: ScriptContext): EvalResult {
           break;
         }
         case OP.OP_CHECKMULTISIG: {
-          const n = num(pop());
+          const n = Number(num(pop()));
           const pubs: Uint8Array[] = [];
           for (let i = 0; i < n; i++) pubs.push(pop());
-          const m = num(pop());
+          const m = Number(num(pop()));
           const sigs: Uint8Array[] = [];
           for (let i = 0; i < m; i++) sigs.push(pop());
           pop(); // the extra element (legacy CHECKMULTISIG bug, retained)
@@ -227,20 +263,35 @@ function eq(a: Uint8Array, b: Uint8Array): boolean {
   return true;
 }
 
-function num(v: Uint8Array): number {
-  // minimal little-endian script number
-  let n = 0;
-  for (let i = 0; i < v.length; i++) n |= v[i]! << (8 * i);
-  return n;
-}
-function encodeNum(n: number): Uint8Array {
-  if (n === 0) return new Uint8Array(0);
-  const out: number[] = [];
-  let x = n;
-  while (x > 0) {
-    out.push(x & 0xff);
-    x >>= 8;
+/**
+ * Script number decode — little-endian, sign-magnitude, ARBITRARY PRECISION (post-Genesis BSV
+ * removed the 4-byte CScriptNum cap), as BigInt. The 256-bit field arithmetic for the in-script
+ * EC fair-play (§19.C) needs this.
+ */
+function num(v: Uint8Array): bigint {
+  if (v.length === 0) return 0n;
+  const bytes = [...v];
+  const last = bytes.length - 1;
+  let neg = false;
+  if ((bytes[last]! & 0x80) !== 0) {
+    neg = true;
+    bytes[last] = bytes[last]! & 0x7f;
   }
+  let r = 0n;
+  for (let i = bytes.length - 1; i >= 0; i--) r = (r << 8n) | BigInt(bytes[i]!);
+  return neg ? -r : r;
+}
+function encodeNum(n: bigint): Uint8Array {
+  if (n === 0n) return new Uint8Array(0);
+  const neg = n < 0n;
+  let x = neg ? -n : n;
+  const out: number[] = [];
+  while (x > 0n) {
+    out.push(Number(x & 0xffn));
+    x >>= 8n;
+  }
+  if ((out[out.length - 1]! & 0x80) !== 0) out.push(neg ? 0x80 : 0x00);
+  else if (neg) out[out.length - 1] = out[out.length - 1]! | 0x80;
   return Uint8Array.from(out);
 }
 

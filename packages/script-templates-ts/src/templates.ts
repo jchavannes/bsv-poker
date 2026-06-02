@@ -153,6 +153,97 @@ export function fairPlayForfeitUnlocking(sig: Uint8Array): Script {
   return [sig, OP.OP_0];
 }
 
+// ---- In-script EC fair-play (GB2616862 §19.C, post-Genesis opcodes) ---------
+// secp256k1 field prime p (y² = x³ + 7 mod p). p ≡ 3 (mod 4), so √a = a^((p+1)/4) mod p.
+export const SECP256K1_P = BigInt(
+  '0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f',
+);
+
+function modpow(base: bigint, exp: bigint, mod: bigint): bigint {
+  let result = 1n;
+  let b = base % mod;
+  let e = exp;
+  while (e > 0n) {
+    if (e & 1n) result = (result * b) % mod;
+    b = (b * b) % mod;
+    e >>= 1n;
+  }
+  return result;
+}
+
+/**
+ * The shuffle-key point P' = (s, √(s³+7)) for scalar `s` (GB2616862 §4.2): the private key is
+ * the x-coordinate `s`. Returns the point if s³+7 is a quadratic residue (a valid curve x), else
+ * null (the caller picks another s — a genuine shuffle key is chosen so this holds).
+ */
+export function shuffleKeyPoint(s: bigint): { x: bigint; y: bigint } | null {
+  const a = (((s * s % SECP256K1_P) * s) % SECP256K1_P + 7n) % SECP256K1_P;
+  const y = modpow(a, (SECP256K1_P + 1n) / 4n, SECP256K1_P);
+  if ((y * y) % SECP256K1_P !== a) return null; // a is not a QR → s is not a valid shuffle-key x
+  return { x: s, y };
+}
+
+/** Script-number encoding (little-endian, sign-magnitude) matching the interpreter's `num`. */
+export function encodeScriptNum(n: bigint): Uint8Array {
+  if (n === 0n) return new Uint8Array(0);
+  const neg = n < 0n;
+  let x = neg ? -n : n;
+  const out: number[] = [];
+  while (x > 0n) {
+    out.push(Number(x & 0xffn));
+    x >>= 8n;
+  }
+  if ((out[out.length - 1]! & 0x80) !== 0) out.push(neg ? 0x80 : 0x00);
+  else if (neg) out[out.length - 1]! |= 0x80;
+  return Uint8Array.from(out);
+}
+
+/** Commitment to a shuffle-key scalar x: SHA-256(encodeScriptNum(x)) — hides x until reveal. */
+export function shuffleKeyCommitment(x: bigint): Uint8Array {
+  return sha256(encodeScriptNum(x));
+}
+
+/**
+ * Fair-play (real, in-script EC — GB2616862 §4.7/§19.C). Proves the party used the shuffle key
+ * it committed: the unlocking reveals the scalar `x` (= the key's x-coordinate) and `y`; the
+ * script verifies (a) SHA-256(x) equals the commitment (the party did not swap keys), and (b) the
+ * point is genuinely on secp256k1: y² ≡ x³ + 7 (mod p). A mismatched key fails INSIDE the
+ * interpreter and the funds are forfeited (honest play is the rational outcome, no referee).
+ * Uses the post-Genesis big-integer opcodes (OP_MUL/OP_MOD/OP_ADD/OP_NUMEQUALVERIFY) — NOW
+ * available, replacing the earlier HASH160-only fallback.
+ */
+export function fairPlayEcLocking(b: BranchBinding, xCommitment: Uint8Array): Script {
+  const p = encodeScriptNum(SECP256K1_P);
+  const seven = encodeScriptNum(7n);
+  return [
+    ...branchBindingPrefix(b),
+    // stack from unlocking: [x, y]
+    OP.OP_OVER, // [x, y, x]
+    OP.OP_SHA256, // [x, y, H(x)]
+    xCommitment,
+    OP.OP_EQUALVERIFY, // verify H(x)==commitment → [x, y]
+    OP.OP_SWAP, // [y, x]
+    OP.OP_DUP,
+    OP.OP_DUP,
+    OP.OP_MUL,
+    OP.OP_MUL, // [y, x^3]
+    seven,
+    OP.OP_ADD, // [y, x^3+7]
+    p,
+    OP.OP_MOD, // [y, (x^3+7) mod p] = rhs
+    OP.OP_SWAP, // [rhs, y]
+    OP.OP_DUP,
+    OP.OP_MUL, // [rhs, y^2]
+    p,
+    OP.OP_MOD, // [rhs, y^2 mod p]
+    OP.OP_NUMEQUALVERIFY, // verify y^2 mod p == rhs → []
+    OP.OP_1, // success
+  ];
+}
+export function fairPlayEcUnlocking(x: bigint, y: bigint): Script {
+  return [encodeScriptNum(x), encodeScriptNum(y)];
+}
+
 /** The hiding-commitment preimage SHA-256(face‖blind) for reveal-or-timeout (core §4.5/§4.6). */
 export function revealPreimage(face: number, blind: Uint8Array): Uint8Array {
   const w = new ByteWriter();

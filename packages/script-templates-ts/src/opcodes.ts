@@ -33,7 +33,13 @@ export const OP = {
   OP_CHECKSIGVERIFY: 0xad,
   OP_CHECKMULTISIG: 0xae,
   OP_SWAP: 0x7c,
+  OP_OVER: 0x78,
   OP_ADD: 0x93,
+  OP_SUB: 0x94,
+  OP_MUL: 0x95,
+  OP_MOD: 0x97,
+  OP_NUMEQUAL: 0x9c,
+  OP_NUMEQUALVERIFY: 0x9d,
   // No-ops post-Genesis — present only to assert they enforce nothing (REQ-TX-001).
   OP_CHECKLOCKTIMEVERIFY: 0xb1,
   OP_CHECKSEQUENCEVERIFY: 0xb2,
