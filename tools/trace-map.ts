@@ -64,6 +64,7 @@ export const TRACE_MAP: Readonly<Record<string, Trace>> = {
   'REQ-NET-007': { files: ['apps/indexer-go/indexer/indexer.go'], tests: ['apps/indexer-go/indexer/indexer_test.go'] },
   'REQ-DATA-002': { files: ['packages/protocol-types/src/tx.ts', 'packages/engine/src/fsm.ts'], tests: ['packages/game-holdem/test/holdem.test.ts'] },
   'REQ-DATA-003': { files: ['packages/game-holdem/src/holdem.ts'], tests: ['packages/game-holdem/test/holdem.test.ts'] },
+  'REQ-DATA-004': { files: ['packages/adapters/src/fakes.ts'], tests: ['packages/adapters/test/seams.test.ts'] },
   'REQ-ENG-002': { files: ['tools/extract-requirements.ts'], tests: ['tools/reproduce.ts'] },
   'REQ-ENG-003': { files: ['tools/traceability.ts', 'tools/trace-map.ts'], tests: ['tools/traceability.ts'] },
   'REQ-TEST-005': { files: ['tools/reproduce.ts'], tests: ['tools/reproduce.ts'] },
