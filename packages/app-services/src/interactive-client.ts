@@ -23,6 +23,7 @@ import {
 import type { RelayClient, IndexerClient } from './network.ts';
 import { createGameModule, type GenericGameModule } from './game-registry.ts';
 import { deckFromEntropies } from './mp-shuffle.ts';
+import { seatedForNextHand } from './table-participants.ts';
 
 export interface TablePlayer {
   readonly seat: number;
@@ -283,7 +284,8 @@ export class InteractiveNetworkedTableClient {
     try {
       for (let hand = 0; hand < maxHands; hand++) {
         if (this.aborted) break;
-        const participants = this.seats.filter((s) => (stacks.get(s.seat) ?? 0) > 0);
+        // Participant set is (re)computed between hands and frozen for this hand (REQ-CRYPTO-011).
+        const participants = seatedForNextHand(this.seats, (seat) => stacks.get(seat) ?? 0);
         if (participants.length < 2) break; // table can't continue
         if (!participants.some((p) => p.seat === this.mySeat)) break; // I busted → I'm out
         const seats: TablePlayer[] = participants.map((s) => ({ seat: s.seat, stack: stacks.get(s.seat)! }));
