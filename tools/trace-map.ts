@@ -60,6 +60,8 @@ export const TRACE_MAP: Readonly<Record<string, Trace>> = {
   'REQ-TX-010': { files: ['packages/script-templates-ts/src/templates.ts', 'tools/lint-opreturn.ts'], tests: ['packages/script-templates-ts/test/templates.test.ts'] },
   'REQ-TX-011': { files: ['packages/script-templates-ts/src/script.ts'], tests: ['packages/script-templates-ts/test/templates.test.ts'] },
   'REQ-NET-001': { files: ['apps/relay-go/relay/server.go'], tests: ['apps/relay-go/relay/relay_test.go'] },
+  'REQ-NET-002': { files: ['packages/app-services/src/network.ts'], tests: ['packages/app-services/test/network.test.ts'] },
+  'REQ-NET-003': { files: ['packages/app-services/src/network.ts'], tests: ['packages/app-services/test/network.test.ts'] },
   'REQ-NET-004': { files: ['apps/indexer-go/indexer/indexer.go'], tests: ['apps/indexer-go/indexer/indexer_test.go'] },
   'REQ-NET-006': { files: ['apps/indexer-go/indexer/indexer.go'], tests: ['apps/indexer-go/indexer/indexer_test.go'] },
   'REQ-NET-007': { files: ['apps/indexer-go/indexer/indexer.go'], tests: ['apps/indexer-go/indexer/indexer_test.go'] },

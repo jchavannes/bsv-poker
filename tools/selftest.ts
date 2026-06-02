@@ -16,6 +16,8 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
 import { parseHand, type Card, type Ruleset, type Action } from '@bsv-poker/protocol-types';
 import { createHoldem } from '@bsv-poker/game-holdem';
+import { RelayClient, IndexerClient } from '@bsv-poker/app-services';
+import assert from 'node:assert/strict';
 
 const ROOT = process.cwd();
 const children: ChildProcess[] = [];
@@ -94,6 +96,39 @@ function runHand(): { transcript: Action[]; stateHash: string; payouts: unknown 
   return { transcript, stateHash: m.stateHash(s), payouts: s.payouts };
 }
 
+/** Exercise the real relay + indexer over HTTP: discovery, dual-path, deterministic projection. */
+async function exerciseNetwork(): Promise<void> {
+  const relay = new RelayClient('http://127.0.0.1:8091');
+  const indexer = new IndexerClient('http://127.0.0.1:8092');
+
+  // Tier-A discovery: two players announce presence and find each other.
+  await relay.heartbeat('alice', '127.0.0.1:6001');
+  await relay.heartbeat('bob', '127.0.0.1:6002');
+  const presence = await relay.listPresence();
+  assert.ok(presence.length >= 2, 'both players present');
+
+  // Create a table; both will publish/ingest to it.
+  const tableId = 'selftest-table';
+  await relay.createTable(tableId, 'Self-test HU');
+  assert.ok((await relay.listTables()).some((t) => t.id === tableId), 'table discoverable');
+
+  // Dual-path (REQ-NET-003): speed path = relay publish; canonical path = indexer ingest.
+  await relay.publish(tableId, new TextEncoder().encode('action:bet:6')); // no subscribers ⇒ 0 delivered, fine
+  const recs = [
+    { txid: 'tx-funding', class: 'Funding', tableId },
+    { txid: 'tx-deal', class: 'Deal', tableId },
+    { txid: 'tx-bet1', class: 'Action', tableId },
+  ];
+  for (const r of recs) assert.equal(await indexer.ingest(r), true, `ingest ${r.txid}`);
+  // dedup: re-ingest returns false
+  assert.equal(await indexer.ingest(recs[0]!), false, 'dedup by txid');
+
+  // The projection is the ordered valid-tx set, reconstructible identically by any client (P2).
+  const projection = await indexer.table(tableId);
+  assert.deepEqual(projection, ['tx-funding', 'tx-deal', 'tx-bet1'], 'deterministic ordered projection');
+  console.log(`[selftest] indexer projection for ${tableId}: [${projection.join(', ')}]`);
+}
+
 function cleanup(): void {
   for (const c of children) {
     try {
@@ -116,6 +151,9 @@ async function main(): Promise<void> {
     await waitHealthy('http://127.0.0.1:8091/healthz', 30000);
     await waitHealthy('http://127.0.0.1:8092/healthz', 30000);
     console.log('[selftest] relay + indexer healthy.');
+
+    console.log('[selftest] exercising relay + indexer over HTTP (discovery + dual-path)…');
+    await exerciseNetwork();
 
     console.log('[selftest] running a full heads-up Hold\'em hand (client/engine role)…');
     const { transcript, stateHash, payouts } = runHand();
