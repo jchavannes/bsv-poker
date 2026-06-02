@@ -7,3 +7,4 @@ export * from './table-layout.ts';
 export * from './bet-sizing.ts';
 export * from './wallet-panel.ts';
 export * from './accessibility.ts';
+export * from './table-setup.ts';

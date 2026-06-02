@@ -212,7 +212,7 @@ export const TRACE_MAP: Readonly<Record<string, Trace>> = {
   'REQ-PROD-005': { files: ['packages/wallet-custody/src/custody.ts', 'packages/ui-core/src/view-models/showdown.ts'], tests: ['packages/wallet-custody/test/custody.test.ts'] },
   'REQ-UI-005': { files: ['packages/wallet-custody/src/custody.ts'], tests: ['packages/wallet-custody/test/custody.test.ts'] },
   'REQ-VM-007': { files: ['packages/app-services/src/network-gate.ts'], tests: ['packages/app-services/test/network-gate.test.ts'] },
-  'REQ-PROD-002': { files: ['packages/ui-core/src/view-models/lobby.ts', 'packages/app-services/src/local-table-client.ts'], tests: ['packages/app-services/test/local-table-client.test.ts'] },
+  'REQ-PROD-002': { files: ['packages/ui-core/src/view-models/lobby.ts', 'packages/ui-core/src/view-models/table-setup.ts', 'packages/app-services/src/local-table-client.ts'], tests: ['packages/app-services/test/local-table-client.test.ts', 'packages/ui-core/test/table-setup.test.ts'] },
   'REQ-PROD-003': { files: ['packages/ui-core/src/view-models/lobby.ts'], tests: ['packages/ui-core/test/showdown-signing-lobby-vm.test.ts'] },
   'REQ-PROD-004': { files: ['packages/ui-core/src/view-models/table.ts'], tests: ['packages/ui-core/test/table-vm.test.ts'] },
   'REQ-PROD-007': { files: ['packages/game-holdem/src/holdem.ts', 'packages/ui-core/src/view-models/table.ts'], tests: ['packages/game-holdem/test/holdem.test.ts'] },
