@@ -3,6 +3,17 @@
 > Completeness is never claimed beyond what is written and tested. Every number here is
 > produced by running the build (`pnpm ci`), not asserted. Last full run: CI **GREEN**.
 
+## v3 (tag `v0.3.0`) — a real game
+- **Pick any variant, real rooms, 2–9 players.** Variant-generic networked client (Hold'em /
+  Omaha incl. Hi-Lo / Stud / Draw / Razz) over a browser-safe registry; lobby + waiting room seat
+  N real players. `pnpm multi-e2e`: 3-handed Hold'em + 2-handed Omaha converge byte-for-byte.
+- **Wallet — add AND remove funds.** `WalletService`: balance, add funds, withdraw, buy-in /
+  cash-out, history, persistence (whole satoshis). `pnpm wallet-e2e`: a deposit MINES a real
+  regtest block on the node; mainnet deposit/withdraw is the same service behind the research flag.
+- **Card-table UI**: green felt oval, seats around the ellipse, real playing cards + card backs,
+  chips/pot/dealer button, to-act glow, a bet slider (Min/½-pot/Pot/All-in from the engine), a
+  variant picker, and an always-visible wallet panel. (CI 141 TS + 16 Go.)
+
 ## v2 (tag `v0.2.0`) — what's new
 - **Real multiplayer waiting room** (players join, NOT a bot): `LobbyClient` (host/create/list/join,
   live players, seat agreement) + `InteractiveNetworkedTableClient` over the relay; web UI
