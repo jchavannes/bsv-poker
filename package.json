@@ -32,7 +32,8 @@
     "onchain-spend-e2e": "node tools/onchain-spend-e2e.ts",
     "onchain-poker-e2e": "node tools/onchain-poker-e2e.ts",
     "onchain-recovery-e2e": "node tools/onchain-recovery-e2e.ts",
-    "va-bind-e2e": "node tools/va-bind-e2e.ts"
+    "va-bind-e2e": "node tools/va-bind-e2e.ts",
+    "ob-bind-e2e": "node tools/ob-bind-e2e.ts"
   },
   "devDependencies": {
     "@types/node": "22",

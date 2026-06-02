@@ -8,7 +8,8 @@
     "./conformance": "./src/conformance.ts",
     "./real-node": "./src/real-node.ts",
     "./real-channel": "./src/real-channel.ts",
-    "./real-va": "./src/real-va.ts"
+    "./real-va": "./src/real-va.ts",
+    "./real-ob": "./src/real-ob.ts"
   },
   "dependencies": {
     "@bsv-poker/protocol-types": "workspace:*"
