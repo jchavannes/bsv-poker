@@ -35,10 +35,26 @@ func NewServer(ttl time.Duration) *Server {
 	return s
 }
 
-// Handler exposes the configured mux (also makes Server an http.Handler).
-func (s *Server) Handler() http.Handler { return s.mux }
+// Handler exposes the configured mux behind CORS (also makes Server an http.Handler).
+func (s *Server) Handler() http.Handler { return withCORS(s.mux) }
 
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { withCORS(s.mux).ServeHTTP(w, r) }
+
+// withCORS allows the browser web client (a different origin) to reach the relay over
+// fetch/SSE (app §A4). The relay carries only opaque transport objects and is never the source
+// of truth (REQ-NET-001), so a permissive cross-origin policy is acceptable for this transport.
+func withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Accept")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 func (s *Server) routes() {
 	mux := http.NewServeMux()
