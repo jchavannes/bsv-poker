@@ -67,6 +67,9 @@ export const TRACE_MAP: Readonly<Record<string, Trace>> = {
   'REQ-ENG-002': { files: ['tools/extract-requirements.ts'], tests: ['tools/reproduce.ts'] },
   'REQ-ENG-003': { files: ['tools/traceability.ts', 'tools/trace-map.ts'], tests: ['tools/traceability.ts'] },
   'REQ-TEST-005': { files: ['tools/reproduce.ts'], tests: ['tools/reproduce.ts'] },
+  'REQ-TEST-006': { files: ['packages/sdk/test/adversarial.test.ts'], tests: ['packages/sdk/test/adversarial.test.ts'] },
+  'REQ-CRYPTO-005': { files: ['packages/script-templates-ts/src/templates.ts'], tests: ['packages/sdk/test/adversarial.test.ts'] },
+  'REQ-POKER-017': { files: ['packages/game-holdem/src/holdem.ts'], tests: ['packages/sdk/test/adversarial.test.ts'] },
   'REQ-BUILD-001': { files: ['pnpm-workspace.yaml'], tests: ['tools/ci.ts'] },
   'REQ-BUILD-003': { files: ['tools/ci.ts'], tests: ['tools/ci.ts'] },
 };
