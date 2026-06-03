@@ -18,8 +18,11 @@ import {
   type ClientUpdate,
   type OpenTable,
 } from '@bsv-poker/app-services';
-import { genKeyPair } from '@bsv-poker/script-templates-ts';
-import { bytesToHex, cardToString, type Action, type GameState, type LegalActions } from '@bsv-poker/protocol-types';
+import { OP, genKeyPair, signPreimage, fairPlayCommitment, fundingLocking, type Script, type KeyPair } from '@bsv-poker/script-templates-ts';
+import { bytesToHex, cardToString, type Action, type BranchBinding, type GameState, type LegalActions } from '@bsv-poker/protocol-types';
+import { RealBsvNode } from '@bsv-poker/adapters/real-node';
+import { type Tx, type TxOutput, serializeTxWire, txidWire, sighashMessage, SIGHASH_ALL_FORKID } from '@bsv-poker/tx-builder';
+import { coSignSettlement, gatherByIndex, broadcastValue, awaitValue } from './settlement-coordinator.ts';
 
 function arg(name: string, fallback?: string): string | undefined {
   const i = process.argv.indexOf(name);
@@ -32,6 +35,13 @@ const WANT_TABLE = arg('--table');
 const STRATEGY = arg('--strategy', 'passive')!;
 const MAX_HANDS = Number(arg('--hands', '100'));
 const GUI_PORT = arg('--gui') ? Number(arg('--gui')) : 0;
+const NODE_PORT = arg('--node') ? Number(arg('--node')) : 0; // on-chain settlement against this node
+const SUBSIDY = 5_000_000_000;
+const SCALE = 1_000_000;
+const SETTLE_FEE = 1000;
+const BIND: BranchBinding = { gid: 'a1'.repeat(8), rulesetHash: 'b2'.repeat(32), round: 0, stateHash: 'c3'.repeat(32), actingSeat: -1, successorCommitment: '00'.repeat(32) };
+const p2pkh = (pub: Uint8Array): Script => [OP.OP_DUP, OP.OP_HASH160, fairPlayCommitment(pub), OP.OP_EQUALVERIFY, OP.OP_CHECKSIG];
+const sigT = (msg: Uint8Array, k: KeyPair): Uint8Array => Uint8Array.from([...signPreimage(msg, k.priv), SIGHASH_ALL_FORKID]);
 
 // Live view the GUI polls — so you can WATCH the bot play in its own browser window.
 const view: { seat: number; status: string; state: GameState | null; log: string[] } = { seat: -1, status: 'starting', state: null, log: [] };
@@ -157,6 +167,58 @@ async function main(): Promise<void> {
       log(`my turn → ${a.kind}${a.amount ? ' ' + a.amount : ''}`);
     }
   });
+
+  if (NODE_PORT) {
+    // ON-CHAIN MODE: exchange on-chain keys over the relay, fund the escrow (seat 0), play one hand,
+    // then co-sign the N-of-N settlement of the escrow to the final stacks — all over the relay.
+    const n = s.seats.length;
+    const ocKey = genKeyPair();
+    log('on-chain mode: exchanging on-chain keys over the relay…');
+    const pubHexes = await gatherByIndex(RELAY, table.id, 'oc-pub', s.mySeat, bytesToHex(ocKey.pubCompressed), n);
+    const pubs = pubHexes.map((h) => Uint8Array.from(Buffer.from(h, 'hex')));
+    const fundingScript = fundingLocking(BIND, pubs);
+    const escrow = n * s.seats[0]!.stack * SCALE;
+    const node = new RealBsvNode('127.0.0.1', NODE_PORT);
+
+    let fundingTxid: string;
+    if (s.mySeat === 0) {
+      const funder = genKeyPair();
+      const cb = await node.generateBlock(bytesToHex(funder.pubCompressed));
+      const fundingTx: Tx = { version: 1, inputs: [{ prevTxid: cb.coinbaseTxid, vout: 0, sequence: 0xffffffff }], outputs: [{ satoshis: escrow, locking: fundingScript }, { satoshis: SUBSIDY - escrow - SETTLE_FEE, locking: p2pkh(funder.pubCompressed) }], nLockTime: 0 };
+      const fs: Script = [sigT(sighashMessage(fundingTx, 0, p2pkh(funder.pubCompressed), SUBSIDY), funder), funder.pubCompressed];
+      const r = await node.submitTx(bytesToHex(serializeTxWire(fundingTx, [fs])));
+      if (!r.ok) throw new Error(`escrow funding rejected: ${r.reason}`);
+      await node.generateBlock(bytesToHex(funder.pubCompressed));
+      fundingTxid = txidWire(fundingTx, [fs]);
+      log(`funded escrow ${escrow} sats (${fundingTxid.slice(0, 12)}…), broadcasting outpoint`);
+      broadcastValue(RELAY, table.id, 'escrow', fundingTxid);
+    } else {
+      fundingTxid = await awaitValue(RELAY, table.id, 'escrow');
+      log(`received escrow outpoint ${fundingTxid.slice(0, 12)}…`);
+    }
+
+    log('playing ONE hand over the wire, then settling on-chain…');
+    await client.playSession({ maxHands: 1 });
+    const finalStacks = (client.getState()?.seats ?? s.seats.map((x) => ({ seat: x.seat, stack: x.stack }))).map((x) => x.stack);
+
+    const recips = finalStacks.map((c, i) => ({ i, sats: c * SCALE })).filter((r) => r.sats > 0).sort((a, b) => b.sats - a.sats);
+    const outputs: TxOutput[] = recips.map((r, k) => ({ satoshis: k === 0 ? r.sats - SETTLE_FEE : r.sats, locking: p2pkh(pubs[r.i]!) }));
+    const settleTx: Tx = { version: 1, inputs: [{ prevTxid: fundingTxid, vout: 0, sequence: 0xffffffff }], outputs, nLockTime: 0 };
+
+    log('co-signing the on-chain settlement over the relay…');
+    const res = await coSignSettlement({ relayUrl: RELAY, tableId: table.id, idx: s.mySeat, myKey: ocKey, settleTx, fundingScript, potValue: escrow, n, submit: s.mySeat === 0, submitTx: (raw) => node.submitTx(raw) });
+    if (s.mySeat === 0 && res.txid) {
+      await node.generateBlock(bytesToHex(genKeyPair().pubCompressed));
+      const o0 = await node.outpointStatus(res.txid, 0);
+      log(`SETTLED ON-CHAIN: settlement ${res.txid.slice(0, 12)}… output0=${o0.value} (confirmed=${o0.unspent})`);
+    } else {
+      log(`co-signed settlement (collected ${res.collected}/${n} sigs over the relay)`);
+    }
+    await node.shutdown();
+    view.status = 'ended';
+    if (GUI_PORT) await new Promise<void>(() => {});
+    return;
+  }
 
   log(`playing up to ${MAX_HANDS} hands over the wire…`);
   await client.playSession({ maxHands: MAX_HANDS });

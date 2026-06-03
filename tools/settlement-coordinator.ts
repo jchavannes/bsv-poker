@@ -12,6 +12,55 @@ import { type Tx, serializeTxWire, txidWire, sighashMessage, SIGHASH_ALL_FORKID 
 
 const sigT = (msg: Uint8Array, k: KeyPair): Uint8Array => Uint8Array.from([...signPreimage(msg, k.priv), SIGHASH_ALL_FORKID]);
 
+/** Gossip a per-peer value over the relay (e.g. each player's on-chain pubkey) and collect all N,
+ *  ordered by index. Re-announces until everyone has converged (covers subscribe races). */
+export async function gatherByIndex(relayUrl: string, tableId: string, kind: string, idx: number, mine: string, n: number, timeoutMs = 30000): Promise<string[]> {
+  const relay = new RelayClient(relayUrl);
+  const vals = new Map<number, string>([[idx, mine]]);
+  const deadline = Date.now() + timeoutMs;
+  await new Promise<void>((resolve, reject) => {
+    const unsub = relay.subscribe(tableId, (text) => {
+      try {
+        const e = JSON.parse(text) as { t?: string; idx?: number; v?: string };
+        if (e.t === kind && typeof e.idx === 'number' && typeof e.v === 'string' && !vals.has(e.idx)) {
+          vals.set(e.idx, e.v);
+          if (vals.size === n) { unsub(); resolve(); }
+        }
+      } catch { /* ignore */ }
+    });
+    const tick = (): void => {
+      if (vals.size === n) return;
+      if (Date.now() > deadline) { unsub(); reject(new Error(`gatherByIndex(${kind}) timed out`)); return; }
+      void relay.publish(tableId, new TextEncoder().encode(JSON.stringify({ t: kind, idx, v: mine })));
+      setTimeout(tick, 300);
+    };
+    tick();
+  });
+  return Array.from({ length: n }, (_, i) => vals.get(i)!);
+}
+
+/** The funder broadcasts a single value (e.g. the escrow outpoint) repeatedly; peers await it. */
+export function broadcastValue(relayUrl: string, tableId: string, kind: string, v: string): () => void {
+  const relay = new RelayClient(relayUrl);
+  const id = setInterval(() => void relay.publish(tableId, new TextEncoder().encode(JSON.stringify({ t: kind, v }))), 300);
+  void relay.publish(tableId, new TextEncoder().encode(JSON.stringify({ t: kind, v })));
+  return () => clearInterval(id);
+}
+
+export async function awaitValue(relayUrl: string, tableId: string, kind: string, timeoutMs = 30000): Promise<string> {
+  const relay = new RelayClient(relayUrl);
+  const deadline = Date.now() + timeoutMs;
+  return new Promise<string>((resolve, reject) => {
+    const unsub = relay.subscribe(tableId, (text) => {
+      try {
+        const e = JSON.parse(text) as { t?: string; v?: string };
+        if (e.t === kind && typeof e.v === 'string') { unsub(); resolve(e.v); }
+      } catch { /* ignore */ }
+    });
+    setTimeout(() => { unsub(); reject(new Error(`awaitValue(${kind}) timed out`)); }, timeoutMs - (Date.now() - (deadline - timeoutMs)));
+  });
+}
+
 export interface CoSignOpts {
   readonly relayUrl: string;
   readonly tableId: string;
