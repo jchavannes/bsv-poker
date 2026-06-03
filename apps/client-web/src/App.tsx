@@ -33,7 +33,7 @@ import {
   type NetworkTableForm,
   type SessionIdentity,
 } from '@bsv-poker/ui-core/view-models';
-import { createSessionAuth, type SessionAuth } from '@bsv-poker/app-services';
+import { sessionAuthFromSeed, deriveSeatSeed, type SessionAuth } from '@bsv-poker/app-services';
 import { Connect } from './screens/Connect.tsx';
 import { NetworkLobby } from './screens/NetworkLobby.tsx';
 import { WaitingRoom } from './screens/WaitingRoom.tsx';
@@ -94,7 +94,10 @@ export function App(): React.JSX.Element {
   // (audit 1–3). The identity pub used for seating IS this key, so seat↔key binding holds.
   const authRef = useRef<SessionAuth | null>(null);
   useEffect(() => {
-    void createSessionAuth().then((a) => {
+    // One wallet root → the Ed25519 seat key (and, on the Node/on-chain path, the wallet master).
+    const root = new Uint8Array(32);
+    (globalThis.crypto as Crypto).getRandomValues(root);
+    void sessionAuthFromSeed(deriveSeatSeed(root, 'bsv-poker/seat-ed25519')).then((a) => {
       authRef.current = a;
     });
   }, []);

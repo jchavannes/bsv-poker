@@ -6,24 +6,43 @@
  * receivers verify the signature against the public key REGISTERED to the acting seat.
  */
 
-import { bytesToHex } from '@bsv-poker/protocol-types';
+import { bytesToHex, sha256 } from '@bsv-poker/protocol-types';
 
 // Minimal structural view of Web Crypto subtle (avoids depending on the DOM lib; the runtime object
 // exists in Node 24 + modern browsers). Ed25519 sign/verify only.
 interface MinimalSubtle {
   generateKey(alg: unknown, extractable: boolean, usages: string[]): Promise<{ publicKey: unknown; privateKey: unknown }>;
-  exportKey(format: string, key: unknown): Promise<ArrayBuffer>;
+  exportKey(format: string, key: unknown): Promise<ArrayBuffer | { x?: string }>;
   importKey(format: string, data: Uint8Array, alg: unknown, extractable: boolean, usages: string[]): Promise<unknown>;
   sign(alg: unknown, key: unknown, data: Uint8Array): Promise<ArrayBuffer>;
   verify(alg: unknown, key: unknown, sig: Uint8Array, data: Uint8Array): Promise<boolean>;
 }
 const subtle = (globalThis as unknown as { crypto: { subtle: MinimalSubtle } }).crypto.subtle;
 const ALG = { name: 'Ed25519' } as const;
+// PKCS8 DER prefix for an Ed25519 private key (header ‖ 0x0420 ‖ 32-byte seed).
+const ED25519_PKCS8_PREFIX = hexToBytes('302e020100300506032b657004220420');
 
 function hexToBytes(hex: string): Uint8Array {
   const out = new Uint8Array(hex.length / 2);
   for (let i = 0; i < out.length; i++) out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
   return out;
+}
+
+function b64urlToBytes(s: string): Uint8Array {
+  const b64 = s.replace(/-/g, '+').replace(/_/g, '/');
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/** Derive a 32-byte sub-seed from a root secret for a labelled purpose (domain separation). */
+export function deriveSeatSeed(root: Uint8Array, label = 'bsv-poker/seat-ed25519'): Uint8Array {
+  const lab = new TextEncoder().encode(label);
+  const buf = new Uint8Array(lab.length + root.length);
+  buf.set(lab);
+  buf.set(root, lab.length);
+  return sha256(buf);
 }
 
 export interface SessionAuth {
@@ -35,11 +54,35 @@ export interface SessionAuth {
 /** Create a fresh session signing key (the player's relay identity for this session). */
 export async function createSessionAuth(): Promise<SessionAuth> {
   const kp = await subtle.generateKey(ALG, true, ['sign', 'verify']);
-  const pub = bytesToHex(new Uint8Array(await subtle.exportKey('raw', kp.publicKey)));
+  const pub = bytesToHex(new Uint8Array((await subtle.exportKey('raw', kp.publicKey)) as ArrayBuffer));
   return {
     pub,
     async sign(msg: string): Promise<string> {
       const sig = await subtle.sign(ALG, kp.privateKey, new TextEncoder().encode(msg));
+      return bytesToHex(new Uint8Array(sig));
+    },
+  };
+}
+
+/**
+ * Derive the session signing key DETERMINISTICALLY from a 32-byte seed (the Ed25519 private seed).
+ * Linking this seed to the wallet master root (via deriveSeatSeed(walletRoot)) makes the seat key and
+ * the wallet key share one root: a valid seat signature proves control of the same root that funds
+ * the buy-in (audit 3). The public key is read from the imported key's JWK.
+ */
+export async function sessionAuthFromSeed(seed: Uint8Array): Promise<SessionAuth> {
+  if (seed.length !== 32) throw new Error('Ed25519 seed must be 32 bytes');
+  const der = new Uint8Array(ED25519_PKCS8_PREFIX.length + 32);
+  der.set(ED25519_PKCS8_PREFIX);
+  der.set(seed, ED25519_PKCS8_PREFIX.length);
+  const priv = await subtle.importKey('pkcs8', der, ALG, true, ['sign']);
+  const jwk = (await subtle.exportKey('jwk', priv)) as { x?: string };
+  if (!jwk.x) throw new Error('could not derive Ed25519 public key from seed');
+  const pub = bytesToHex(b64urlToBytes(jwk.x));
+  return {
+    pub,
+    async sign(msg: string): Promise<string> {
+      const sig = await subtle.sign(ALG, priv, new TextEncoder().encode(msg));
       return bytesToHex(new Uint8Array(sig));
     },
   };

@@ -11,18 +11,33 @@
 
 import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
+import { createPublicKey, createPrivateKey } from 'node:crypto';
 import {
   RelayClient,
   LobbyClient,
   InteractiveNetworkedTableClient,
-  createSessionAuth,
+  sessionAuthFromSeed,
+  deriveSeatSeed,
   type ClientUpdate,
   type OpenTable,
 } from '@bsv-poker/app-services';
-import { OP, genKeyPair, signPreimage, fairPlayCommitment, fundingLocking, type Script, type KeyPair } from '@bsv-poker/script-templates-ts';
+import { OP, genKeyPair, signPreimage, compressedPub, fairPlayCommitment, fundingLocking, type Script, type KeyPair } from '@bsv-poker/script-templates-ts';
 import { bytesToHex, cardToString, type Action, type BranchBinding, type GameState, type LegalActions } from '@bsv-poker/protocol-types';
 import { RealBsvNode } from '@bsv-poker/adapters/real-node';
 import { type Tx, type TxOutput, serializeTxWire, txidWire, sighashMessage, SIGHASH_ALL_FORKID } from '@bsv-poker/tx-builder';
+
+/** Build a secp256k1 wallet/on-chain KeyPair from a 32-byte scalar (derived from the root) — same
+ *  PKCS8-DER construction the custody layer uses, inlined to keep the daemon self-contained. */
+function keyPairFromScalar(d: Uint8Array): KeyPair {
+  const ecPriv = Uint8Array.from([0x30, 0x25, 0x02, 0x01, 0x01, 0x04, 0x20, ...d]);
+  const algId = Uint8Array.from([0x30, 0x10, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x0a]);
+  const inner = Uint8Array.from([0x04, ecPriv.length, ...ecPriv]);
+  const bodyArr = Uint8Array.from([0x02, 0x01, 0x00, ...algId, ...inner]);
+  const der = Uint8Array.from([0x30, bodyArr.length, ...bodyArr]);
+  const priv = createPrivateKey({ key: Buffer.from(der), format: 'der', type: 'pkcs8' });
+  const pub = createPublicKey(priv);
+  return { priv, pub, pubCompressed: compressedPub(pub) };
+}
 import { coSignSettlement, gatherByIndex, broadcastValue, awaitValue } from './settlement-coordinator.ts';
 
 function arg(name: string, fallback?: string): string | undefined {
@@ -134,8 +149,12 @@ async function main(): Promise<void> {
   const relay = new RelayClient(RELAY);
   const lobby = new LobbyClient(relay);
   const id = `${NAME}-${Math.random().toString(36).slice(2, 8)}`;
-  const auth = await createSessionAuth(); // the bot's OWN session signing key (Ed25519)
-  const pub = auth.pub; // seat identity = the key it signs envelopes with
+  // ONE root for this player: the wallet/on-chain key AND the Ed25519 seat key derive from it, so a
+  // valid seat signature proves control of the same root that funds the buy-in (audit 3).
+  const root = new Uint8Array(randomBytes(32));
+  const auth = await sessionAuthFromSeed(deriveSeatSeed(root, 'bsv-poker/seat-ed25519'));
+  const walletKey = keyPairFromScalar(deriveSeatSeed(root, 'bsv-poker/wallet')); // same root → wallet key
+  const pub = auth.pub; // seat identity = the key it signs envelopes with (rooted in the wallet)
 
   log(`connecting to relay ${RELAY} as a remote player…`);
   const table = await findTable(lobby);
@@ -176,7 +195,7 @@ async function main(): Promise<void> {
     // ON-CHAIN MODE: exchange on-chain keys over the relay, fund the escrow (seat 0), play one hand,
     // then co-sign the N-of-N settlement of the escrow to the final stacks — all over the relay.
     const n = s.seats.length;
-    const ocKey = genKeyPair();
+    const ocKey = walletKey; // the on-chain key IS the wallet key derived from this player's root
     log('on-chain mode: exchanging on-chain keys over the relay…');
     const pubHexes = await gatherByIndex(RELAY, table.id, 'oc-pub', s.mySeat, bytesToHex(ocKey.pubCompressed), n);
     const pubs = pubHexes.map((h) => Uint8Array.from(Buffer.from(h, 'hex')));

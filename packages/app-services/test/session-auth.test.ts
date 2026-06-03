@@ -36,3 +36,24 @@ test('a signature does not replay across table / hand / seat (binding)', async (
   assert.equal(await verifySig(k.pub, envelopeMessage(TABLE, { t: 'action', seat: 0, hand: 1, kind: 'check', amount: 0 }), sig), false);
   assert.equal(await verifySig(k.pub, envelopeMessage(TABLE, { t: 'action', seat: 2, hand: 0, kind: 'check', amount: 0 }), sig), false);
 });
+
+import { sessionAuthFromSeed, deriveSeatSeed } from '../src/session-auth.ts';
+
+test('seat key derives DETERMINISTICALLY from a root (linked to the wallet master) — same root → same key', async () => {
+  const root = new Uint8Array(32).fill(11);
+  const a1 = await sessionAuthFromSeed(deriveSeatSeed(root));
+  const a2 = await sessionAuthFromSeed(deriveSeatSeed(root));
+  assert.equal(a1.pub, a2.pub, 'one root → one stable seat key');
+  // sign+verify still works for a seed-derived key
+  const m = envelopeMessage(TABLE, { t: 'commit', seat: 0, hand: 0, c: 'ab' });
+  assert.equal(await verifySig(a1.pub, m, await a1.sign(m)), true);
+});
+
+test('different roots / different purposes derive different keys (domain separation)', async () => {
+  const root = new Uint8Array(32).fill(11);
+  const seat = await sessionAuthFromSeed(deriveSeatSeed(root, 'bsv-poker/seat-ed25519'));
+  const other = await sessionAuthFromSeed(deriveSeatSeed(root, 'bsv-poker/wallet')); // a different purpose
+  const diffRoot = await sessionAuthFromSeed(deriveSeatSeed(new Uint8Array(32).fill(22)));
+  assert.notEqual(seat.pub, other.pub, 'seat vs wallet purpose → different keys');
+  assert.notEqual(seat.pub, diffRoot.pub, 'different root → different key');
+});
