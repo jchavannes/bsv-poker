@@ -24,6 +24,8 @@ import type { RelayClient, IndexerClient } from './network.ts';
 import { createGameModule, type GenericGameModule } from './game-registry.ts';
 import { deckFromEntropies } from './mp-shuffle.ts';
 import { seatedForNextHand } from './table-participants.ts';
+import { type SessionAuth, verifySig, envelopeMessage } from './session-auth.ts';
+import { validateEnvelope } from './message-validation.ts';
 
 export interface TablePlayer {
   readonly seat: number;
@@ -40,6 +42,8 @@ interface Envelope {
   kind?: Action['kind'];
   amount?: number;
   discard?: readonly number[];
+  /** Ed25519 signature by the seat's session key over envelopeMessage(tableId, env) (audit 1–3). */
+  sig?: string;
 }
 
 export interface ClientUpdate {
@@ -66,6 +70,8 @@ export class InteractiveNetworkedTableClient {
   private aborted = false;
   private ingestSeq = 0; // makes each ingested record's txid unique (identical checks would collide)
   private readonly indexer: IndexerClient | null;
+  private readonly auth: SessionAuth | null;
+  private readonly seatPubs: readonly string[] | null;
 
   constructor(opts: {
     relay: RelayClient;
@@ -76,6 +82,11 @@ export class InteractiveNetworkedTableClient {
     entropy: Uint8Array;
     /** Optional canonical path: every envelope is also ingested here for transcript/reconnect. */
     indexer?: IndexerClient;
+    /** This seat's session signing key — signs every envelope this client emits (audit 1–3). */
+    auth?: SessionAuth;
+    /** seat → registered session pubkey. When set, inbound envelopes MUST be signed by the
+     *  acting seat's key or they are rejected (no forging another seat's action). */
+    seatPubs?: readonly string[];
   }) {
     this.relay = opts.relay;
     this.tableId = opts.tableId;
@@ -84,6 +95,8 @@ export class InteractiveNetworkedTableClient {
     this.ruleset = opts.ruleset;
     this.entropy = opts.entropy;
     this.indexer = opts.indexer ?? null;
+    this.auth = opts.auth ?? null;
+    this.seatPubs = opts.seatPubs ?? null;
   }
 
   onUpdate(cb: (u: ClientUpdate) => void): () => void {
@@ -140,6 +153,8 @@ export class InteractiveNetworkedTableClient {
   }
 
   private async publish(env: Envelope): Promise<void> {
+    // Sign every envelope with this seat's session key so peers can prove I sent it (audit 1–3).
+    if (this.auth && !env.sig) env.sig = await this.auth.sign(envelopeMessage(this.tableId, env));
     const json = JSON.stringify(env);
     // speed path: relay channel
     await this.relay.publish(this.tableId, new TextEncoder().encode(json));
@@ -185,13 +200,28 @@ export class InteractiveNetworkedTableClient {
   private subscribe(): void {
     if (this.unsub) return;
     this.unsub = this.relay.subscribe(this.tableId, (text) => {
-      try {
-        const env = JSON.parse(text) as Envelope;
+      // Validate at the trust boundary (audit 6), then verify the signature is by the key REGISTERED
+      // to the acting seat (audit 1–3) before accepting. All async, so do it off the callback.
+      void (async () => {
+        let raw: unknown;
+        try {
+          raw = JSON.parse(text);
+        } catch {
+          return; // keepalive / non-JSON
+        }
+        const env = validateEnvelope(raw); // structural validation (parseAndValidate layer)
+        if (!env) return; // malformed → reject
+        if (this.seatPubs) {
+          const pub = this.seatPubs[env.seat];
+          const sig = (raw as { sig?: string }).sig;
+          if (!pub || !sig || !(await verifySig(pub, envelopeMessage(this.tableId, env as Envelope), sig))) {
+            if (process.env.MP_DEBUG) console.error(`[icx seat${this.mySeat}] REJECTED unsigned/forged ${env.t} seat=${env.seat}`);
+            return; // unsigned, wrong-seat, or forged → reject
+          }
+        }
         if (process.env.MP_DEBUG) console.error(`[icx seat${this.mySeat}] rx ${env.t} h${env.hand} seat=${env.seat}`);
-        this.inbox.push(env);
-      } catch {
-        /* keepalive */
-      }
+        this.inbox.push(env as Envelope);
+      })();
     });
   }
 

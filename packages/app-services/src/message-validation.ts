@@ -15,6 +15,7 @@ export interface WireEnvelope {
   readonly r?: string; // reveal: entropy hex
   readonly kind?: string; // action: ActionKind
   readonly amount?: number; // action: optional wager
+  readonly discard?: readonly number[]; // action: draw discard slot set
 }
 
 const isHex = (v: unknown): v is string => typeof v === 'string' && /^[0-9a-f]+$/i.test(v) && v.length > 0;
@@ -38,8 +39,11 @@ export function validateEnvelope(raw: unknown): WireEnvelope | null {
   // action
   if (typeof o.kind !== 'string' || o.kind.length === 0) return null;
   if (o.amount !== undefined && (typeof o.amount !== 'number' || !Number.isFinite(o.amount))) return null;
-  const env: WireEnvelope = { t: 'action', seat: o.seat, hand: o.hand, kind: o.kind };
-  return o.amount !== undefined ? { ...env, amount: o.amount } : env;
+  if (o.discard !== undefined && !(Array.isArray(o.discard) && o.discard.every((d) => typeof d === 'number' && Number.isInteger(d) && d >= 0))) return null;
+  let env: WireEnvelope = { t: 'action', seat: o.seat, hand: o.hand, kind: o.kind };
+  if (o.amount !== undefined) env = { ...env, amount: o.amount };
+  if (o.discard !== undefined) env = { ...env, discard: o.discard as number[] };
+  return env;
 }
 
 /** Parse a JSON wire frame and validate it; null on bad JSON or a rejected envelope. */

@@ -28,6 +28,15 @@ const stages: Stage[] = [
   { name: 'reproduce (vectors)', cmd: 'node', args: ['tools/reproduce.ts'] },
   { name: 'traceability', cmd: 'node', args: ['tools/traceability.ts'] },
   {
+    // The web client is its own Vite build (excluded from the root tsconfig); build it in CI so a
+    // broken client bundle fails the pipeline (audit 8).
+    name: 'web client build (vite)',
+    cmd: 'node',
+    args: ['node_modules/vite/bin/vite.js', 'build'],
+    cwd: join(ROOT, 'apps/client-web'),
+    skipIf: () => !existsSync(join(ROOT, 'apps/client-web/node_modules/vite/bin/vite.js')),
+  },
+  {
     name: 'go vet+test relay-go',
     cmd: 'go',
     args: ['test', './...'],

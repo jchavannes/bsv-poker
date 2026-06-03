@@ -37,7 +37,32 @@ export function cryptoRng(): () => number {
   return Math.random;
 }
 
-/** Shuffle a fresh 52-card deck using the platform CSPRNG (regtest/play-money). */
+/** Unbiased Fisher–Yates over a uint32 source, rejection-sampling each step (exact sampler). */
+export function shuffleU32(draw: () => number): Card[] {
+  const deck: Card[] = [];
+  for (let c = 0; c < NUM_CARDS; c++) deck.push(c);
+  for (let i = deck.length - 1; i > 0; i--) {
+    const bound = i + 1;
+    const limit = Math.floor(0x100000000 / bound) * bound;
+    let r = draw();
+    while (r >= limit) r = draw();
+    const j = r % bound;
+    [deck[i], deck[j]] = [deck[j]!, deck[i]!];
+  }
+  return deck;
+}
+
+/** A uint32 source backed by crypto.getRandomValues when available, else Math.random-derived. */
+export function cryptoU32(): () => number {
+  const g = globalThis as { crypto?: { getRandomValues?: (a: Uint32Array) => Uint32Array } };
+  const c = g.crypto;
+  if (c && typeof c.getRandomValues === 'function') {
+    return () => { const buf = new Uint32Array(1); c.getRandomValues!(buf); return buf[0]!; };
+  }
+  return () => Math.floor(Math.random() * 0x100000000) >>> 0;
+}
+
+/** Shuffle a fresh 52-card deck using the platform CSPRNG (regtest/play-money), unbiased sampler. */
 export function shuffleDeck(): Card[] {
-  return shuffleWith(cryptoRng());
+  return shuffleU32(cryptoU32());
 }

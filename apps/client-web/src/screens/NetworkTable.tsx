@@ -39,13 +39,15 @@ import {
   SettlementSummary,
   WalletPanel,
 } from '@bsv-poker/ui-core/components';
-import type { WalletService, WalletState } from '@bsv-poker/app-services';
+import type { WalletService, WalletState, SessionAuth } from '@bsv-poker/app-services';
 
 export function NetworkTable(props: {
   relay: string;
   tableId: string;
   tableName: string;
   seated: SeatedResult;
+  /** This player's session signing key — signs every envelope; peers verify by seat (audit 1–3). */
+  auth: SessionAuth | null;
   /** The player's wallet — reachable at the table so they can fund/defund at any time. */
   wallet: WalletService;
   walletState: WalletState;
@@ -76,6 +78,8 @@ export function NetworkTable(props: {
       seats: seated.seats,
       ruleset: seated.ruleset,
       entropy,
+      ...(props.auth ? { auth: props.auth } : {}),
+      seatPubs: seated.players.map((p) => p.pub), // seat → registered key (reject forged envelopes)
     });
   }
   const client = clientRef.current;

@@ -9,6 +9,10 @@
 import type { Ruleset, Variant } from '@bsv-poker/protocol-types';
 import type { RelayClient } from './network.ts';
 import { type TablePlayer } from './interactive-client.ts';
+import { verifySig } from './session-auth.ts';
+
+/** Canonical signed message proving possession of `pub` for a join to this table (audit 3). */
+const joinMessage = (tableId: string, pub: string, nonce: string): string => JSON.stringify(['join', tableId, pub, nonce]);
 
 export interface TableMeta {
   readonly name: string;
@@ -38,6 +42,8 @@ interface JoinEnvelope {
   t: 'join';
   id: string;
   pub: string;
+  nonce?: string;
+  sig?: string; // Ed25519 over joinMessage(tableId, pub, nonce) — proves possession of `pub` (audit 3)
 }
 
 export function rulesetFromMeta(meta: TableMeta): Ruleset {
@@ -93,35 +99,41 @@ export class LobbyClient {
    */
   joinWaitingRoom(
     tableId: string,
-    me: { id: string; pub: string },
+    me: { id: string; pub: string; sign?: (msg: string) => Promise<string> },
     meta: TableMeta,
     onPlayers?: (players: Array<{ id: string; pub: string }>) => void,
   ): { seated: Promise<SeatedResult>; abort: () => void } {
     const joined = new Map<string, { id: string; pub: string }>();
     joined.set(me.pub, me);
+    const myNonce = Math.random().toString(36).slice(2) + Date.now().toString(36);
     let unsub: (() => void) | null = null;
     let aborted = false;
 
     const seated = new Promise<SeatedResult>((resolve, reject) => {
       unsub = this.relay.subscribe(tableId, (text) => {
-        try {
-          const env = JSON.parse(text) as JoinEnvelope;
-          if (env.t === 'join' && env.pub) {
-            if (!joined.has(env.pub)) {
-              joined.set(env.pub, { id: env.id, pub: env.pub });
-              onPlayers?.([...joined.values()]);
+        void (async () => {
+          try {
+            const env = JSON.parse(text) as JoinEnvelope;
+            if (env.t !== 'join' || !env.pub || joined.has(env.pub)) return;
+            // A join must prove possession of its pub: verify the signature (audit 3). When `me`
+            // signs, peers must sign too; reject unsigned/forged joins so a pub can't be spoofed.
+            if (me.sign) {
+              if (!env.nonce || !env.sig || !(await verifySig(env.pub, joinMessage(tableId, env.pub, env.nonce), env.sig))) return;
             }
+            joined.set(env.pub, { id: env.id, pub: env.pub });
+            onPlayers?.([...joined.values()]);
+          } catch {
+            /* not a join envelope */
           }
-        } catch {
-          /* not a join envelope */
-        }
+        })();
       });
 
       const announce = (): void => {
-        void this.relay.publish(
-          tableId,
-          new TextEncoder().encode(JSON.stringify({ t: 'join', id: me.id, pub: me.pub })),
-        );
+        void (async () => {
+          const base = { t: 'join' as const, id: me.id, pub: me.pub, nonce: myNonce };
+          const env = me.sign ? { ...base, sig: await me.sign(joinMessage(tableId, me.pub, myNonce)) } : base;
+          await this.relay.publish(tableId, new TextEncoder().encode(JSON.stringify(env)));
+        })();
       };
 
       const deadline = Date.now() + 120000;

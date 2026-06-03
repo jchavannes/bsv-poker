@@ -23,8 +23,14 @@ export function seededShuffle(seed: Uint8Array, n: number): number[] {
     }
     return pool.shift()!;
   };
+  // Unbiased Fisher–Yates: rejection-sample each step (modulo reduction of a uint32 by a
+  // non-divisor of 2^32 is biased — the deck sampler must be exact).
   for (let i = n - 1; i > 0; i--) {
-    const j = draw() % (i + 1);
+    const bound = i + 1;
+    const limit = Math.floor(0x100000000 / bound) * bound;
+    let r = draw();
+    while (r >= limit) r = draw();
+    const j = r % bound;
     [perm[i], perm[j]] = [perm[j]!, perm[i]!];
   }
   return perm;

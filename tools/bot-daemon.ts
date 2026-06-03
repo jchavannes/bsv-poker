@@ -15,6 +15,7 @@ import {
   RelayClient,
   LobbyClient,
   InteractiveNetworkedTableClient,
+  createSessionAuth,
   type ClientUpdate,
   type OpenTable,
 } from '@bsv-poker/app-services';
@@ -133,7 +134,8 @@ async function main(): Promise<void> {
   const relay = new RelayClient(RELAY);
   const lobby = new LobbyClient(relay);
   const id = `${NAME}-${Math.random().toString(36).slice(2, 8)}`;
-  const pub = bytesToHex(genKeyPair().pubCompressed); // the bot's OWN identity key
+  const auth = await createSessionAuth(); // the bot's OWN session signing key (Ed25519)
+  const pub = auth.pub; // seat identity = the key it signs envelopes with
 
   log(`connecting to relay ${RELAY} as a remote player…`);
   const table = await findTable(lobby);
@@ -142,7 +144,7 @@ async function main(): Promise<void> {
   if (GUI_PORT) startGui(GUI_PORT);
   view.status = 'joining';
 
-  const { seated } = lobby.joinWaitingRoom(table.id, { id, pub }, table.meta, (players) =>
+  const { seated } = lobby.joinWaitingRoom(table.id, { id, pub, sign: (m) => auth.sign(m) }, table.meta, (players) =>
     log(`waiting room: ${players.length}/${table.meta.maxSeats} players`),
   );
   const s = await seated;
@@ -157,6 +159,8 @@ async function main(): Promise<void> {
     seats: s.seats,
     ruleset: s.ruleset,
     entropy: new Uint8Array(randomBytes(32)),
+    auth, // sign every envelope I emit
+    seatPubs: s.players.map((p) => p.pub), // verify peers: seat → registered session key
   });
 
   client.onUpdate((u: ClientUpdate) => {

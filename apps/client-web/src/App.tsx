@@ -33,6 +33,7 @@ import {
   type NetworkTableForm,
   type SessionIdentity,
 } from '@bsv-poker/ui-core/view-models';
+import { createSessionAuth, type SessionAuth } from '@bsv-poker/app-services';
 import { Connect } from './screens/Connect.tsx';
 import { NetworkLobby } from './screens/NetworkLobby.tsx';
 import { WaitingRoom } from './screens/WaitingRoom.tsx';
@@ -88,6 +89,15 @@ const walletPersistence: WalletPersistence = {
 export function App(): React.JSX.Element {
   const identity = useMemo<SessionIdentity>(() => generateIdentity(), []);
   const wallet = useMemo(() => new WalletService({ persistence: walletPersistence }), []);
+
+  // Session signing key (Ed25519) — signs every relay envelope so peers can prove who sent it
+  // (audit 1–3). The identity pub used for seating IS this key, so seat↔key binding holds.
+  const authRef = useRef<SessionAuth | null>(null);
+  useEffect(() => {
+    void createSessionAuth().then((a) => {
+      authRef.current = a;
+    });
+  }, []);
 
   // Re-render on any wallet change so balance/history stay live across the app.
   const [walletState, setWalletState] = useState<WalletState>(() => wallet.state());
@@ -147,16 +157,21 @@ export function App(): React.JSX.Element {
       activeTableId.current = tableId;
       activeBuyIn.current = meta.startingStack;
 
+      const auth = authRef.current;
+      if (!auth) {
+        setWaitError('session key not ready — try again in a moment');
+        return;
+      }
       setWaitName(meta.name);
       setWaitCapacity(meta.maxSeats);
-      setWaitPlayers([{ id: identity.id, pub: identity.pub }]);
+      setWaitPlayers([{ id: identity.id, pub: auth.pub }]);
       setWaitError(null);
       setConnectError(null);
       setScreen({ kind: 'waiting' });
 
       const { seated, abort } = lobby.joinWaitingRoom(
         tableId,
-        { id: identity.id, pub: identity.pub },
+        { id: identity.id, pub: auth.pub, sign: (m) => auth.sign(m) },
         meta,
         (players) => setWaitPlayers([...players]),
       );
@@ -271,6 +286,7 @@ export function App(): React.JSX.Element {
           tableId={screen.tableId}
           tableName={screen.tableName}
           seated={screen.seated}
+          auth={authRef.current}
           wallet={wallet}
           walletState={walletState}
           onLeave={cashOutAndLeave}
