@@ -21,14 +21,16 @@ use serde::Serialize;
 use tauri::{Emitter, Manager, State};
 
 const RELAY_ADDR: &str = "127.0.0.1:8091";
+const RELAY_ADDR_HTTP: &str = "http://127.0.0.1:8091";
 const INDEXER_ADDR: &str = "127.0.0.1:8092";
 const MAX_RESTARTS: u32 = 5; // bounded restart policy (REQ-APP-022)
 
 // ---- Pure lifecycle policy (REQ-APP-020/021/022), unit-tested below ----
-/// Ordered startup (REQ-APP-021): the embedded node first, then the indexer, then the relay.
+/// Ordered startup (REQ-APP-021): node, then indexer, then relay, then the on-chain settlement
+/// service (the node-side bridge that signs/submits settlements for the browser-bound human).
 #[allow(dead_code)]
-fn startup_order() -> [&'static str; 3] {
-    ["node", "indexer", "relay"]
+fn startup_order() -> [&'static str; 4] {
+    ["node", "indexer", "relay", "settlement"]
 }
 
 /// Reverse-order shutdown (REQ-APP-021).
@@ -108,6 +110,7 @@ struct Supervisor {
     lifecycle: Mutex<LifecycleState>,
     relay: Mutex<Option<Child>>,
     indexer: Mutex<Option<Child>>,
+    settlement: Mutex<Option<Child>>,
     network: Mutex<String>,
 }
 
@@ -117,6 +120,7 @@ impl Supervisor {
             lifecycle: Mutex::new(LifecycleState::Init),
             relay: Mutex::new(None),
             indexer: Mutex::new(None),
+            settlement: Mutex::new(None),
             network: Mutex::new("regtest".to_string()),
         }
     }
@@ -194,6 +198,23 @@ fn run_startup(app: &tauri::AppHandle, sup: &Supervisor) -> Result<bool, String>
         return Err("relay failed to start within the restart policy".into());
     }
 
+    // On-chain settlement service (node-side bridge) — BEST EFFORT: spawn `node settlement-service`.
+    // If node or the script isn't present, the table still plays; on-chain settlement is just
+    // unavailable until the service is installed (graceful degrade, not a startup failure).
+    emit_status(app, "settlement", "starting", None, 0);
+    let svc = resolve_bin(app, "settlement-service.mjs");
+    match Command::new("node")
+        .arg(svc)
+        .args(["--port", "8200", "--node", "18332", "--relay", RELAY_ADDR_HTTP])
+        .spawn()
+    {
+        Ok(child) => {
+            *sup.settlement.lock().unwrap() = Some(child);
+            emit_status(app, "settlement", "healthy", None, 0);
+        }
+        Err(e) => emit_status(app, "settlement", "degraded", Some(format!("on-chain settlement unavailable: {e}")), 0),
+    }
+
     *sup.lifecycle.lock().unwrap() = LifecycleState::Ready;
     Ok(true)
 }
@@ -205,7 +226,10 @@ fn services_start(app: tauri::AppHandle, sup: State<Supervisor>) -> Result<bool,
 
 #[tauri::command]
 fn services_stop(sup: State<Supervisor>) -> Result<bool, String> {
-    // Reverse-order shutdown: relay then indexer (REQ-APP-021).
+    // Reverse-order shutdown: settlement, relay, then indexer (REQ-APP-021).
+    if let Some(mut c) = sup.settlement.lock().unwrap().take() {
+        let _ = c.kill();
+    }
     if let Some(mut c) = sup.relay.lock().unwrap().take() {
         let _ = c.kill();
     }
@@ -290,13 +314,13 @@ mod lifecycle_tests {
     use super::*;
 
     #[test]
-    fn startup_is_node_then_indexer_then_relay() {
-        assert_eq!(startup_order(), ["node", "indexer", "relay"]);
+    fn startup_is_node_indexer_relay_then_settlement() {
+        assert_eq!(startup_order(), ["node", "indexer", "relay", "settlement"]);
     }
 
     #[test]
     fn shutdown_is_reverse_of_startup() {
-        assert_eq!(shutdown_order(), vec!["relay", "indexer", "node"]);
+        assert_eq!(shutdown_order(), vec!["settlement", "relay", "indexer", "node"]);
     }
 
     #[test]
