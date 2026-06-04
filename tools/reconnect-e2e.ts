@@ -51,7 +51,7 @@ const passive = (l: LegalActions, seat: number): Action =>
 
 async function player(tableId: string, id: string): Promise<string> {
   const lobby = new LobbyClient(new RelayClient(RELAY));
-  const { seated } = lobby.joinWaitingRoom(tableId, { id, pub: randomBytes(33).toString('hex') }, META);
+  const { seated } = lobby.joinWaitingRoom(tableId, { id, pub: randomBytes(33).toString('hex') }, META, undefined, true);
   const seat = await seated;
   const client = new InteractiveNetworkedTableClient({
     relay: new RelayClient(RELAY),
@@ -61,6 +61,7 @@ async function player(tableId: string, id: string): Promise<string> {
     seats: seat.seats,
     ruleset: seat.ruleset,
     entropy: randomBytes(32),
+    allowUnsigned: true, // test fixture (audit 1)
   });
   client.onUpdate((u: ClientUpdate) => {
     if (u.yourTurn && u.legal) client.submitAction(passive(u.legal, u.mySeat));

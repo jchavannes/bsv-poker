@@ -54,7 +54,7 @@ const passive = (l: LegalActions, seat: number): Action =>
 
 async function player(base: string, tableId: string, id: string): Promise<number[]> {
   const lobby = new LobbyClient(new RelayClient(base));
-  const { seated } = lobby.joinWaitingRoom(tableId, { id, pub: randomBytes(33).toString('hex') }, META);
+  const { seated } = lobby.joinWaitingRoom(tableId, { id, pub: randomBytes(33).toString('hex') }, META, undefined, true);
   const seat = await seated;
   const client = new InteractiveNetworkedTableClient({
     relay: new RelayClient(base),
@@ -63,6 +63,7 @@ async function player(base: string, tableId: string, id: string): Promise<number
     seats: seat.seats,
     ruleset: seat.ruleset,
     entropy: randomBytes(32),
+    allowUnsigned: true, // test fixture (audit 1)
   });
   let last: ClientUpdate | null = null;
   client.onUpdate((u) => {

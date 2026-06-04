@@ -34,7 +34,9 @@ const stages: Stage[] = [
     cmd: 'node',
     args: ['node_modules/vite/bin/vite.js', 'build'],
     cwd: join(ROOT, 'apps/client-web'),
-    skipIf: () => !existsSync(join(ROOT, 'apps/client-web/node_modules/vite/bin/vite.js')),
+    // Missing Vite FAILS CI (audit 10) — a misinstalled env must not report green without building
+    // the web client. Skip only under an explicit local-dev flag.
+    skipIf: () => process.env.BSV_CI_SKIP_WEB === '1',
   },
   {
     name: 'go vet+test relay-go',

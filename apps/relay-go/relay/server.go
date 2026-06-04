@@ -168,9 +168,16 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusTooManyRequests, "rate limited: table publish quota exceeded")
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20)) // bound: 1 MiB/object
+	// Fail closed on oversize (audit 6): read limit+1; if the extra byte exists the body exceeded the
+	// bound — reject 413 rather than silently truncating + forwarding a corrupt frame.
+	const maxBody = 1 << 20 // 1 MiB/object
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "read error")
+		return
+	}
+	if len(body) > maxBody {
+		writeErr(w, http.StatusRequestEntityTooLarge, "payload too large")
 		return
 	}
 	delivered := t.Publish(body)

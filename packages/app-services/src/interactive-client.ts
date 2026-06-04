@@ -84,10 +84,17 @@ export class InteractiveNetworkedTableClient {
     indexer?: IndexerClient;
     /** This seat's session signing key — signs every envelope this client emits (audit 1–3). */
     auth?: SessionAuth;
-    /** seat → registered session pubkey. When set, inbound envelopes MUST be signed by the
-     *  acting seat's key or they are rejected (no forging another seat's action). */
+    /** seat → registered session pubkey. Inbound envelopes MUST be signed by the acting seat's key
+     *  or they are rejected (no forging another seat's action). */
     seatPubs?: readonly string[];
+    /** TEST FIXTURES ONLY (audit 1): permit unsigned play. Production live play must NOT set this. */
+    allowUnsigned?: boolean;
   }) {
+    // Live multiplayer requires authentication: a signing key to emit and the seat→key map to verify
+    // inbound. Unsigned mode is permitted only behind an explicit test flag (audit 1).
+    if (!opts.allowUnsigned && (!opts.auth || !opts.seatPubs)) {
+      throw new Error('live network play requires `auth` + `seatPubs` (audit 1); set allowUnsigned only in test fixtures');
+    }
     this.relay = opts.relay;
     this.tableId = opts.tableId;
     this.mySeat = opts.mySeat;

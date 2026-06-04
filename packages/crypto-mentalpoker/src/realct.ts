@@ -65,9 +65,14 @@ function* drawStream(seed: Uint8Array, info: string): Generator<number> {
 export function permutationFromEntropy(entropy: Uint8Array, n: number): number[] {
   const perm = Array.from({ length: n }, (_, i) => i);
   const stream = drawStream(entropy, 'shuffle-perm');
+  // Unbiased Fisher–Yates: rejection-sample each step (modulo reduction of a uint32 by a non-divisor
+  // of 2^32 is biased; the deck sampler must be exact — same method as app-services/mp-shuffle).
   for (let i = n - 1; i > 0; i--) {
-    const r = stream.next().value as number;
-    const j = r % (i + 1);
+    const bound = i + 1;
+    const limit = Math.floor(0x100000000 / bound) * bound;
+    let r = stream.next().value as number;
+    while (r >= limit) r = stream.next().value as number;
+    const j = r % bound;
     [perm[i], perm[j]] = [perm[j]!, perm[i]!];
   }
   return perm;

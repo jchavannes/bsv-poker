@@ -73,8 +73,12 @@ async function player(
   entropySeed: number,
 ): Promise<{ stateHash: string }> {
   const lobby = new LobbyClient(new RelayClient(relayBase));
-  const { seated } = lobby.joinWaitingRoom(tableId, me, META, (players) =>
-    console.log(`[${me.id}] waiting room now has ${players.length} player(s): ${players.map((p) => p.id).join(', ')}`),
+  const { seated } = lobby.joinWaitingRoom(
+    tableId,
+    me,
+    META,
+    (players) => console.log(`[${me.id}] waiting room now has ${players.length} player(s): ${players.map((p) => p.id).join(', ')}`),
+    true, // test fixture (audit 2): unsigned join
   );
   const seat = await seated;
   console.log(`[${me.id}] seated at seat ${seat.mySeat} of ${seat.seats.length}`);
@@ -86,6 +90,7 @@ async function player(
     seats: seat.seats,
     ruleset: seat.ruleset,
     entropy: Uint8Array.from(Array.from({ length: 32 }, (_, i) => (i * entropySeed + 3) % 251)),
+    allowUnsigned: true, // test fixture (audit 1)
   });
   // The "human": act on every turn via the UI-facing update stream.
   client.onUpdate((u: ClientUpdate) => {

@@ -102,7 +102,14 @@ export class LobbyClient {
     me: { id: string; pub: string; sign?: (msg: string) => Promise<string> },
     meta: TableMeta,
     onPlayers?: (players: Array<{ id: string; pub: string }>) => void,
+    /** TEST FIXTURES ONLY (audit 2): permit unsigned joins. Production must supply `me.sign`. */
+    allowUnsigned = false,
   ): { seated: Promise<SeatedResult>; abort: () => void } {
+    // Signed joins are mandatory (audit 2): a join must prove possession of its pub. Unsigned joins
+    // are permitted only behind the explicit test flag.
+    if (!me.sign && !allowUnsigned) {
+      throw new Error('joinWaitingRoom requires a signing key (audit 2); set allowUnsigned only in test fixtures');
+    }
     const joined = new Map<string, { id: string; pub: string }>();
     joined.set(me.pub, me);
     const myNonce = Math.random().toString(36).slice(2) + Date.now().toString(36);
