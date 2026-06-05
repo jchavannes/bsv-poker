@@ -48,9 +48,39 @@ async function asJson<T>(res: Response): Promise<T> {
 export class RelayClient {
   private readonly base: string;
   private readonly fetchFn: FetchFn;
+  // Capability tokens (audit 5): the relay requires a table-scoped token to publish/subscribe. The
+  // client mints + caches one per table transparently; gated tables need an admission secret.
+  private readonly tokens = new Map<string, string>();
+  private readonly admissions = new Map<string, string>();
   constructor(base: string, fetchFn: FetchFn = globalThis.fetch.bind(globalThis)) {
     this.base = base;
     this.fetchFn = fetchFn;
+  }
+
+  /** Register the admission secret for a GATED table so this client can mint its capability. */
+  setAdmission(tableId: string, secret: string): void {
+    this.admissions.set(tableId, secret);
+  }
+
+  /**
+   * Ensure a capability token for `tableId` is cached, minting one if needed (audit 5). For a gated
+   * table the registered admission secret is presented. `force` re-mints (e.g. after a 401/403).
+   */
+  private async ensureToken(tableId: string, force = false): Promise<string> {
+    if (!force) {
+      const cached = this.tokens.get(tableId);
+      if (cached) return cached;
+    }
+    const admission = this.admissions.get(tableId);
+    const res = await this.fetchFn(`${this.base}/tables/${tableId}/capability`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(admission ? { admission } : {}),
+    });
+    const r = await asJson<{ token: string }>(res);
+    if (!r.token) throw new Error('relay returned no capability token');
+    this.tokens.set(tableId, r.token);
+    return r.token;
   }
 
   async health(): Promise<boolean> {
@@ -76,14 +106,21 @@ export class RelayClient {
     return asJson(await this.fetchFn(`${this.base}/presence`));
   }
 
-  async createTable(id: string, name: string): Promise<TableInfo> {
-    return asJson(
+  /**
+   * Create a table. `admission` (optional) GATES the table: only callers presenting this secret can
+   * mint a capability for it. The creator's capability token is captured for immediate publish/sub.
+   */
+  async createTable(id: string, name: string, admission?: string): Promise<TableInfo> {
+    if (admission) this.admissions.set(id, admission);
+    const r = await asJson<TableInfo & { token?: string }>(
       await this.fetchFn(`${this.base}/tables`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ id, name }),
+        body: JSON.stringify(admission ? { id, name, admission } : { id, name }),
       }),
     );
+    if (r.token) this.tokens.set(id, r.token);
+    return { id: r.id, name: r.name, members: r.members };
   }
 
   async listTables(): Promise<TableInfo[]> {
@@ -98,10 +135,20 @@ export class RelayClient {
     const ac = new AbortController();
     void (async () => {
       try {
-        const res = await this.fetchFn(`${this.base}/tables/${tableId}/subscribe`, {
+        // Mint/attach a capability token (audit 5); pass it as a query param since SSE consumers
+        // can't always set headers. Re-mint once if the relay rejects a stale token.
+        let token = await this.ensureToken(tableId);
+        let res = await this.fetchFn(`${this.base}/tables/${tableId}/subscribe?token=${encodeURIComponent(token)}`, {
           signal: ac.signal,
-          headers: { accept: 'text/event-stream' },
+          headers: { accept: 'text/event-stream', authorization: `Bearer ${token}` },
         });
+        if (res.status === 401 || res.status === 403) {
+          token = await this.ensureToken(tableId, true);
+          res = await this.fetchFn(`${this.base}/tables/${tableId}/subscribe?token=${encodeURIComponent(token)}`, {
+            signal: ac.signal,
+            headers: { accept: 'text/event-stream', authorization: `Bearer ${token}` },
+          });
+        }
         if (!res.ok || !res.body) return;
         const reader = (res.body as ReadableStream<Uint8Array>).getReader();
         const dec = new TextDecoder();
@@ -134,13 +181,22 @@ export class RelayClient {
 
   /** Speed path: publish an opaque object to the table channel; returns delivery count. */
   async publish(tableId: string, object: Uint8Array): Promise<number> {
-    const r = await asJson<{ delivered: number }>(
-      await this.fetchFn(`${this.base}/tables/${tableId}/publish`, {
+    // Attach a capability token (audit 5); re-mint once if the relay rejects a stale/expired token.
+    let token = await this.ensureToken(tableId);
+    let res = await this.fetchFn(`${this.base}/tables/${tableId}/publish`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream', authorization: `Bearer ${token}` },
+      body: object,
+    });
+    if (res.status === 401 || res.status === 403) {
+      token = await this.ensureToken(tableId, true);
+      res = await this.fetchFn(`${this.base}/tables/${tableId}/publish`, {
         method: 'POST',
-        headers: { 'content-type': 'application/octet-stream' },
+        headers: { 'content-type': 'application/octet-stream', authorization: `Bearer ${token}` },
         body: object,
-      }),
-    );
+      });
+    }
+    const r = await asJson<{ delivered: number }>(res);
     return r.delivered;
   }
 }

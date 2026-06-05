@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -22,17 +24,26 @@ type Server struct {
 	Presence *PresenceRegistry
 	Tables   *TableRegistry
 	mux      *http.ServeMux
-	pubLimit *rateLimiter // per-table publish rate limit (audit 9)
+	pubLimit *rateLimiter      // per-table publish rate limit (audit 9)
+	caps     *capabilityMinter // table-scoped capability tokens (audit 5)
 }
 
 // NewServer constructs a relay server with fresh registries.
-// ttl is the presence heartbeat expiry window.
+// ttl is the presence heartbeat expiry window. The capability secret is taken from the RELAY_SECRET
+// environment variable when set (so it can be rotated / shared across a restart); otherwise a fresh
+// 32-byte CSPRNG secret is generated for this process.
 func NewServer(ttl time.Duration) *Server {
+	return NewServerWithSecret(ttl, []byte(os.Getenv("RELAY_SECRET")))
+}
+
+// NewServerWithSecret is NewServer with an explicit capability secret (deterministic tests / rotation).
+func NewServerWithSecret(ttl time.Duration, secret []byte) *Server {
 	s := &Server{
 		Presence: NewPresenceRegistry(ttl),
 		Tables:   NewTableRegistry(),
 		// 50 publishes/sec sustained, burst 100, per table — bounds trivial spam/spoof floods.
 		pubLimit: newRateLimiter(50, 100),
+		caps:     newCapabilityMinter(secret),
 	}
 	s.routes()
 	return s
@@ -72,7 +83,10 @@ func (s *Server) routes() {
 	mux.HandleFunc("POST /tables", s.handleCreateTable)
 	mux.HandleFunc("GET /tables", s.handleListTables)
 
-	// Tier B: opaque table-scoped object relay.
+	// Admission: mint a table-scoped capability token (audit 5).
+	mux.HandleFunc("POST /tables/{id}/capability", s.handleMintCapability)
+
+	// Tier B: opaque table-scoped object relay (capability-gated, fail-closed).
 	mux.HandleFunc("POST /tables/{id}/publish", s.handlePublish)
 	mux.HandleFunc("GET /tables/{id}/subscribe", s.handleSubscribe)
 
@@ -130,6 +144,18 @@ func (s *Server) handleListPresence(w http.ResponseWriter, _ *http.Request) {
 type createTableReq struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
+	// Admission is an optional shared secret. When present the table is GATED: a capability token
+	// is only minted to a caller who presents this secret. Omitted → an OPEN table.
+	Admission string `json:"admission,omitempty"`
+}
+
+// createTableResp returns the table plus the creator's capability token (the creator is admitted).
+type createTableResp struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Members int    `json:"members"`
+	Token   string `json:"token"`
+	Exp     int64  `json:"exp"`
 }
 
 func (s *Server) handleCreateTable(w http.ResponseWriter, r *http.Request) {
@@ -138,7 +164,11 @@ func (s *Server) handleCreateTable(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	t, err := s.Tables.Create(req.ID, req.Name)
+	hash := ""
+	if req.Admission != "" {
+		hash = admissionHash(req.Admission)
+	}
+	t, err := s.Tables.CreateGated(req.ID, req.Name, hash)
 	if err != nil {
 		code := http.StatusBadRequest
 		if err == ErrTableExists {
@@ -147,7 +177,62 @@ func (s *Server) handleCreateTable(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, code, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, TableInfo{ID: t.ID, Name: t.Name, Members: t.SubscriberCount()})
+	// The creator is admitted: mint a full pub+sub capability for the new table.
+	token, exp, err := s.caps.mint(t.ID, ScopePubSub)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "could not mint capability")
+		return
+	}
+	writeJSON(w, http.StatusCreated, createTableResp{ID: t.ID, Name: t.Name, Members: t.SubscriberCount(), Token: token, Exp: exp})
+}
+
+type mintCapabilityReq struct {
+	// Admission is the table's shared secret; required for a gated table, ignored for an open one.
+	Admission string `json:"admission,omitempty"`
+}
+
+type mintCapabilityResp struct {
+	Token string `json:"token"`
+	Exp   int64  `json:"exp"`
+}
+
+// handleMintCapability issues a table-scoped pub+sub capability (audit 5). A gated table requires a
+// matching admission secret (constant-time compare); an open table mints freely (the relay still
+// REQUIRES the resulting token on publish/subscribe, so this bounds/labels every channel user and
+// supports expiry + rotation). Fail-closed: a bad admission secret returns 403.
+func (s *Server) handleMintCapability(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	t, err := s.Tables.Get(id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	var req mintCapabilityReq
+	// Body is optional for open tables; tolerate an empty body.
+	if r.Body != nil {
+		_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req)
+	}
+	if t.Gated() && !admissionMatches(t.AdmissionHash(), req.Admission) {
+		writeErr(w, http.StatusForbidden, ErrBadAdmission.Error())
+		return
+	}
+	token, exp, err := s.caps.mint(id, ScopePubSub)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "could not mint capability")
+		return
+	}
+	writeJSON(w, http.StatusOK, mintCapabilityResp{Token: token, Exp: exp})
+}
+
+// bearerToken extracts a capability token from the Authorization: Bearer header, or (for SSE, where
+// EventSource cannot set headers) from the `token` query parameter.
+func bearerToken(r *http.Request) string {
+	if h := r.Header.Get("Authorization"); h != "" {
+		if after, ok := strings.CutPrefix(h, "Bearer "); ok {
+			return strings.TrimSpace(after)
+		}
+	}
+	return r.URL.Query().Get("token")
 }
 
 func (s *Server) handleListTables(w http.ResponseWriter, _ *http.Request) {
@@ -162,6 +247,16 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 	t, err := s.Tables.Get(id)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	// Capability required to publish (audit 5) — fail closed. Verified BEFORE rate-limit/body work so
+	// an unauthorised caller is rejected at the door.
+	if err := s.caps.verify(bearerToken(r), id, ScopePublish); err != nil {
+		code := http.StatusUnauthorized
+		if err == ErrBadCapability {
+			code = http.StatusForbidden
+		}
+		writeErr(w, code, err.Error())
 		return
 	}
 	if !s.pubLimit.allow(id) { // per-table publish quota (audit 9)
@@ -189,6 +284,20 @@ func (s *Server) handlePublish(w http.ResponseWriter, r *http.Request) {
 // framed as one SSE "data:" event; the relay does not interpret them.
 func (s *Server) handleSubscribe(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	// Capability required to subscribe (audit 5) — fail closed. Checked BEFORE joining the fan-out so
+	// an unauthorised client never receives a single frame of the table's stream.
+	if _, err := s.Tables.Get(id); err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if err := s.caps.verify(bearerToken(r), id, ScopeSubscribe); err != nil {
+		code := http.StatusUnauthorized
+		if err == ErrBadCapability {
+			code = http.StatusForbidden
+		}
+		writeErr(w, code, err.Error())
+		return
+	}
 	ch, unsub, err := s.Tables.Join(id)
 	if err != nil {
 		writeErr(w, http.StatusNotFound, err.Error())

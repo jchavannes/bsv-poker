@@ -30,18 +30,30 @@ type Table struct {
 	Name    string `json:"name"`
 	Members int    `json:"members"`
 
+	// admissionHash is the hex SHA-256 of this table's admission secret, or "" for an OPEN table.
+	// A gated table (non-empty hash) only mints a capability to a caller who presents the secret.
+	// Never serialised — it never leaves the relay.
+	admissionHash string
+
 	mu   sync.Mutex
 	seq  uint64
 	subs map[uint64]chan []byte
 }
 
-func newTable(id, name string) *Table {
+func newTable(id, name, admissionHash string) *Table {
 	return &Table{
-		ID:   id,
-		Name: name,
-		subs: make(map[uint64]chan []byte),
+		ID:            id,
+		Name:          name,
+		admissionHash: admissionHash,
+		subs:          make(map[uint64]chan []byte),
 	}
 }
+
+// Gated reports whether this table requires an admission secret to mint a capability.
+func (t *Table) Gated() bool { return t.admissionHash != "" }
+
+// AdmissionHash returns the stored admission hash ("" for an open table).
+func (t *Table) AdmissionHash() string { return t.admissionHash }
 
 // Subscribe registers a subscriber to the table's opaque object channel and
 // returns the receive channel plus an unsubscribe func. Tier B (REQ-NET-002).
@@ -113,8 +125,14 @@ func NewTableRegistry() *TableRegistry {
 	return &TableRegistry{tables: make(map[string]*Table)}
 }
 
-// Create registers a new table. Duplicate ids are rejected.
+// Create registers a new OPEN table. Duplicate ids are rejected.
 func (r *TableRegistry) Create(id, name string) (*Table, error) {
+	return r.CreateGated(id, name, "")
+}
+
+// CreateGated registers a new table with an optional admission hash ("" = open). Duplicate ids are
+// rejected. A gated table only mints capability tokens to callers who present the admission secret.
+func (r *TableRegistry) CreateGated(id, name, admissionHash string) (*Table, error) {
 	if id == "" {
 		return nil, ErrEmptyID
 	}
@@ -123,7 +141,7 @@ func (r *TableRegistry) Create(id, name string) (*Table, error) {
 	if _, ok := r.tables[id]; ok {
 		return nil, ErrTableExists
 	}
-	t := newTable(id, name)
+	t := newTable(id, name, admissionHash)
 	r.tables[id] = t
 	return t, nil
 }

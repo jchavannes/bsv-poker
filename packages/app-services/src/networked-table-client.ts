@@ -36,6 +36,14 @@ export type Strategy = (legal: LegalActions, seat: number, state: HoldemState) =
 interface Envelope {
   t: 'commit' | 'reveal' | 'action';
   seat: number;
+  /**
+   * Hand index. This client runs a SINGLE hand, so it is always 0 — but the field is REQUIRED on
+   * the wire: the shared trust-boundary validator (`validateEnvelope`, REQ-APP-103) rejects any
+   * envelope without a valid `hand`, so omitting it would make every frame fail validation and
+   * starve the handshake. Sending hand:0 keeps this client's frames acceptance-compatible with the
+   * same validator the multi-hand interactive client uses.
+   */
+  hand: number;
   c?: string;
   r?: string;
   kind?: Action['kind'];
@@ -127,8 +135,8 @@ export class NetworkedTableClient {
       // 1) entropy commit/reveal handshake. Keep re-sending the commit during the reveal phase
       //    too, so a peer that subscribed late still receives it (a player must not stop
       //    broadcasting its commit just because IT already has everyone's).
-      const commitEnv: Envelope = { t: 'commit', seat: this.mySeat, c: bytesToHex(sha256(this.entropy)) };
-      const revealEnv: Envelope = { t: 'reveal', seat: this.mySeat, r: bytesToHex(this.entropy) };
+      const commitEnv: Envelope = { t: 'commit', seat: this.mySeat, hand: 0, c: bytesToHex(sha256(this.entropy)) };
+      const revealEnv: Envelope = { t: 'reveal', seat: this.mySeat, hand: 0, r: bytesToHex(this.entropy) };
       const allCommits = (): boolean =>
         this.seats.every((s) => this.received((e) => e.t === 'commit' && e.seat === s.seat));
       const allReveals = (): boolean =>
@@ -161,7 +169,7 @@ export class NetworkedTableClient {
           const legal = m.getLegalActions(state, this.mySeat);
           const action = strategy(legal, this.mySeat, state);
           state = m.apply(state, action);
-          await this.publish({ t: 'action', seat: this.mySeat, kind: action.kind, amount: action.amount });
+          await this.publish({ t: 'action', seat: this.mySeat, hand: 0, kind: action.kind, amount: action.amount });
         } else {
           const seen = cursor.get(toAct) ?? 0;
           await this.awaitCond(() => this.peerActions(toAct).length > seen, 10000);
