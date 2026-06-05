@@ -54,7 +54,12 @@ indexer.
    `deriveState`, reconnect-e2e rebuilds identical state from the transcript).
 2. **The on-chain settlement transaction graph** validated by the node (real BIP-143/FORKID sighash,
    the interpreter, nLockTime finality — the on-chain e2es). The money outcome is whatever the node
-   accepts and confirms, not what any indexer says.
+   accepts and confirms, not what any indexer says. This canonical graph is now a concrete, reusable,
+   VALIDATED component — `adapters/src/transaction-graph.ts` `TransactionGraph` — that reconstructs the
+   DAG from raw transactions and enforces parent-existence, no-double-spend and value-conservation. It
+   is proven to MATCH the node it validates against (`txgraph-e2e`: same accepted funding/settlement,
+   same UTXO set, same double-spend rejection), so "the truth is the validated transaction graph" is a
+   real artifact (audit #31), not a claim — and it is deliberately NOT the indexer (a projection).
 
 The indexer is a cache over (1) for fast reconnect; it can be discarded and rebuilt from the
 authenticated record stream without affecting correctness.
