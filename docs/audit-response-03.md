@@ -80,8 +80,19 @@ converge byte-for-byte after a stalled seat is dropped at the anchored deadline 
 deadline the table waits and a properly-signed but premature/forged claim (`d` below `floor+window`)
 is rejected — the seat is NOT dropped (negative); structural rejection of malformed claims
 (`message-validation.test.ts`: missing/negative/non-integer `d`, missing `subject`, self-claim).
-The forfeiture branch's value-conservation + post-maturity guards are proven in-interpreter
-(`INV-BOND-1..5`) and tx-level recovery in `onchain-recovery-e2e`.
+The forfeiture branch's value-conservation + branch-exclusivity guards are proven in-interpreter
+(`INV-BOND-1..5`) and on the real regtest node by `onchain-forfeit-e2e` (owner reclaims via REVEAL; a
+wrong preimage fails IN-SCRIPT; the beneficiary settles the FORFEIT branch conserving exactly the
+bond; the forfeited owner can never reclaim it — double-spend rejected), plus tx-level recovery in
+`onchain-recovery-e2e`.
+
+**Honest node caveat (maturity gate):** the FORFEIT branch's maturity is the spending transaction's
+`nLockTime`, enforced by a production BSV node (CLTV is a no-op post-Genesis, so it cannot live
+in-script). The local `bonded-subsat-channel` regtest node does NOT enforce `nLockTime` finality at
+admission (no finality check in `node/validation.py`), so `onchain-forfeit-e2e` probes and reports
+this rather than asserting a guarantee that node cannot provide; the maturity gate is therefore a
+production-node responsibility, while the branch STRUCTURE (only the beneficiary can spend FORFEIT,
+only the owner can spend REVEAL) is proven independently of the node.
 
 **The commit/reveal handshake remains fail-closed by design:** a non-responder during the entropy
 handshake aborts the hand (funds recoverable via the proven pre-signed refund graph). Re-deriving a
