@@ -11,8 +11,9 @@ import { CanonicalIndexer } from '../src/canonical-indexer.ts';
 import { createGameModule, universalBot, offlineRuleset, deckFromEntropies, type TxRecord } from '@bsv-poker/app-services';
 import { p2pkhScript } from '@bsv-poker/adapters/regtest-node';
 import { sha256, bytesToHex } from '@bsv-poker/protocol-types';
-import { genKeyPair, type Script } from '@bsv-poker/script-templates-ts';
-import { type Tx, serializeTxWire, txidWire } from '@bsv-poker/tx-builder';
+import { genKeyPair, signPreimage, type Script } from '@bsv-poker/script-templates-ts';
+import { type Tx, serializeTxWire, txidWire, sighashMessage } from '@bsv-poker/tx-builder';
+import { RegtestNode } from '@bsv-poker/adapters/regtest-node';
 
 const RULESET = offlineRuleset('holdem', 2);
 const SEATS = [{ seat: 0, stack: 100 }, { seat: 1, stack: 100 }];
@@ -71,6 +72,36 @@ test('the canonical indexer maintains a validated transaction GRAPH (audit #25)'
   const r = ci.addTransaction(bytesToHex(serializeTxWire(ds, [ss])));
   assert.equal(r.ok, false);
   assert.match(r.ok ? '' : r.reason, /double-spend/);
+});
+
+test('ingestOnChain performs FULL production validation via the node — bad signature rejected (audit #26)', async () => {
+  const SUBSIDY = 5_000_000_000;
+  const node = new RegtestNode();
+  const miner = genKeyPair();
+  const alice = genKeyPair();
+  const ci = new CanonicalIndexer();
+  const cb = await node.generateBlock(bytesToHex(miner.pubCompressed));
+  await node.generateBlock(bytesToHex(miner.pubCompressed));
+  ci.addRoot(cb.coinbaseTxid, 0, BigInt(SUBSIDY));
+
+  // A VALID funding spend (correct signature) passes full node validation AND enters the graph.
+  const funding: Tx = { version: 1, inputs: [{ prevTxid: cb.coinbaseTxid, vout: 0, sequence: 0xffffffff }], outputs: [{ satoshis: SUBSIDY - 1000, locking: p2pkhScript(alice.pubCompressed) }], nLockTime: 0 };
+  const fss: Script = [signPreimage(sighashMessage(funding, 0, p2pkhScript(miner.pubCompressed), SUBSIDY), miner.priv), miner.pubCompressed];
+  const ok = await ci.ingestOnChain(bytesToHex(serializeTxWire(funding, [fss])), node);
+  assert.equal(ok.validated, true, `valid funding must pass full validation: ${ok.reason}`);
+  await node.generateBlock(bytesToHex(miner.pubCompressed));
+  const fundTxid = txidWire(funding, [fss]);
+  assert.equal(ci.isUnspent(fundTxid, 0), true, 'validated funding output is in the canonical graph');
+
+  // A BAD-SIGNATURE spend (signed by the WRONG key) is REJECTED by the node's interpreter — full
+  // production validation, which structure-only validation would miss.
+  const FUND_VAL = SUBSIDY - 1000;
+  const wrong = genKeyPair();
+  const bad: Tx = { version: 1, inputs: [{ prevTxid: fundTxid, vout: 0, sequence: 0xffffffff }], outputs: [{ satoshis: FUND_VAL - 1000, locking: p2pkhScript(alice.pubCompressed) }], nLockTime: 0 };
+  const bss: Script = [signPreimage(sighashMessage(bad, 0, p2pkhScript(alice.pubCompressed), FUND_VAL), wrong.priv), alice.pubCompressed];
+  const r = await ci.ingestOnChain(bytesToHex(serializeTxWire(bad, [bss])), node);
+  assert.equal(r.validated, false, 'a bad signature must be rejected by full node validation');
+  assert.equal(ci.isUnspent(fundTxid, 0), true, 'the rejected spend did not consume the funding output');
 });
 
 test('canonicalView returns BOTH the legality verdict and the validated UTXO set (audit #24+#25)', () => {

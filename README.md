@@ -79,6 +79,24 @@ docker run --rm -p 8080:80 ghcr.io/prof-faustus/bsv-poker-web:latest
 | `pnpm trace` | requirements → code → test traceability check (core §13.3) |
 | `pnpm ci` | the full CI pipeline (core §16, app §A14.2) |
 
+## Security & assurance
+
+- **Key & entropy lifecycle manifest** — the explicit one-game key lifecycle (every secret, its
+  origin, scope and no-reuse guarantee) is in [`docs/KEY-LIFECYCLE.md`](./docs/KEY-LIFECYCLE.md) and as
+  a machine-readable code artifact: `KEY_LIFECYCLE` + `perHandEntropy` in
+  `packages/app-services/src/key-lifecycle.ts`. The session signing key is non-extractable and the
+  wallet/mental-poker key can run in an isolated separate-process custody boundary
+  (`packages/wallet-custody/src/isolated-custody.ts`).
+- **Real-value production-readiness gate** — `assertRealValueReady` (fail-closed) requires every
+  production invariant (mainnet ack, mandatory signing, BIP-143/FORKID sighash, real custody, managed
+  capability secret, loopback bind) before real funds are handled
+  (`packages/app-services/src/production-readiness.ts`).
+- **Canonical validating indexer** — `CanonicalIndexer` validates poker legality through the one engine
+  AND maintains a validated transaction graph + full node validation
+  (`packages/sdk/src/canonical-indexer.ts`).
+- **Audit responses** — point-by-point with evidence: [`docs/audit-response-04.md`](./docs/audit-response-04.md)
+  and ADRs under [`docs/adr/`](./docs/adr/).
+
 ## Status
 
 See [`spec/BUILD-STATUS.md`](./spec/BUILD-STATUS.md) for the honest per-phase build status

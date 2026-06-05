@@ -29,9 +29,27 @@ export class CanonicalIndexer {
     this.graph.addRoot(txid, vout, satoshis);
   }
 
-  /** Ingest an on-chain transaction into the canonical graph (validated before commit). */
+  /** Ingest an on-chain transaction into the canonical graph (structural validation before commit). */
   addTransaction(rawHex: string): AddResult {
     return this.graph.add(rawHex);
+  }
+
+  /**
+   * FULL production BSV validation (audit #26): validate a transaction through the node's REAL
+   * consensus engine — the Script interpreter (every input's unlocking script vs the spent output's
+   * locking script over the BIP-143/FORKID sighash), nLockTime finality, value conservation and
+   * double-spend — AND, on acceptance, fold it into the canonical structural graph. A
+   * structurally-plausible tx with an INVALID signature is rejected here (the node runs the
+   * interpreter), unlike the structure-only `addTransaction`. Returns the verdict.
+   */
+  async ingestOnChain(
+    rawHex: string,
+    node: { submitTx(raw: string): Promise<{ ok: boolean; reason?: string }> },
+  ): Promise<{ validated: boolean; reason?: string }> {
+    const r = await node.submitTx(rawHex); // the node runs the FULL interpreter + consensus checks
+    if (!r.ok) return { validated: false, ...(r.reason !== undefined ? { reason: r.reason } : {}) };
+    const g = this.graph.add(rawHex);
+    return g.ok ? { validated: true } : { validated: false, reason: g.reason };
   }
 
   /** The authoritative UTXO set the validated transaction graph represents. */
