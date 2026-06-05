@@ -69,10 +69,20 @@ export async function sessionAuthFromSeed(seed: Uint8Array): Promise<SessionAuth
   const der = new Uint8Array(ED25519_PKCS8_PREFIX.length + 32);
   der.set(ED25519_PKCS8_PREFIX);
   der.set(seed, ED25519_PKCS8_PREFIX.length);
-  const priv = await subtle.importKey('pkcs8', der, ALG, true, ['sign']);
-  const jwk = (await subtle.exportKey('jwk', priv)) as { x?: string };
+
+  // Read the PUBLIC key once from a TRANSIENT extractable import, then discard that handle.
+  const probe = await subtle.importKey('pkcs8', der, ALG, true, ['sign']);
+  const jwk = (await subtle.exportKey('jwk', probe)) as { x?: string };
   if (!jwk.x) throw new Error('could not derive Ed25519 public key from seed');
   const pub = bytesToHex(b64urlToBytes(jwk.x));
+
+  // The LONG-LIVED signing key is NON-EXTRACTABLE (audit #17 — machine-memory exposure): the crypto
+  // subsystem holds the raw Ed25519 private key, NOT raw bytes in JS memory, so a dump of this process
+  // cannot export it and cannot forge this seat's signatures/settlement. Forward secrecy: the DER seed
+  // buffer (the raw key material) is zeroized now that the key is imported.
+  const priv = await subtle.importKey('pkcs8', der, ALG, false, ['sign']);
+  der.fill(0);
+
   return {
     pub,
     async sign(msg: string): Promise<string> {

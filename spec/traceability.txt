@@ -161,7 +161,7 @@ REQ-APP-092: traced -> [packages/hand-eval/src/high.ts, tools/perf-suite.ts] tes
 REQ-APP-093: traced -> [packages/ui-core/src/view-models/table-layout.ts, packages/game-holdem/src/holdem.ts] tests [packages/ui-core/test/table-room-vm.test.ts]
 REQ-APP-094: traced -> [apps/client-desktop/native/main.c] tests [apps/client-desktop/verify-desktop.ts]
 REQ-APP-100: traced -> [docs/redteam-02.md, packages/adapters/src/index.ts] tests [packages/adapters/test/architecture.test.ts]
-REQ-APP-101: traced -> [packages/wallet-custody/src/custody.ts] tests [packages/wallet-custody/test/custody.test.ts]
+REQ-APP-101: traced -> [packages/wallet-custody/src/custody.ts, packages/wallet-custody/src/isolated-custody.ts, packages/app-services/src/session-auth.ts] tests [packages/wallet-custody/test/custody.test.ts, packages/wallet-custody/test/isolated-custody.test.ts, packages/app-services/test/session-auth-hardening.test.ts]
 REQ-APP-102: traced -> [packages/wallet-custody/src/custody.ts] tests [packages/wallet-custody/test/custody.test.ts]
 REQ-APP-103: traced -> [packages/app-services/src/message-validation.ts] tests [packages/app-services/test/message-validation.test.ts]
 REQ-APP-104: traced -> [docs/redteam-02.md, packages/app-services/src/network-gate.ts] tests [packages/app-services/test/network-gate.test.ts]

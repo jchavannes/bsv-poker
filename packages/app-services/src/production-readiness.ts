@@ -17,7 +17,9 @@
 import { selectNetwork, resolveBindHost, type Network } from './network-gate.ts';
 
 export type SighashMode = 'bip143-forkid' | 'simplified';
-export type CustodyKind = 'hardware' | 'software' | 'fake' | 'none';
+/** `isolated` = software custody in a separate-process boundary (audit #17, createIsolatedCustody);
+ *  `hardware` = TEE/HSM; both keep the key out of the host's address space and count as real custody. */
+export type CustodyKind = 'hardware' | 'isolated' | 'software' | 'fake' | 'none';
 
 export interface RealValueConfig {
   readonly network: Network;
@@ -68,7 +70,8 @@ export function evaluateRealValueReadiness(cfg: RealValueConfig): ReadinessRepor
 
   add('signing-mandatory', cfg.signingRequired === true, cfg.signingRequired ? 'unsigned play disabled' : 'allowUnsigned must be OFF for real funds');
   add('production-sighash', cfg.sighash === 'bip143-forkid', `sighash=${cfg.sighash} (must be bip143-forkid)`);
-  add('real-custody', cfg.custody === 'hardware' || cfg.custody === 'software', `custody=${cfg.custody} (must be hardware/software, not fake/none)`);
+  const realCustody = cfg.custody === 'hardware' || cfg.custody === 'isolated' || cfg.custody === 'software';
+  add('real-custody', realCustody, `custody=${cfg.custody} (must be hardware/isolated/software, not fake/none)`);
   add('relay-secret', cfg.relaySecretConfigured === true, cfg.relaySecretConfigured ? 'managed capability secret configured' : 'a managed RELAY_SECRET must be configured');
   try {
     resolveBindHost({ host: cfg.bindHost ?? '127.0.0.1', ...(cfg.allowNonLoopback !== undefined ? { allowNonLoopback: cfg.allowNonLoopback } : {}) });

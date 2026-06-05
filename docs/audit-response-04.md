@@ -22,7 +22,7 @@ are on `master`. Nothing here is aspirational — every claim cites a passing te
 | 14 | Shared reveal after all commits | PASS | `collectHandshake` PHASE 2. |
 | 15 | Deck from all active parties | PASS | `deckFromEntropies(active)`. |
 | 16 | One party cannot fix the deck | PASS (for protocol) | deck = composition of active seats' secret permutations; a dropped non-revealer is excluded, never able to set the deck alone. |
-| 17 | Safe if one machine's memory is exposed | PARTIAL (inherent) | one party's exposure reveals only THAT party's own cards/decisions — unavoidable for any client; others' entropy stays secret (per-hand, KEY-LIFECYCLE.md). |
+| 17 | Safe if one machine's memory is exposed | **HARDENED THIS ROUND** | the long-lived secrets are moved OUT of the host's recoverable memory: the Ed25519 session signing key is now **non-extractable** (session-auth.ts — the crypto subsystem holds it; a dump can't export or forge), and the wallet/mental-poker master key runs in an **isolated separate-process custody boundary** (`wallet-custody/isolated-custody.ts` — distinct PID; the host handle holds no key; host seed zeroized). Only the CURRENT hand's decrypted cards are transiently in the player's own client — irreducible for any client. Tests: session-auth-hardening, isolated-custody. |
 | 18 | Deck shuffle unbiased | PASS | `seededShuffle` rejection sampling. |
 | 19 | Permutation unbiased | PASS | `permutationFromEntropy` rejection sampling. |
 | 20 | Multi-party permutation composition | PASS | `shuffledDeck` composes each party's secret permutation. |

@@ -116,7 +116,7 @@ export const TRACE_MAP: Readonly<Record<string, Trace>> = {
   'REQ-APP-072': { files: ['packages/app-services/src/network.ts'], tests: ['packages/app-services/test/network.test.ts'] },
   'REQ-APP-029': { files: ['packages/app-services/src/network-gate.ts'], tests: ['packages/app-services/test/network-gate.test.ts'] },
   'REQ-APP-030': { files: ['packages/app-services/src/network-gate.ts'], tests: ['packages/app-services/test/network-gate.test.ts'] },
-  'REQ-APP-101': { files: ['packages/wallet-custody/src/custody.ts'], tests: ['packages/wallet-custody/test/custody.test.ts'] },
+  'REQ-APP-101': { files: ['packages/wallet-custody/src/custody.ts', 'packages/wallet-custody/src/isolated-custody.ts', 'packages/app-services/src/session-auth.ts'], tests: ['packages/wallet-custody/test/custody.test.ts', 'packages/wallet-custody/test/isolated-custody.test.ts', 'packages/app-services/test/session-auth-hardening.test.ts'] },
   'REQ-APP-111': { files: ['packages/engine/src/fsm.ts'], tests: ['packages/sdk/test/adversarial.test.ts'] },
   'REQ-APP-112': { files: ['packages/app-services/src/network-gate.ts'], tests: ['packages/app-services/test/network-gate.test.ts'] },
   'REQ-APP-161': { files: ['packages/ui-core/src/view-models/table.ts'], tests: ['packages/ui-core/test/table-vm.test.ts'] },
