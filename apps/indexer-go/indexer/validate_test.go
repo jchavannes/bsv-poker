@@ -32,20 +32,29 @@ func signedRecord(t *testing.T, priv ed25519.PrivateKey, tableID, txid string, e
 
 // INV-IXV-0: the canonical signed message matches TypeScript's JSON.stringify byte-for-byte.
 func TestCanonicalMessageInteropVector(t *testing.T) {
-	// session-auth.ts: JSON.stringify([tableId, t, seat, hand, kind??'', amount??0, c??'', r??'', discard??[], prev??''])
+	// session-auth.ts: JSON.stringify([tableId, t, seat, hand, kind??'', amount??0, c??'', r??'',
+	//                                   discard??[], prev??'', d??0, h??0, subject??-1])
+	// A commit with no d/h/subject → d=0, h=0, subject=-1.
 	got, err := canonicalMessage("t1", wireEnvelope{T: "commit", Seat: 0, Hand: 0, C: "ab"})
 	if err != nil {
 		t.Fatalf("canonicalMessage: %v", err)
 	}
-	want := `["t1","commit",0,0,"",0,"ab","",[],""]`
+	want := `["t1","commit",0,0,"",0,"ab","",[],"",0,0,-1]`
 	if string(got) != want {
 		t.Fatalf("canonical message drift:\n got=%s\nwant=%s", got, want)
 	}
-	// An action with an amount, discard and prev must also match exactly.
-	got2, _ := canonicalMessage("tbl", wireEnvelope{T: "action", Seat: 2, Hand: 1, Kind: "bet", Amount: 50, Discard: []int{1, 3}, Prev: "ff"})
-	want2 := `["tbl","action",2,1,"bet",50,"","",[1,3],"ff"]`
+	// An action with an amount, discard, prev, and an anchored height h must also match exactly.
+	subj := 2
+	got2, _ := canonicalMessage("tbl", wireEnvelope{T: "action", Seat: 2, Hand: 1, Kind: "bet", Amount: 50, Discard: []int{1, 3}, Prev: "ff", H: 7})
+	want2 := `["tbl","action",2,1,"bet",50,"","",[1,3],"ff",0,7,-1]`
 	if string(got2) != want2 {
 		t.Fatalf("canonical message drift (action):\n got=%s\nwant=%s", got2, want2)
+	}
+	// A timeout-claim carries d and subject (subject present → its value, not -1).
+	got3, _ := canonicalMessage("tbl", wireEnvelope{T: "action", Seat: 1, Hand: 0, D: 9, Subject: &subj})
+	want3 := `["tbl","action",1,0,"",0,"","",[],"",9,0,2]`
+	if string(got3) != want3 {
+		t.Fatalf("canonical message drift (timeout-claim fields):\n got=%s\nwant=%s", got3, want3)
 	}
 }
 

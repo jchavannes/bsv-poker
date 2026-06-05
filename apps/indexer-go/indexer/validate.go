@@ -73,7 +73,10 @@ var (
 const maxEnvelopeBytes = 64 * 1024
 
 // wireEnvelope mirrors the app-layer signed envelope (message-validation.ts WireEnvelope + sig).
-// Every field is optional on the wire and defaulted to match the producer's `?? ''/0/[]` rule.
+// Every field is optional on the wire and defaulted to match the producer's `?? ''/0/[]/-1` rule.
+// d/h/subject were added for the accountable action timeout (audit 3): `d` the anchored timeout
+// deadline, `h` the anchored height a reveal/action was emitted at, `subject` the seat a timeout-claim
+// drops. Subject is a POINTER because its JS default is -1 (not 0), so "absent" must map to -1.
 type wireEnvelope struct {
 	T       string  `json:"t"`
 	Seat    int     `json:"seat"`
@@ -84,6 +87,9 @@ type wireEnvelope struct {
 	R       string  `json:"r"`
 	Discard []int   `json:"discard"`
 	Prev    string  `json:"prev"`
+	D       int     `json:"d"`
+	H       int     `json:"h"`
+	Subject *int    `json:"subject"`
 	Sig     string  `json:"sig"`
 }
 
@@ -109,15 +115,22 @@ func parseEnvelope(raw []byte) (wireEnvelope, error) {
 
 // canonicalMessage rebuilds the EXACT bytes the producer signed (session-auth.ts envelopeMessage):
 //
-//	JSON.stringify([tableId, t, seat, hand, kind??'', amount??0, c??'', r??'', discard??[], prev??''])
+//	JSON.stringify([tableId, t, seat, hand, kind??'', amount??0, c??'', r??'', discard??[], prev??'',
+//	                d??0, h??0, subject??-1])
 //
 // compact, with HTML escaping DISABLED so the byte string matches JSON.stringify for all inputs.
+// MUST stay byte-identical to the TS envelopeMessage — the live validating-indexer-e2e is the
+// cross-language guard (a drift makes every real signature fail and the transcript empty).
 func canonicalMessage(tableID string, e wireEnvelope) ([]byte, error) {
 	discard := e.Discard
 	if discard == nil {
 		discard = []int{} // JS `?? []` → an empty array, which must marshal as [] not null
 	}
-	arr := []interface{}{tableID, e.T, e.Seat, e.Hand, e.Kind, e.Amount, e.C, e.R, discard, e.Prev}
+	subject := -1 // JS `subject ?? -1` — absent maps to -1, NOT the Go int zero-value 0
+	if e.Subject != nil {
+		subject = *e.Subject
+	}
+	arr := []interface{}{tableID, e.T, e.Seat, e.Hand, e.Kind, e.Amount, e.C, e.R, discard, e.Prev, e.D, e.H, subject}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false) // JSON.stringify does NOT \u-escape < > & — match it exactly
