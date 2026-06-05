@@ -19,12 +19,15 @@ import {
   sessionAuthFromSeed,
   deriveSeatSeed,
   assertRealValueReady,
+  perHandEntropy,
   type ClientUpdate,
   type OpenTable,
+  type SeatDrop,
 } from '@bsv-poker/app-services';
-import { OP, genKeyPair, signPreimage, compressedPub, fairPlayCommitment, fundingLocking, type Script, type KeyPair } from '@bsv-poker/script-templates-ts';
-import { bytesToHex, cardToString, type Action, type BranchBinding, type GameState, type LegalActions } from '@bsv-poker/protocol-types';
+import { OP, genKeyPair, signPreimage, compressedPub, fairPlayCommitment, fundingLocking, bondRevealOrForfeitLocking, type Script, type KeyPair } from '@bsv-poker/script-templates-ts';
+import { bytesToHex, sha256, hexToBytes, cardToString, type Action, type BranchBinding, type GameState, type LegalActions } from '@bsv-poker/protocol-types';
 import { RealBsvNode } from '@bsv-poker/adapters/real-node';
+import { ForfeitureCoordinator, type SeatBond } from '@bsv-poker/adapters/forfeiture-coordinator';
 import { type Tx, type TxOutput, serializeTxWire, txidWire, sighashMessage } from '@bsv-poker/tx-builder';
 
 /** Build a secp256k1 wallet/on-chain KeyPair from a 32-byte scalar (derived from the root) — same
@@ -53,6 +56,7 @@ const STRATEGY = arg('--strategy', 'passive')!;
 const MAX_HANDS = Number(arg('--hands', '100'));
 const GUI_PORT = arg('--gui') ? Number(arg('--gui')) : 0;
 const NODE_PORT = arg('--node') ? Number(arg('--node')) : 0; // on-chain settlement against this node
+const STALL_REVEAL = process.argv.includes('--stall-reveal'); // TEST: commit but never reveal (forfeit demo)
 const SUBSIDY = 5_000_000_000;
 const SCALE = 1_000_000;
 const SETTLE_FEE = 1000;
@@ -147,8 +151,22 @@ async function findTable(lobby: LobbyClient): Promise<OpenTable> {
 }
 
 async function main(): Promise<void> {
-  const relay = new RelayClient(RELAY);
-  const lobby = new LobbyClient(relay);
+  const baseRelay = new RelayClient(RELAY);
+  // TEST-ONLY stall: swallow this bot's own deck-handshake REVEAL frames (t==='reveal'), so it commits
+  // but never reveals — the survivors drop it and FORFEIT its bond (audit #19 forfeit demonstration).
+  // Seating (t==='seat-reveal') is untouched, so the stalling bot still takes its seat.
+  const relay = STALL_REVEAL
+    ? ({
+        subscribe: (t: string, cb: (x: string) => void) => baseRelay.subscribe(t, cb),
+        publish: async (t: string, bytes: Uint8Array) => {
+          try {
+            if ((JSON.parse(new TextDecoder().decode(bytes)) as { t?: string }).t === 'reveal') return 0;
+          } catch { /* not JSON — forward */ }
+          return baseRelay.publish(t, bytes);
+        },
+      } as unknown as RelayClient)
+    : baseRelay;
+  const lobby = new LobbyClient(baseRelay);
   const id = `${NAME}-${Math.random().toString(36).slice(2, 8)}`;
   // ONE root for this player: the wallet/on-chain key AND the Ed25519 seat key derive from it, so a
   // valid seat signature proves control of the same root that funds the buy-in (audit 3).
@@ -185,16 +203,26 @@ async function main(): Promise<void> {
     return tipCache.h;
   };
 
+  // This player's per-table entropy (the per-hand secret + the reveal-bond commitment derive from it).
+  const botEntropy = new Uint8Array(randomBytes(32));
+  // On-chain accountability (audit #19): a forfeiture coordinator is wired in below (seat 0) once the
+  // per-seat reveal bonds are known; the client's drop event records a non-revealer's forfeiture here.
+  let coordinator: ForfeitureCoordinator | null = null;
+
   const client = new InteractiveNetworkedTableClient({
     relay,
     tableId: table.id,
     mySeat: s.mySeat,
     seats: s.seats,
     ruleset: s.ruleset,
-    entropy: new Uint8Array(randomBytes(32)),
+    entropy: botEntropy,
     auth, // sign every envelope I emit
     seatPubs: s.players.map((p) => p.pub), // verify peers: seat → registered session key
     ...(node ? { heightSource: cachedHeight } : {}),
+    // Wire the on-chain forfeiture into the LIVE play path: when this client drops a non-revealer at
+    // the anchored reveal deadline, record the forfeiture of that seat's bond (the coordinator submits
+    // it after maturity). Only the pot beneficiary (seat 0) holds the key to claim, so only it acts.
+    onSeatDropped: (d: SeatDrop) => coordinator?.record(d),
   });
 
   client.onUpdate((u: ClientUpdate) => {
@@ -248,8 +276,56 @@ async function main(): Promise<void> {
       log(`received escrow outpoint ${fundingTxid.slice(0, 12)}…`);
     }
 
+    // ACCOUNTABILITY BONDS (audit #19) — every seat posts a per-hand REVEAL bond locked to its hand-0
+    // commit (c0 = SHA-256(perHandEntropy(entropy,0))), forfeitable to the pot beneficiary (seat 0) if
+    // it COMMITS but never REVEALS. Outpoints + commitments are exchanged over the relay; seat 0 builds
+    // the coordinator and forfeits any non-revealer's bond it dropped (recorded via onSeatDropped).
+    const BOND = s.seats[0]!.stack * SCALE;
+    const benePub = pubs[0]!; // the pot beneficiary that claims forfeited bonds
+    const c0 = sha256(perHandEntropy(botEntropy, 0)); // my hand-0 commit == my bond's reveal commitment
+    const bondFunder = genKeyPair();
+    const bcb = await node.generateBlock(bytesToHex(bondFunder.pubCompressed));
+    const bondTx: Tx = { version: 1, inputs: [{ prevTxid: bcb.coinbaseTxid, vout: 0, sequence: 0xffffffff }], outputs: [{ satoshis: BOND, locking: bondRevealOrForfeitLocking(BIND, c0, ocKey.pubCompressed, benePub) }], nLockTime: 0 };
+    const bfs: Script = [sigT(sighashMessage(bondTx, 0, p2pkh(bondFunder.pubCompressed), SUBSIDY), bondFunder), bondFunder.pubCompressed];
+    const br = await node.submitTx(bytesToHex(serializeTxWire(bondTx, [bfs])));
+    if (!br.ok) throw new Error(`bond funding rejected: ${br.reason}`);
+    await node.generateBlock(bytesToHex(bondFunder.pubCompressed));
+    const myBondTxid = txidWire(bondTx, [bfs]);
+    log(`posted reveal bond ${BOND} sats (${myBondTxid.slice(0, 12)}…)`);
+    const bondInfos = await gatherByIndex(RELAY, table.id, 'bond', s.mySeat, `${myBondTxid}:0:${bytesToHex(c0)}`, n);
+    if (s.mySeat === 0) {
+      const bonds = new Map<number, SeatBond>();
+      bondInfos.forEach((info, seat) => {
+        const [txid, voutStr, commitment] = info.split(':');
+        const script = bondRevealOrForfeitLocking(BIND, hexToBytes(commitment!), pubs[seat]!, benePub);
+        bonds.set(seat, { txid: txid!, vout: Number(voutStr), script, value: BOND, commitment: commitment! });
+      });
+      coordinator = new ForfeitureCoordinator({ node, beneficiary: ocKey, beneficiaryPayout: p2pkh(benePub), bonds });
+    }
+
     log('playing ONE hand over the wire, then settling on-chain…');
-    await client.playSession({ maxHands: 1 });
+    let handOk = true;
+    try {
+      await client.playSession({ maxHands: 1 });
+    } catch (e) {
+      // A non-revealer can leave too few active seats to finish the hand; that is exactly the case the
+      // bond forfeiture below penalises. Settle the forfeiture regardless of whether the hand completed.
+      handOk = false;
+      log(`hand aborted: ${(e as Error).message}`);
+    }
+    // If a seat was dropped for never revealing, FORFEIT its bond on-chain in this LIVE path (seat 0
+    // holds the beneficiary key). This is the accountability penalty, invoked from real play.
+    if (s.mySeat === 0 && coordinator && coordinator.pendingSeats().length > 0) {
+      for (let k = 0; k < 5; k++) await node.generateBlock(bytesToHex(genKeyPair().pubCompressed)); // mature the deadline
+      for (const r of (await coordinator.settle()).filter((x) => x.submitted)) log(`FORFEITED non-revealer seat ${r.seat}'s bond on-chain`);
+    }
+    if (!handOk) {
+      log('no settlement — the hand did not complete (a seat was dropped); accountability was enforced via bond forfeiture');
+      await node.shutdown();
+      view.status = 'ended';
+      if (GUI_PORT) await new Promise<void>(() => {});
+      return;
+    }
     const finalStacks = (client.getState()?.seats ?? s.seats.map((x) => ({ seat: x.seat, stack: x.stack }))).map((x) => x.stack);
 
     const recips = finalStacks.map((c, i) => ({ i, sats: c * SCALE })).filter((r) => r.sats > 0).sort((a, b) => b.sats - a.sats);
