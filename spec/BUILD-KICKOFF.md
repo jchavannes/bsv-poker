@@ -71,8 +71,9 @@ Per the phased roadmap (core §17, app §A21.9):
 - **Phase 1 — first playable: heads-up NL Texas Hold'em on regtest, Windows + web, with
   discovery.** Entropy commit/reveal; distributed shuffle; encrypted-card deal; full
   preflop→river betting FSM; minimum-reveal showdown; settlement; decision + recovery
-  timeouts; **fold without reveal**; relay + LAN discovery; the Tauri Windows shell and the
-  web shell over one shared UI core; transcript + deterministic replay. **Generate the §19.D
+  timeouts; **fold without reveal**; relay + LAN discovery; the native Win32+WebView2 Windows shell
+  and the framework-free web shell over one shared UI core (ADR 0004 — no Tauri/React/Vite);
+  transcript + deterministic replay. **Generate the §19.D
   vectors by running `handeval_oracle.py`.** Run the interpreter-level script tests (Genesis),
   the adversarial subset, the E2E in the VM, and `reproduce`. **Gate:** core §14.7 / app
   §A18.3, on **both** desktop and web builds. **Commit and tag.**
@@ -88,8 +89,8 @@ Per the phased roadmap (core §17, app §A21.9):
   the byte schedules as reproducible vectors.
 - Build the self-contained VM image (container; optional VM image) with a one-command
   bootstrap (core §10, app §A14).
-- Build the **signed Windows installer (Tauri)** and the **web bundle** from the same commit;
-  record artifact hashes (app §A14).
+- Build the **native Windows desktop app (Win32 + WebView2; portable exe, no Tauri)** and the
+  **in-tree web bundle** from the same commit; record artifact hashes (app §A14, ADR 0004).
 - CI stages (app §A14.2): typecheck → lint (incl. the OP_RETURN-absence check) → unit+property
   → interpreter-level (Genesis) → integration → build image → E2E-in-image → `reproduce` →
   accessibility + security → traceability. A red stage blocks merge.

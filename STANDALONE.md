@@ -39,13 +39,35 @@ for the multi-process cases) and passes: `onchain-forfeit` (incl. the nLockTime 
 asserted), `onchain-recovery`, `onchain-spend`, `onchain-poker`, `onchain-table`, `wallet`, `onchain`,
 `node`, `onchain-live`, `bot-onchain` (single + two-process), `settlement-service`, `microbet`.
 
+## View layer is framework-free and bundler-free (no React / Vite / Tauri)
+
+The browser client and the shared view components are now **100% framework-free**: there is **no
+React, no Vite, no bundler** anywhere in the tree.
+
+- **Web client** (`apps/client-web`, `ui-core/src/{dom,components}.ts`): rendered by the in-tree
+  ~90-line DOM toolkit `dom.ts` (`el`/`mount`/`text`) over the standard browser DOM API — no virtual
+  DOM, no reconciliation, no framework. Text is set via `textContent` only (never `innerHTML`), so
+  the view layer cannot inject markup (no XSS) — proved by `verify-dom.ts` (19 assertions in a real
+  headless browser, incl. the negative XSS case and `mount` focus/caret preservation).
+- **In-tree build** (`apps/client-web/build.ts`): `tsc` type-strip + a generated ES-module **import
+  map** — the browser's own module loader is the runtime. No Rollup/esbuild/Vite. The built client is
+  load-verified in headless Chrome/Edge (`verify-render.ts`) every CI run.
+- **Desktop client** (`apps/client-desktop/native`): a **true native Win32 application in C**
+  (Windows SDK + Microsoft Edge **WebView2**) — **no Tauri, no Rust, no framework**. It hosts the same
+  audited web client (one core, not a fork) and supervises the Go services under a kill-on-close Job
+  Object. Its render is proved headlessly (`verify-desktop.ts` reads `#root` text out of the live
+  WebView2 DOM); its lifecycle policy is unit-tested (`native/test-lifecycle.c`).
+
 ## The one boundary stated plainly
 
 - **Build/language tooling**: the TypeScript compiler (`typescript`) and Node type stubs
   (`@types/node`). These are the language toolchain, not an external system; the runtime is Node's
   standard library.
-- **View layer (NOT security-critical)**: the browser **play-money demo** (`apps/client-web`) and the
-  shared view components (`ui-core`) currently use React, and the desktop shell uses the Tauri CLI.
-  The security model does **not** depend on any of these — the real value path is the Node-side SDK,
-  which is dependency-free. Replacing the UI framework with an in-tree, framework-free implementation
-  (and the desktop shell with a native Windows app) is a separate, view-layer-only workstream.
+- **OS components used by the native desktop host** (Windows only): the Win32 API and the Microsoft
+  **WebView2** runtime — operating-system components, the same category as `windows.h`. The WebView2
+  ABI header + static loader are vendored in-tree (`apps/client-desktop/native/{include,lib}`,
+  provenance in `native/THIRD-PARTY.md`) so the host builds offline. The shipped exe carries no extra
+  DLL (the loader is linked statically).
+
+No part of the security model depends on any UI framework or browser — the real value path is the
+Node-side SDK, which is dependency-free, and both clients render the same dependency-free core.

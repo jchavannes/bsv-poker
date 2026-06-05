@@ -36,7 +36,7 @@
 | Go tests (relay + indexer) | **16 pass / 0 fail** |
 | `reproduce` (every vector regenerates bit-for-bit) | green |
 | traceability | **72 / 223 requirements traced; all Phase-0/1 gate reqs → passing tests** |
-| web client `vite build` | green → `apps/client-web/dist` (62 modules, 56.8 kB gzip) |
+| web client **in-tree build** (`tsc` + import map; no Vite) | green → `apps/client-web/dist/esm`; render-verified headless |
 | `node tools/selftest.ts` (stack up + full hand E2E) | PASS |
 
 ## Phases
@@ -48,11 +48,12 @@
     betting FSM, showdown, **settlement spend verified through the real interpreter**, fold
     without reveal, decision/recovery timeout defaults, transcript + **deterministic replay**
     (SDK `runHand`/`deriveState`); interpreter tests green for every template used.
-  - ✅ **running web client** (`vite build` → playable hot-seat-vs-bot Hold'em on the real engine;
-    lobby, table, legality-driven bet sizer, signing modal, consequence text, regtest banner).
-  - ✅ **Windows desktop app BUILT** (Tauri): `bsv-poker-desktop.exe` + installers
-    `bsv-poker_0.1.0_x64_en-US.msi` and `bsv-poker_0.1.0_x64-setup.exe`; the Rust supervisor
-    implements the §A3.2 lifecycle + IPC.
+  - ✅ **running web client** (framework-free vanilla DOM + in-tree build → playable
+    hot-seat-vs-bot Hold'em on the real engine; lobby, table, legality-driven bet sizer, signing
+    modal, consequence text, regtest banner). Render-verified in headless Chrome/Edge (ADR 0004).
+  - ✅ **Windows desktop app BUILT** (native Win32 + WebView2, **no Tauri/Rust**):
+    `apps/client-desktop/build/bsv-poker.exe`; the native `wWinMain` supervisor implements the
+    §A3.2 lifecycle + IPC policy (`native/lifecycle.c`, unit-tested); WebView2 render-verified.
   - ✅ relay/indexer **multi-client networking** (RelayClient/IndexerClient; the self-test
     exercises discovery + dual-path + the deterministic projection over the live Go services).
   - ✅ **real embedded BSV node bound** (D6): `pnpm node-e2e` starts the real
@@ -70,12 +71,12 @@
 - **Real multiplayer**: `pnpm multiplayer-e2e` — two networked clients converge byte-for-byte over
   the live relay (REQ-TEST-002).
 
-## Packages (TS) + apps (Go/Rust)
+## Packages (TS) + apps (Go + native C)
 
 protocol-types · hand-eval · engine · game-holdem · game-omaha · game-stud · game-draw ·
 game-razz · crypto-mentalpoker · adapters · script-templates-ts · tx-builder · wallet-custody ·
-sdk · ui-core · app-services · tools · relay-go · indexer-go · client-web (Vite, builds) ·
-client-desktop (Tauri, **builds to MSI + NSIS installers**).
+sdk · ui-core · app-services · tools · relay-go · indexer-go · client-web (**vanilla DOM, in-tree
+build**) · client-desktop (**native Win32 + WebView2, portable exe; no Tauri**).
 
 ## Non-negotiable rules — enforced, not aspirational
 

@@ -36,10 +36,12 @@ Built to the specifications in [`/spec`](./spec):
 
 ## Download & run
 
-### Windows desktop (download the installer)
-Get the latest installer from **[Releases](https://github.com/prof-faustus/bsv-poker/releases/latest)**:
-- **`bsv-poker_0.1.0_x64-setup.exe`** (NSIS) — double-click, install, launch **bsv-poker** from the
-  Start menu. (`…_x64_en-US.msi` is the MSI alternative.)
+### Windows desktop (portable app)
+Get the latest **`bsv-poker-windows-x64.zip`** from
+**[Releases](https://github.com/prof-faustus/bsv-poker/releases/latest)**: unzip and double-click
+**`bsv-poker.exe`** — no install step. It is a **true native Win32 application** (Windows SDK +
+Microsoft **WebView2**; no Tauri, no Rust, no framework) that hosts the audited web client and
+supervises the bundled relay/indexer.
 - Needs the Microsoft **WebView2** runtime (already on Windows 11). The app opens with a
   **REGTEST — play money** banner and plays heads-up NL Hold'em vs a bot. Unsigned for now, so
   SmartScreen may say "unknown publisher" → **More info → Run anyway**.
@@ -60,8 +62,11 @@ docker run --rm -p 8080:80 ghcr.io/prof-faustus/bsv-poker-web:latest
 ## Toolchain
 
 - Node ≥ 24 (TypeScript runs directly via native type-stripping; `node --test` for tests).
-- pnpm 9 (workspace). Go ≥ 1.24 for `relay-go` / `indexer-go`. Rust/Tauri for the desktop
-  shell (later phase).
+- pnpm 9 (workspace). Go ≥ 1.24 for `relay-go` / `indexer-go`.
+- Web client: framework-free vanilla DOM with an **in-tree build** (`tsc` + ES-module import map —
+  no React, no Vite, no bundler).
+- Desktop host: **MSVC C++ Build Tools** (`cl.exe`) + the **WebView2** runtime — native Win32, no
+  Tauri/Rust. Build: `pwsh apps/client-desktop/native/build-native.ps1`.
 
 ## Commands
 

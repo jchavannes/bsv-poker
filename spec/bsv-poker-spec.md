@@ -1,5 +1,12 @@
 # BSV Poker Platform — Master Engineering Specification
 
+> **AMENDMENT (ADR 0004 — framework-free clients).** Wherever this spec names **React**, **Vite**, or
+> **Tauri** for the client shells (e.g. §11, REQ-UI-001, REQ-BUILD-004, REQ-VM-004, the monorepo
+> layout), those choices are **superseded** by [`docs/adr/0004-framework-free-clients.md`](../docs/adr/0004-framework-free-clients.md):
+> the web view is **framework-free vanilla DOM** with an **in-tree `tsc` + import-map build** (no
+> React/Vite/bundler), and the desktop client is a **true native Win32 + WebView2 host in C** (no
+> Tauri/Rust). The single-shared-TypeScript-core principle is unchanged.
+
 **Document status:** Part 1 of a multi-part specification. This file is written to be
 extended in place. Sections marked `[EXPAND: Part N]` are scaffolded with their required
 structure and the decisions already taken; the voluminous catalogs (per-variant state

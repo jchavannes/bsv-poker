@@ -4,7 +4,7 @@ Per app spec §A15. How to build, test, run, and verify the platform.
 
 ## Prerequisites
 - Node ≥ 24 (native TypeScript type-stripping; `node --test`).
-- pnpm 9. Go ≥ 1.24. (Rust/Tauri for the desktop shell — later phase.)
+- pnpm 9. Go ≥ 1.24. Desktop host: MSVC Build Tools (`cl.exe`) + WebView2 runtime — native Win32, no Tauri (ADR 0004).
 - Installs on a TLS-inspecting host: prefix with `NODE_OPTIONS="--use-system-ca"`.
 
 ## Install

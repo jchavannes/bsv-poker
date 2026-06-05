@@ -13,6 +13,7 @@ parameter-properties, and imports with explicit `.ts` extensions — which also 
 Power-of-Ten "limit metaprogramming" adaptation (§13.1).
 
 **Consequences.** Near-zero install surface for the core; the typecheck (`tsc`) is the single
-source of type truth; tests run with no build step. The browser/desktop shells still use Vite/Tauri
-toolchains (their own concern). `pnpm` installs use `NODE_OPTIONS=--use-system-ca` to trust the
-host CA.
+source of type truth; tests run with no build step. The browser/desktop shells are now ALSO
+framework-free and bundler-free — vanilla DOM + an in-tree `tsc`+import-map build (web) and a native
+Win32 + WebView2 host in C (desktop); see [ADR 0004](0004-framework-free-clients.md). `pnpm` installs
+use `NODE_OPTIONS=--use-system-ca` to trust the host CA.

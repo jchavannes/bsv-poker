@@ -49,13 +49,14 @@ services:
       - node-regtest
 
   client:
-    # The web client (Vite build) served locally; bound to the bundled relay+node.
+    # The web client (framework-free vanilla DOM, in-tree build — no Vite) served locally; bound to
+    # the bundled relay+node. The real image is apps/client-web/Dockerfile (this is the placeholder).
     image: bsv-poker/client:dev
     build:
       context: ..
       dockerfile: vm/Dockerfile.client
     ports:
-      - '127.0.0.1:5173:5173'
+      - '127.0.0.1:8080:8080'
     depends_on:
       - relay
       - indexer

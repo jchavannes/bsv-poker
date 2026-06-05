@@ -4,6 +4,21 @@
 
 ---
 
+> **AMENDMENT (ADR 0004 — framework-free clients).** The client *shell* technology choices in this
+> document are **superseded** by [`docs/adr/0004-framework-free-clients.md`](../docs/adr/0004-framework-free-clients.md)
+> to meet the repo-wide standalone mandate (no external framework/bundler). Wherever this spec says
+> **React** / **Vite** / **Tauri**, the implemented reality is:
+> - **Web view:** framework-free **vanilla DOM** (`ui-core/src/dom.ts`) — no React.
+> - **Web build:** **in-tree** `tsc` + ES-module import map — no Vite/bundler.
+> - **Desktop:** a true **native Win32 + WebView2** host in C — no Tauri, no Rust.
+>
+> The shared-single-core principle (§A5) is unchanged: both shells render the same TypeScript core.
+> The §A3 service-lifecycle contract is unchanged and is implemented in `apps/client-desktop/native`
+> (`lifecycle.c` + `test-lifecycle.c`). The IPC contract (§A3.3, Appendix I) survives as the
+> enumerated, unit-tested command family in `native/lifecycle.c`.
+
+---
+
 ## Document control
 
 | Field | Value |
@@ -115,8 +130,8 @@ regtest-by-default with play-money semantics, mainnet behind an explicit researc
 | ID | Decision | Default | Override key | Rationale (recorded, not assumed) |
 |---|---|---|---|---|
 | AD1 | Placement of this spec | Standalone document | — | Keeps the protocol core intact; gives Claude Code a focused app build doc. |
-| AD2 | Windows shell | **Tauri** (WebView2 + Rust supervisor) | `desktop.shell` | Small native binary, system webview, clean local-process supervision (core §11.1). Electron only on a recorded Tauri limitation. |
-| AD3 | Web shell | React + TypeScript + Vite | `web.stack` | Shared core with desktop; matches the lineage (core §3.2, §11.1). |
+| AD2 | Windows shell | **Native Win32 + WebView2** (C; no Tauri/Rust) — *was Tauri, see ADR 0004* | `desktop.shell` | Standalone mandate: a single in-tree C translation unit over the Windows SDK + WebView2 OS component; clean local-process supervision via a kill-on-close Job Object (core §11.1). |
+| AD3 | Web shell | **Vanilla DOM + in-tree build** (no React/Vite) — *was React+Vite, see ADR 0004* | `web.stack` | Standalone mandate: framework-free `dom.ts` over the platform DOM; `tsc` + import-map build, browser module loader as runtime. Shared core with desktop (core §3.2, §11.1). |
 | AD4 | Local chain backend | `bonded-subsat-channel` embedded node, regtest | `chain.backend` | Reuse the existing self-contained node (core §10.2, D6). |
 | AD5 | "VM" | Reproducible self-contained image (container + optional VM image) | `vm.targets` | No external services to play (core §10.1, D5). |
 | AD6 | First runnable | Phase 1: heads-up NL Hold'em, regtest, Windows + web, with discovery | `phase1.game` | Core D1, D4, §17. |
@@ -255,7 +270,12 @@ the SDK/adapters, core §2.6.)
 
 ---
 
-# §A3 Desktop runtime & supervision (Tauri)
+# §A3 Desktop runtime & supervision (native Win32 + WebView2 — see ADR 0004)
+
+> Implemented as a native Win32 host in C (`apps/client-desktop/native`), NOT Tauri/Rust (ADR 0004).
+> The lifecycle/supervision contract below is unchanged; "Rust supervisor / Tauri main" now reads as
+> "the native `wWinMain` supervisor", and the ordered-start / bounded-restart / network-guard policy
+> lives in `native/lifecycle.c` (unit-tested in `native/test-lifecycle.c`).
 
 The desktop program is a Tauri application: a **Rust supervisor** (Tauri main) plus a **WebView2**
 running `ui-core`. The supervisor exists so a non-technical user double-clicks and plays.
@@ -1364,8 +1384,8 @@ timeouts and budgets.
 | Key | Type | Default | Realises | Validation |
 |---|---|---|---|---|
 | `project.name` | string | `bsv-poker` | core §0.4 | non-empty; matches rename script |
-| `desktop.shell` | enum(tauri,electron) | tauri | AD2 | electron only on a recorded Tauri limitation |
-| `web.stack` | enum | react-ts-vite | AD3 | fixed for Phase 1 |
+| `desktop.shell` | enum(native-win32-webview2,tauri,electron) | **native-win32-webview2** | AD2 | superseded tauri per ADR 0004 (standalone mandate) |
+| `web.stack` | enum | **vanilla-dom-intree** | AD3 | superseded react-ts-vite per ADR 0004 (standalone mandate) |
 | `chain.backend` | enum | bonded-subsat-node | AD4 | must expose `BS.node` (core §2.2) |
 | `chain.network` | enum(regtest,mainnet) | regtest | §A3.5 | mainnet rejected unless `flags.mainnetResearch` |
 | `flags.mainnetResearch` | bool | false | §A3.5/REQ-VM-007 | true requires explicit user action + banner |

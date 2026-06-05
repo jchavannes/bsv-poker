@@ -25,7 +25,7 @@ docker compose -f vm/docker-compose.yml up --build
   node binds next (D6, §10.2).
 - `relay` (:8091) — transport + indexing only, never source of truth (core §8.1).
 - `indexer` (:8092) — per-table tx projections.
-- `client` (:5173) — Phase-0 placeholder; `apps/client-web` (Vite) lands in Phase 1.
+- `client` (:8080) — placeholder; the real `apps/client-web` (framework-free vanilla DOM, in-tree build — no Vite) ships via `apps/client-web/Dockerfile`.
 
 Builds are reproducible (pinned toolchains, `-trimpath`, distroless static images;
 REQ-VM-006). A literal hypervisor image (OVA/qcow2) is an optional extra artifact from the
