@@ -1,0 +1,69 @@
+# Network protocol
+
+The relay envelope protocol: every table message is a formal, signed object. No implicit protocol, no
+undocumented field. Source: `packages/app-services/src/{session-auth,message-validation,
+interactive-client,lobby}.ts`, `apps/relay-go`.
+
+## Transport
+
+The relay (`apps/relay-go`) is **transport + index only**, never the source of truth. It offers:
+presence (Tier A), a table directory, capability minting, and a per-table opaque SSE fan-out (Tier B).
+It treats every published object as opaque bytes. Publish/subscribe require a **capability token**
+(see below) and fail closed.
+
+## Capability tokens (admission)
+
+A table-scoped, expiring, scope-limited HMAC token (`relay-go/capability.go`):
+`HMAC-SHA256(serverSecret, "v1|tableId|scope|exp")`, scope ∈ {`pub`,`sub`,`pubsub`}. Minted by
+`POST /tables` (creator) or `POST /tables/{id}/capability` (a gated table requires the admission
+secret). Verified on publish/subscribe with a constant-time MAC compare; table-scope, expiry, and
+scope are all checked. Rotating the server secret revokes all tokens.
+
+## Signed envelopes
+
+Every join / commit / reveal / action is **Ed25519-signed** by the seat's session key. The signed
+message is canonical (`session-auth.ts` `envelopeMessage`):
+
+```
+JSON.stringify([tableId, t, seat, hand, kind??'', amount??0, c??'', r??'', discard??[], prev??''])
+```
+
+This is byte-exact across clients (and the Go indexer re-derives it identically; pinned by
+`INV-IXV-0`). Receivers verify the signature against the public key **registered to the acting seat**.
+
+### Envelope object
+
+| field | type | meaning | who sets / signs | rejection |
+|---|---|---|---|---|
+| `t` | `'commit'`\|`'reveal'`\|`'action'` | message type | the acting seat | unknown type → reject |
+| `seat` | int ≥ 0 | the acting seat | the acting seat | non-int / negative → reject |
+| `hand` | int ≥ 0 | hand index | the acting seat | non-int / negative → reject |
+| `c` | hex | commit: `SHA-256(entropy)` | commit only | non-hex → reject |
+| `r` | hex | reveal: entropy | reveal only | non-hex → reject |
+| `kind` | string | action kind | action only | empty → reject |
+| `amount` | number | action wager | action (optional) | non-finite → reject |
+| `discard` | int[] | draw discard slots | action (optional) | non-int member → reject |
+| `prev` | hex | prior **state hash** bound into the action | action | (validating indexer: required) |
+| `sig` | hex | Ed25519 over `envelopeMessage` | the acting seat | bad/absent → reject |
+
+Structural validation: `message-validation.ts` `validateEnvelope` (returns the typed envelope or
+`null` — never partial trust). Inbound frames are **bounded-parsed** (`safeJsonParse`) before
+validation. `prev` binds an action to the prior transcript position so a signed action cannot be
+replayed elsewhere (audit-02 #8).
+
+## States in which an envelope is valid
+
+`commit` then `reveal` in the handshake phase; `action` only when the engine has the seat on the
+clock. The engine (`STATE_MACHINE.md`) is the authority on action legality; the relay/indexer never
+adjudicate game rules.
+
+## Dual path
+
+An action goes to peers via the relay (speed) AND to the indexer as a transcript record (rebuild). In
+the indexer's validating mode the record is authenticated before storage (`apps/indexer-go`,
+`INV-IXV-*`). The relay channel is best-effort; the client reconciles from the transcript.
+
+## OPEN
+
+A `timeout` (signed deadline / forfeiture) envelope type is specified but not yet implemented — see
+`docs/audit-response-03.md` and `FAILURE_MODES.md`.
