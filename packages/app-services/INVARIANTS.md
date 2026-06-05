@@ -37,6 +37,15 @@ Run: `node --test "packages/app-services/test/**/*.test.ts"`
 | INV-APS-14 | The relay client attaches/mints capability tokens and bounds responses. | `network.test.ts` |
 | INV-APS-15 | Transcript rebuild from records reproduces live state (bounded parse, constant-time commit). | `tools/reconnect-e2e.ts`, `tools/validating-indexer-e2e.ts` |
 
+## Accountable action/handshake timeout (audit 3) — `timeout-claim.test.ts`
+
+| ID | Claim | Proof (test) |
+|---|---|---|
+| INV-APS-16 | A seat that stalls on its ACTION is dropped at the anchored deadline (engine check-or-fold default) and the honest clients converge byte-for-byte. | `a stalled seat is dropped at the anchored deadline and the two honest clients CONVERGE (audit 3)` |
+| INV-APS-17 | No premature drop below the deadline; a properly-signed but premature/forged claim is rejected (the seat is NOT dropped). | `NO premature drop while below the deadline; a forged low-deadline claim is rejected (audit 3)` |
+| INV-APS-18 | A seat that commits but never reveals is dropped; the survivors re-derive the deck among themselves and converge (the non-responder is excluded from the hand). Two-phase commit-before-reveal ordering preserved (late-entropy protection). | `HANDSHAKE drop: a seat that commits but never reveals is dropped; survivors re-derive the deck and CONVERGE (audit 3)` |
+| INV-APS-19 | Malformed timeout-claims are rejected at the trust boundary (missing/negative/non-integer `d`, missing `subject`, self-claim). | `message-validation.test.ts` |
+
 ## To extend
 
 A new network boundary adds a bounded-parse + validation step and the negative tests for malformed/

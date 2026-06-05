@@ -219,17 +219,87 @@ export class InteractiveNetworkedTableClient {
     return this.inbox.filter((e) => e.t === 'action' && e.seat === seat && e.hand === hand);
   }
   /**
-   * Re-broadcast `envs` every 300ms until `done()`. CRITICAL: a peer who subscribed late must
-   * still receive my earlier envelopes, so callers keep re-sending the commit during the reveal
-   * phase too — a player must not stop broadcasting its commit just because IT has all commits.
+   * Collect every seat's commit+reveal for the hand, DROPPING a non-responder past the anchored
+   * deadline (audit 3 — the commit/reveal handshake half), and return the ACTIVE (non-dropped) seats.
+   *
+   * WHY a drop here needs more than the action-phase default: a missing reveal means the deck CANNOT
+   * be derived — it is the composition of every party's secret permutation, so a withheld permutation
+   * is not a move that has a "default", it is an absent input. The only way to continue is to EXCLUDE
+   * the non-responder and re-derive the deck among the survivors (done by the caller from the returned
+   * active set). The non-responder forfeits its bond on-chain (`bondRevealOrForfeitLocking`).
+   *
+   * WHY it is deterministic (no fork): the drop is driven by the SAME anchored-height + signed
+   * `timeout-claim` mechanism as the action phase. The reveal deadline is `startHeight + window`; both
+   * honest clients read the same chain height and see the same signed claims, so they compute the
+   * IDENTICAL active set (and therefore the identical re-derived deck). With no `heightSource` the
+   * timeout is disabled and we wait for everyone with a bounded fallback (the prior fail-closed
+   * behaviour) — a missing player simply aborts the hand (correct for heads-up, where a survivor set
+   * of one cannot form a hand).
+   *
+   * Re-broadcast discipline: a late-subscribing peer must still receive my earlier commit, so we keep
+   * re-publishing both envelopes each tick until the active set is complete.
    */
-  private async gossip(envs: Envelope[], done: () => boolean, timeoutMs = 30000): Promise<void> {
-    const deadline = Date.now() + timeoutMs;
-    for (const e of envs) await this.publish(e);
-    while (!done()) {
-      if (Date.now() > deadline) throw new Error('handshake timeout');
-      await new Promise((r) => setTimeout(r, 300));
-      if (!done()) for (const e of envs) await this.publish(e);
+  private async collectHandshake(
+    seats: TablePlayer[],
+    handNo: number,
+    commitEnv: Envelope,
+    revealEnv: Envelope,
+    startHeight: number | undefined,
+  ): Promise<TablePlayer[]> {
+    const has = (t: 'commit' | 'reveal', seat: number): boolean =>
+      !!this.received((e) => e.t === t && e.seat === seat && e.hand === handNo);
+    const dropped = new Set<number>();
+    const claimsSent = new Set<number>();
+    const fallback = Date.now() + 120000;
+    const window = this.timeoutWindow;
+    const active = (): TablePlayer[] => seats.filter((s) => !dropped.has(s.seat));
+
+    // Drop every active seat that has not produced `t` once the shared height passes the deadline,
+    // via the SAME signed-timeout-claim mechanism as the action phase (deterministic across clients).
+    const dropOverdue = async (t: 'commit' | 'reveal', deadline: number, h: number): Promise<void> => {
+      for (const s of seats) {
+        if (dropped.has(s.seat) || has(t, s.seat)) continue;
+        const claim = this.inbox.find(
+          (e) => e.t === 'timeout-claim' && e.subject === s.seat && e.hand === handNo && typeof e.d === 'number' && e.d >= deadline && h >= e.d,
+        );
+        if (claim) {
+          dropped.add(s.seat);
+          this.timeoutFloorAdvance = Math.max(this.timeoutFloorAdvance, deadline);
+          continue;
+        }
+        if (h >= deadline && s.seat !== this.mySeat && !claimsSent.has(s.seat)) {
+          claimsSent.add(s.seat);
+          await this.publish({ t: 'timeout-claim', seat: this.mySeat, hand: handNo, subject: s.seat, d: deadline });
+          dropped.add(s.seat);
+          this.timeoutFloorAdvance = Math.max(this.timeoutFloorAdvance, deadline);
+        }
+      }
+    };
+
+    // PHASE 1 — COMMITS ONLY. A player must NOT reveal its entropy until it has seen every other active
+    // seat's COMMIT; revealing earlier would let a seat that withholds its commit observe a reveal and
+    // choose late entropy (core §4.1 / audit-02 #11). So we broadcast ONLY our commit here.
+    for (;;) {
+      if (this.aborted) throw new Error('client aborted during the handshake');
+      await this.publish(commitEnv);
+      if (active().every((s) => has('commit', s.seat))) break;
+      const h = await this.nowHeight();
+      if (h !== undefined && startHeight !== undefined) await dropOverdue('commit', startHeight + window, h);
+      else if (Date.now() > fallback) throw new Error('handshake timeout');
+      await new Promise((r) => setTimeout(r, 50));
+    }
+
+    // PHASE 2 — REVEALS. Now that every active seat has committed (entropy is bound), broadcasting the
+    // reveal is safe. Keep re-publishing the commit too, for any late subscriber.
+    for (;;) {
+      if (this.aborted) throw new Error('client aborted during the handshake');
+      await this.publish(commitEnv);
+      await this.publish(revealEnv);
+      if (active().every((s) => has('reveal', s.seat))) return active();
+      const h = await this.nowHeight();
+      if (h !== undefined && startHeight !== undefined) await dropOverdue('reveal', startHeight + window, h);
+      else if (Date.now() > fallback) throw new Error('handshake timeout');
+      await new Promise((r) => setTimeout(r, 50));
     }
   }
 
@@ -377,23 +447,38 @@ export class InteractiveNetworkedTableClient {
       r: bytesToHex(entropy),
       ...(startHeight !== undefined ? { h: startHeight } : {}),
     };
-    const has = (t: 'commit' | 'reveal', seat: number): boolean =>
-      !!this.received((e) => e.t === t && e.seat === seat && e.hand === handNo);
-    await this.gossip([commitEnv], () => seats.every((s) => has('commit', s.seat)));
-    await this.gossip([commitEnv, revealEnv], () => seats.every((s) => has('reveal', s.seat)));
+    // Collect commit+reveal, dropping any non-responder at the anchored deadline (audit 3). `active`
+    // is the survivor set every honest client computes identically; a dropped seat forfeits its bond
+    // on-chain and is excluded from THIS hand's deck and seating.
+    const active = await this.collectHandshake(seats, handNo, commitEnv, revealEnv, startHeight);
+    if (active.length < 2) {
+      // A hand needs >= 2 players; one survivor (e.g. heads-up where the opponent vanished) cannot
+      // continue — fail closed (funds recover via the pre-signed refund graph).
+      throw new Error('handshake left fewer than 2 active players — hand cannot continue');
+    }
 
     const entropies: Uint8Array[] = [];
-    for (const s of seats) {
+    for (const s of active) {
       const commit = this.received((e) => e.t === 'commit' && e.seat === s.seat && e.hand === handNo)!;
       const reveal = this.received((e) => e.t === 'reveal' && e.seat === s.seat && e.hand === handNo)!;
       const r = hexToBytes(reveal.r!); // validated as hex at the trust boundary in subscribe()
       if (!constantTimeEqualHex(bytesToHex(sha256(r)), commit.c!)) throw new Error(`bad reveal for seat ${s.seat}`);
       entropies.push(r);
     }
+    // Deck = composition of the ACTIVE seats' secret permutations only (a dropped non-revealer's
+    // permutation is absent by construction). Deterministic: `active` is seat-sorted and identical
+    // across clients, so the derived deck is identical (P2).
     const deck: Card[] = deckFromEntropies(entropies);
 
-    this.module = createGameModule(this.ruleset.variant, deck, buttonIndex);
-    this.state = this.module.init(this.ruleset, seats.map((s) => ({ seat: s.seat, stack: s.stack })));
+    // Recompute the button among the active seats deterministically: the first active seat at or after
+    // the original button's seat number (wrapping). Identical input (agreed active set + buttonIndex)
+    // → identical button on every client.
+    const origButtonSeat = seats[buttonIndex % seats.length]!.seat;
+    let activeButton = active.findIndex((s) => s.seat >= origButtonSeat);
+    if (activeButton < 0) activeButton = 0; // button seat dropped past the last active → wrap to first
+
+    this.module = createGameModule(this.ruleset.variant, deck, activeButton);
+    this.state = this.module.init(this.ruleset, active.map((s) => ({ seat: s.seat, stack: s.stack })));
     this.emit();
 
     const cursor = new Map<number, number>();

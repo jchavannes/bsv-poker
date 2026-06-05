@@ -50,6 +50,23 @@ function relayOver(hub: MemHub): RelayClient {
   } as unknown as RelayClient;
 }
 
+/** A relay view that SWALLOWS this seat's reveal frames — models a player who commits but never
+ *  reveals (the handshake-phase non-responder), so the survivors must drop it and re-derive the deck. */
+function relayDroppingReveal(hub: MemHub, dropSeat: number): RelayClient {
+  return {
+    subscribe: (table: string, cb: (t: string) => void) => hub.subscribe(table, cb),
+    publish: async (table: string, bytes: Uint8Array) => {
+      try {
+        const env = JSON.parse(new TextDecoder().decode(bytes)) as { t?: string; seat?: number };
+        if (env.t === 'reveal' && env.seat === dropSeat) return 0; // never broadcast this seat's reveal
+      } catch {
+        /* not JSON — forward */
+      }
+      return hub.publish(table, bytes);
+    },
+  } as unknown as RelayClient;
+}
+
 /**
  * A shared, monotone chain height the TEST drives. While the gate is shut it reads 0 — the fixed
  * floor under which the commit/reveal handshake completes and below which NO deadline can pass. Once
@@ -174,4 +191,56 @@ test('NO premature drop while below the deadline; a forged low-deadline claim is
   seats[2]!.client.abort();
   assert.equal(seats[0]!.client.stateHash(), seats[1]!.client.stateHash(), 'honest clients diverged');
   assert.equal(s0.seats.find((p) => p.seat === 2)!.folded, true);
+});
+
+test('HANDSHAKE drop: a seat that commits but never reveals is dropped; survivors re-derive the deck and CONVERGE (audit 3)', async () => {
+  const hub = new MemHub();
+  const height = new GatedHeight(40);
+  const ruleset = offlineRuleset('holdem', 3);
+  const seatDefs: TablePlayer[] = [0, 1, 2].map((seat) => ({ seat, stack: 100 }));
+  const auths = await Promise.all([0, 1, 2].map((i) => sessionAuthFromSeed(new Uint8Array(32).fill(i + 1))));
+  const pubs = auths.map((a) => a.pub);
+
+  // Seats 0 and 1 are honest; seat 2 commits but its reveal is swallowed by its relay → it never
+  // reveals, so the deck cannot include its permutation and the survivors must drop it.
+  const clients = auths.map((auth, mySeat) =>
+    new InteractiveNetworkedTableClient({
+      relay: mySeat === 2 ? relayDroppingReveal(hub, 2) : relayOver(hub),
+      tableId: TABLE,
+      mySeat,
+      seats: seatDefs,
+      ruleset,
+      entropy: randomBytes(32),
+      auth,
+      seatPubs: pubs,
+      heightSource: height.source,
+      timeoutWindow: WINDOW,
+    }),
+  );
+  for (let i = 0; i < 3; i++) {
+    const c = clients[i]!;
+    c.onUpdate((u: ClientUpdate) => {
+      if (u.yourTurn && u.legal && i !== 2) c.submitAction(universalBot(u.legal, u.mySeat));
+    });
+  }
+
+  const h0 = clients[0]!.play();
+  const h1 = clients[1]!.play();
+  void clients[2]!.play(); // commits, then stalls (its reveal never propagates)
+
+  // Let seats 0 and 1 reveal at the floor height (gate closed → height 0), then open the gate so the
+  // reveal deadline passes while seat 2 is still un-revealed → 0 and 1 drop it and play heads-up.
+  await new Promise((r) => setTimeout(r, 150));
+  height.open();
+
+  const [s0, s1] = await Promise.all([h0, h1]);
+  clients[2]!.abort();
+
+  // The two survivors re-derived the SAME deck among themselves and converged byte-for-byte (P2).
+  assert.equal(clients[0]!.stateHash(), clients[1]!.stateHash(), 'survivors diverged after the handshake drop');
+  assert.equal(s0.handComplete, true);
+  assert.equal(s1.handComplete, true);
+  // The dropped seat is not part of the played hand at all (excluded from the re-derived seating).
+  assert.equal(s0.seats.find((p) => p.seat === 2), undefined, 'the non-revealing seat must be excluded from the hand');
+  assert.equal(s0.seats.length, 2, 'the hand continued among exactly the two survivors');
 });

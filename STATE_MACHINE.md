@@ -35,15 +35,24 @@ For each betting action `fold` / `check` / `call` / `bet` / `raise` (and `discar
 - **Rejection:** an illegal or out-of-turn action is a no-op rejection; the transcript/indexer never
   stores an unauthenticated or illegal move (validating mode).
 
-## Timeout default (the basis for accountable drop — partly OPEN)
+## Timeout default — accountable drop-and-continue (audit 3, IMPLEMENTED)
 
-`isTimeoutEligible(state, now)` already returns the **safe default** for the seat on the clock
-(check-or-fold). The deterministic *application* of that default when a peer is absent — the
-drop-and-continue — is the subject of audit finding 3. It is **OPEN** because doing it safely needs a
-**shared anchored deadline** (both clients must drop at the same logical point or they fork the state).
-The design (anchored block-height deadline + a signed timeout-claim applied as a replayable default
-branch) is in `docs/audit-response-03.md`. Until then the live path fails closed: an absent player
-aborts the hand and funds recover via the pre-signed refund graph.
+`isTimeoutEligible(state, now)` returns the **safe default** for the seat on the clock (check-or-fold).
+The deterministic *application* of that default when a peer is absent is the accountable drop, and it
+is implemented in `interactive-client.ts` for **both** phases:
+
+- **Action phase:** past the anchored block-height deadline (`floor + window`), a peer's signed
+  `timeout-claim` applies the engine check-or-fold default for the seat as a replayable branch.
+- **Handshake phase (multiway):** a non-responder to commit/reveal is dropped at the anchored
+  deadline and the deck is **re-derived among the survivors** (a withheld permutation is an absent
+  input, not a move with a default — so the survivors exclude it and continue). The two-phase
+  commit-before-reveal ordering is preserved, so late-entropy protection (core §4.1) is intact.
+
+Safety rests on a **shared anchored deadline** — the block height both clients observe — so they drop
+at the identical logical point and never fork (`tools`... `timeout-claim.test.ts` proves byte-for-byte
+convergence and rejects premature/forged claims). The dropped player forfeits its bond on-chain
+(`bondRevealOrForfeitLocking`, `onchain-forfeit-e2e`). Heads-up where the sole opponent vanishes
+correctly fails closed (a one-player hand cannot form); funds recover via the pre-signed refund graph.
 
 ## Convergence guarantee (P2)
 

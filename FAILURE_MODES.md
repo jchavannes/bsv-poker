@@ -35,7 +35,8 @@ No parser can crash the caller on hostile input. The caller MUST fail closed on 
 | Condition | Behaviour |
 |---|---|
 | illegal or out-of-turn action | rejected by `apply`; cannot corrupt state. |
-| absent player (commit/reveal/action timeout) | **fail-closed today**: the hand aborts; funds recover via the pre-signed timeout-default refund graph (`fallback.ts`, proven on the regtest node). |
+| absent player — ACTION phase | **accountable drop-and-continue** (audit 3): past the anchored block-height deadline a peer's signed `timeout-claim` applies the engine check-or-fold default for the seat; both honest clients converge (proven, `timeout-claim.test.ts`). |
+| absent player — commit/reveal HANDSHAKE phase (multiway) | **accountable drop + re-derive**: a non-responder is dropped at the anchored deadline, the deck is re-derived among the survivors, and the hand continues (the non-responder forfeits its bond on-chain via `bondRevealOrForfeitLocking`). Heads-up (sole opponent vanishes) correctly **fails closed** — a one-player hand cannot form — with funds recovered via the pre-signed refund graph (`fallback.ts`). |
 
 ## Randomness / crypto
 

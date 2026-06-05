@@ -53,14 +53,21 @@ strictly worse than no second check. The client replays the *authenticated* tran
 canonical engine.
 **Rejected:** full game-rule validation in the indexer (duplicate engine, consensus-fork risk).
 
-## DD-7 — Accountable non-responder drop is deferred until a shared anchored deadline exists
+## DD-7 — Accountable non-responder drop uses a shared anchored deadline (IMPLEMENTED)
 
-**Decision:** do **not** ship a drop-and-continue keyed on a local clock.
-**Why:** if one honest client drops a non-responder and the other does not, the agreed state forks
-(P2 break) — the most dangerous failure class here. A safe drop needs a deadline both clients evaluate
-identically (chain block height) plus a signed timeout-claim and an on-chain forfeit branch.
-**Rejected:** local wall-clock timeout drop (non-deterministic, forks state). Interim: fail-closed
-abort + pre-signed refund. Full design in `docs/audit-response-03.md`.
+**Decision:** the drop-and-continue is keyed on a **chain block height** both clients observe, never a
+local clock; it is applied via a signed `timeout-claim` and is implemented for BOTH the action phase
+(engine check-or-fold default) and the commit/reveal handshake phase (drop + re-derive the deck among
+survivors). The non-responder forfeits its bond on-chain (`bondRevealOrForfeitLocking`).
+**Why:** if one honest client dropped a non-responder and the other did not, the agreed state would
+fork (P2 break) — the most dangerous failure class here. An anchored block-height deadline is a slow,
+shared clock while the relay propagates an in-time action in milliseconds, so no client reaches
+"deadline passed AND action absent" while another holds the action — both compute the identical drop.
+**Rejected:** a local wall-clock timeout drop (non-deterministic, forks state). For the handshake,
+also rejected: keeping a withheld permutation's slot (the deck cannot be derived without it) — instead
+the survivors re-derive among themselves. Heads-up where the sole opponent vanishes still fails closed
+(a one-player hand cannot form). Proven: `timeout-claim.test.ts` (convergence + premature/forged
+rejection), `onchain-forfeit-e2e` (the on-chain penalty).
 
 ## DD-8 — One stored key + HKDF derivation with full domain separation
 
