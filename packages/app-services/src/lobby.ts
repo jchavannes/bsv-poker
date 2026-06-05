@@ -11,8 +11,14 @@ import type { RelayClient } from './network.ts';
 import { type TablePlayer } from './interactive-client.ts';
 import { verifySig } from './session-auth.ts';
 
-/** Canonical signed message proving possession of `pub` for a join to this table (audit 3). */
-const joinMessage = (tableId: string, pub: string, nonce: string): string => JSON.stringify(['join', tableId, pub, nonce]);
+/** Canonical signed message proving possession of `pub` for a join COMMIT to this table (audit 3).
+ *  The commit binds `H(nonce)`, not the nonce — the nonce is disclosed only in the reveal phase. */
+const joinMessage = (tableId: string, pub: string, commit: string): string => JSON.stringify(['join', tableId, pub, commit]);
+/** Canonical signed message for the seating-nonce REVEAL (audit #27 — non-grindable seating). */
+const revealMessage = (tableId: string, pub: string, nonce: string): string => JSON.stringify(['seat-reveal', tableId, pub, nonce]);
+/** The seating commitment for a nonce: H(nonce). A player is bound to this before any nonce is seen.
+ *  Exported so the non-grindability test can assert the binding (a swapped nonce cannot match). */
+export const seatCommit = (nonce: string): string => bytesToHex(sha256(new TextEncoder().encode(nonce)));
 
 export interface TableMeta {
   readonly name: string;
@@ -38,12 +44,21 @@ export interface SeatedResult {
   readonly players: Array<{ id: string; pub: string }>;
 }
 
+/** Phase 1 — COMMIT: announce presence + a binding commitment H(nonce) to the seating nonce. */
 interface JoinEnvelope {
   t: 'join';
   id: string;
   pub: string;
-  nonce?: string;
-  sig?: string; // Ed25519 over joinMessage(tableId, pub, nonce) — proves possession of `pub` (audit 3)
+  commit?: string; // H(nonce) hex — fixes the nonce before any nonce is disclosed (audit #27)
+  sig?: string; // Ed25519 over joinMessage(tableId, pub, commit) — proves possession of `pub` (audit 3)
+}
+
+/** Phase 2 — REVEAL: disclose the nonce, which must hash to the previously-committed value. */
+interface RevealEnvelope {
+  t: 'seat-reveal';
+  pub: string;
+  nonce: string;
+  sig?: string; // Ed25519 over revealMessage(tableId, pub, nonce)
 }
 
 export function rulesetFromMeta(meta: TableMeta): Ruleset {
@@ -115,8 +130,16 @@ export class LobbyClient {
     // CSPRNG join nonce (CWE-338): the nonce feeds the beacon that fixes seat order, so it must be
     // unpredictable — a guessable nonce would let an adversary bias the seating beacon.
     const myNonce = randomId(16);
-    const joined = new Map<string, { id: string; pub: string; nonce: string }>();
-    joined.set(me.pub, { id: me.id, pub: me.pub, nonce: myNonce });
+    const myCommit = seatCommit(myNonce);
+    // COMMIT-REVEAL seating (audit #27 — non-grindable, no last-mover advantage). Phase 1 collects a
+    // binding commitment H(nonce) from every seat; phase 2 collects the nonces, each checked against
+    // its commitment. Because every nonce is FIXED (committed) before ANY nonce is disclosed, a late
+    // joiner cannot grind their nonce against the others' to bias the beacon (the prior scheme leaked
+    // nonces on join, which a last mover could grind against). See seat-ordering.test.ts.
+    const commits = new Map<string, { id: string; pub: string; commit: string }>();
+    const reveals = new Map<string, { id: string; pub: string; nonce: string }>();
+    commits.set(me.pub, { id: me.id, pub: me.pub, commit: myCommit });
+    let phase: 'commit' | 'reveal' = 'commit';
     let unsub: (() => void) | null = null;
     let aborted = false;
 
@@ -124,28 +147,51 @@ export class LobbyClient {
       unsub = this.relay.subscribe(tableId, (text) => {
         void (async () => {
           try {
-            // Bounded parse of an untrusted relay frame (CWE-400); join envelopes are tiny.
+            // Bounded parse of an untrusted relay frame (CWE-400); seating envelopes are tiny.
             const parsed = safeJsonParse(text, { maxBytes: 8192, maxDepth: 4 });
             if (!parsed.ok) return;
-            const env = parsed.value as JoinEnvelope;
-            if (!env || typeof env !== 'object' || env.t !== 'join' || typeof env.pub !== 'string' || !env.pub || joined.has(env.pub)) return;
-            // A join must prove possession of its pub: verify the signature (audit 3). When `me`
-            // signs, peers must sign too; reject unsigned/forged joins so a pub can't be spoofed.
-            if (me.sign) {
-              if (!env.nonce || !env.sig || !(await verifySig(env.pub, joinMessage(tableId, env.pub, env.nonce), env.sig))) return;
+            const raw = parsed.value as JoinEnvelope | RevealEnvelope;
+            if (!raw || typeof raw !== 'object' || typeof raw.pub !== 'string' || !raw.pub) return;
+
+            if (raw.t === 'join') {
+              const env = raw as JoinEnvelope;
+              if (typeof env.commit !== 'string' || !env.commit || commits.has(env.pub)) return;
+              // A join must prove possession of its pub (audit 3): when `me` signs, peers must too —
+              // the signature binds the COMMITMENT, so a pub cannot be spoofed and the commitment is
+              // authenticated before the reveal phase.
+              if (me.sign && !(env.sig && (await verifySig(env.pub, joinMessage(tableId, env.pub, env.commit), env.sig)))) return;
+              commits.set(env.pub, { id: env.id, pub: env.pub, commit: env.commit });
+              onPlayers?.([...commits.values()].map((c) => ({ id: c.id, pub: c.pub })));
+              return;
             }
-            joined.set(env.pub, { id: env.id, pub: env.pub, nonce: env.nonce ?? '' });
-            onPlayers?.([...joined.values()]);
+
+            if (raw.t === 'seat-reveal') {
+              const env = raw as RevealEnvelope;
+              const committed = commits.get(env.pub);
+              // Only accept a reveal from a seat that committed, whose nonce hashes to its commitment
+              // (binds it to the value fixed in phase 1), and — when signing — is signed by that pub.
+              if (!committed || typeof env.nonce !== 'string' || seatCommit(env.nonce) !== committed.commit) return;
+              if (me.sign && !(env.sig && (await verifySig(env.pub, revealMessage(tableId, env.pub, env.nonce), env.sig)))) return;
+              if (!reveals.has(env.pub)) reveals.set(env.pub, { id: committed.id, pub: env.pub, nonce: env.nonce });
+              return;
+            }
           } catch {
-            /* not a join envelope */
+            /* not a seating envelope */
           }
         })();
       });
 
-      const announce = (): void => {
+      const announceCommit = (): void => {
         void (async () => {
-          const base = { t: 'join' as const, id: me.id, pub: me.pub, nonce: myNonce };
-          const env = me.sign ? { ...base, sig: await me.sign(joinMessage(tableId, me.pub, myNonce)) } : base;
+          const base = { t: 'join' as const, id: me.id, pub: me.pub, commit: myCommit };
+          const env = me.sign ? { ...base, sig: await me.sign(joinMessage(tableId, me.pub, myCommit)) } : base;
+          await this.relay.publish(tableId, new TextEncoder().encode(JSON.stringify(env)));
+        })();
+      };
+      const announceReveal = (): void => {
+        void (async () => {
+          const base = { t: 'seat-reveal' as const, pub: me.pub, nonce: myNonce };
+          const env = me.sign ? { ...base, sig: await me.sign(revealMessage(tableId, me.pub, myNonce)) } : base;
           await this.relay.publish(tableId, new TextEncoder().encode(JSON.stringify(env)));
         })();
       };
@@ -153,24 +199,27 @@ export class LobbyClient {
       const deadline = Date.now() + 120000;
       const tick = (): void => {
         if (aborted) return;
-        announce();
-        if (joined.size >= meta.maxSeats) {
-          // Non-grindable seating (audit 9): derive seat order from a beacon = H(all join nonces),
-          // then order seats by H(beacon‖pub). A player cannot pick a favourable seat by choosing
-          // their pubkey, because the order key passes through a hash bound to EVERY player's
-          // committed (signed-join) nonce. Deterministic: all peers compute the same order.
-          const all = [...joined.values()].sort((a, b) => (a.pub < b.pub ? -1 : 1));
+        // Re-broadcast discipline: keep publishing our commit (for late subscribers); once we have seen
+        // every seat's COMMIT we enter the reveal phase and ALSO publish our nonce — never before, so
+        // no peer can observe our nonce while it could still grind theirs.
+        announceCommit();
+        if (phase === 'commit' && commits.size >= meta.maxSeats) phase = 'reveal';
+        if (phase === 'reveal') announceReveal();
+
+        if (phase === 'reveal' && reveals.size >= meta.maxSeats) {
+          // Non-grindable seating: beacon = H(all committed-then-revealed nonces), seat order =
+          // H(beacon‖pub). Deterministic across peers; bound to commitments fixed before any reveal.
+          const all = [...reveals.values()].sort((a, b) => (a.pub < b.pub ? -1 : 1));
           const beacon = bytesToHex(sha256(new TextEncoder().encode(all.map((p) => `${p.pub}:${p.nonce}`).join('|'))));
           const orderKey = (pub: string): string => bytesToHex(sha256(new TextEncoder().encode(`${beacon}:${pub}`)));
           const players = [...all].sort((a, b) => (orderKey(a.pub) < orderKey(b.pub) ? -1 : 1)).slice(0, meta.maxSeats);
           const seats: TablePlayer[] = players.map((_, i) => ({ seat: i, stack: meta.startingStack }));
           const mySeat = players.findIndex((p) => p.pub === me.pub);
           if (mySeat < 0) {
-            // didn't make the cut for this table
             reject(new Error('table filled before you were seated'));
             return;
           }
-          resolve({ mySeat, seats, ruleset: rulesetFromMeta(meta), players });
+          resolve({ mySeat, seats, ruleset: rulesetFromMeta(meta), players: players.map((p) => ({ id: p.id, pub: p.pub })) });
           return;
         }
         if (Date.now() > deadline) {

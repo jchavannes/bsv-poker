@@ -112,7 +112,7 @@ export const TRACE_MAP: Readonly<Record<string, Trace>> = {
   'REQ-UI-003': { files: ['apps/client-web/src/screens/connect.ts'], tests: ['tests/web-interaction-rules.test.ts'] },
   'REQ-APP-045': { files: ['packages/app-services/src/interactive-client.ts'], tests: ['tools/reconnect-e2e.ts'] },
   'REQ-APP-070': { files: ['packages/app-services/src/network.ts', 'apps/relay-go/relay/server.go'], tests: ['apps/relay-go/relay/relay_test.go'] },
-  'REQ-APP-071': { files: ['packages/app-services/src/lobby.ts', 'packages/app-services/src/network.ts'], tests: ['tools/lobby-e2e.ts'] },
+  'REQ-APP-071': { files: ['packages/app-services/src/lobby.ts', 'packages/app-services/src/network.ts', 'docs/SEATING.md'], tests: ['tools/lobby-e2e.ts', 'packages/app-services/test/seat-ordering.test.ts'] },
   'REQ-APP-072': { files: ['packages/app-services/src/network.ts'], tests: ['packages/app-services/test/network.test.ts'] },
   'REQ-APP-029': { files: ['packages/app-services/src/network-gate.ts'], tests: ['packages/app-services/test/network-gate.test.ts'] },
   'REQ-APP-030': { files: ['packages/app-services/src/network-gate.ts'], tests: ['packages/app-services/test/network-gate.test.ts'] },

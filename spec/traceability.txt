@@ -145,7 +145,7 @@ REQ-APP-053: traced -> [apps/client-web/src/screens/connect.ts] tests [tests/web
 REQ-APP-054: traced -> [packages/ui-core/src/view-models/accessibility.ts] tests [packages/ui-core/test/accessibility.test.ts]
 REQ-APP-060: traced -> [packages/ui-core/src/view-models/signing.ts] tests [packages/ui-core/test/showdown-signing-lobby-vm.test.ts]
 REQ-APP-070: traced -> [packages/app-services/src/network.ts, apps/relay-go/relay/server.go] tests [apps/relay-go/relay/relay_test.go]
-REQ-APP-071: traced -> [packages/app-services/src/lobby.ts, packages/app-services/src/network.ts] tests [tools/lobby-e2e.ts]
+REQ-APP-071: traced -> [packages/app-services/src/lobby.ts, packages/app-services/src/network.ts, docs/SEATING.md] tests [tools/lobby-e2e.ts, packages/app-services/test/seat-ordering.test.ts]
 REQ-APP-072: traced -> [packages/app-services/src/network.ts] tests [packages/app-services/test/network.test.ts]
 REQ-APP-073: traced -> [packages/app-services/src/network.ts] tests [packages/app-services/test/network.test.ts]
 REQ-APP-074: traced -> [packages/app-services/src/network-modes.ts] tests [packages/app-services/test/errors-modes.test.ts]
