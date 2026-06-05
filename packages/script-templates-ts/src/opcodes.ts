@@ -15,6 +15,7 @@ export const OP = {
   OP_0: 0x00,
   OP_PUSHDATA1: 0x4c,
   OP_PUSHDATA2: 0x4d,
+  OP_PUSHDATA4: 0x4e,
   OP_1: 0x51,
   OP_2: 0x52,
   OP_3: 0x53,

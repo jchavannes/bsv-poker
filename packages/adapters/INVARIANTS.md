@@ -27,6 +27,22 @@ green real run certify the same contract.
 |---|---|---|
 | INV-ADP-7 | The node response is bounded-parsed and the socket buffer capped (CWE-400). | `real-node.ts` (`safeJsonParse` + `MAX_NODE_FRAME`); exercised by the on-chain e2es |
 
+## In-tree regtest node (standalone) — `regtest-node.test.ts`
+
+The project's OWN BSV regtest node — no external process. Runs the real interpreter + BIP-143 sighash
+over the hardened parsers and enforces the consensus rules the on-chain layer relies on.
+
+| ID | Claim | Proof (test) |
+|---|---|---|
+| INV-NODE-1 | A P2PKH coinbase spend is accepted; a wrong key fails IN-SCRIPT. | `INV-NODE-1: P2PKH coinbase spend accepted; wrong key rejected in-script` |
+| INV-NODE-2 | **nLockTime finality** is enforced: a non-final tx with a future locktime is rejected before maturity, accepted at maturity (the bond-forfeiture maturity gate). | `INV-NODE-2: nLockTime finality gate enforced (premature rejected, accepted at maturity)` |
+| INV-NODE-3 | A final-sequence input (0xffffffff) makes a future-locktime tx admissible. | `INV-NODE-3: a final-sequence input makes a future-locktime tx admissible` |
+| INV-NODE-4 | Sequence replacement: a strictly-higher-sequence tx replaces a conflicting one; equal/lower is rejected. | `INV-NODE-4: higher-sequence tx replaces a conflicting mempool tx` |
+| INV-NODE-5 | An unknown UTXO and a value-creating tx are rejected; hostile hex never throws. | `INV-NODE-5: unknown UTXO + value creation rejected; hostile hex never throws` |
+
+End-to-end: `tools/onchain-forfeit-e2e.ts` proves the full bond reveal-or-forfeit on this node,
+including the premature-FORFEIT rejection by the finality gate.
+
 ## To extend
 
 A new adapter adds a conformance test that BOTH the fake and the real implementation must pass, and

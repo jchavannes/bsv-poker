@@ -15,7 +15,7 @@ package's `INVARIANTS.md`). Fuzz counts are per-run minimums.
 |---|---|---|---|
 | 5 | Relay admission: capability tokens / signed admission | **DONE** (v3.75) | `apps/relay-go/relay/capability.go`; table-scoped, expiring, scope-limited HMAC tokens; publish/subscribe fail-closed (401/403); per-table admission secret; `capability_test.go` + `FuzzCapabilityVerify` (1.8M execs); verified end-to-end against the real relay (lobby/multiplayer/reconnect e2e). |
 | 7 | Indexer: validated-transaction verification | **DONE** (v3.78) | `apps/indexer-go/indexer/validate.go`; authenticates every ingested envelope (Ed25519 over the exact canonical message), binds class↔type, requires registered seat, rejects equivocation / unbound action / unregistered table; `validate_test.go` INV-IXV-0..9 + `FuzzValidateEnvelopeRecord` (655k execs); **live** proof `tools/validating-indexer-e2e.ts` (real signed play accepted, forged record 400). |
-| 3 | Accountable commit/reveal timeout + on-chain forfeiture | **DONE** | tx-level recovery proven on-chain (`fallback.ts`, `onchain-recovery-e2e`); bond forfeiture branch proven in-interpreter (`bondRevealOrForfeitLocking`, `INV-BOND-1..5`) and on the real node (`onchain-forfeit-e2e`); the **live anchored-deadline drop-and-continue** is implemented in `interactive-client.ts` with the signed `timeout-claim` envelope (`session-auth.ts`/`message-validation.ts`) for **both** phases: the betting/draw ACTION phase (apply the engine check-or-fold default) AND the commit/reveal HANDSHAKE phase (drop a non-responder, re-derive the deck among the survivors, continue) — both with acceptance tests in `timeout-claim.test.ts` that prove byte-for-byte convergence + rejection of premature/forged claims. The commit/reveal two-phase ordering (no reveal before all commits) is preserved so late-entropy protection (core §4.1) is intact. Heads-up where the sole opponent vanishes correctly aborts (a one-player hand cannot form). |
+| 3 | Accountable commit/reveal timeout + on-chain forfeiture | **DONE** | tx-level recovery proven on-chain (`fallback.ts`, `onchain-recovery-e2e`); bond forfeiture branch proven in-interpreter (`bondRevealOrForfeitLocking`, `INV-BOND-1..5`) and on the in-tree node (`onchain-forfeit-e2e`); the **live anchored-deadline drop-and-continue** is implemented in `interactive-client.ts` with the signed `timeout-claim` envelope (`session-auth.ts`/`message-validation.ts`) for **both** phases: the betting/draw ACTION phase (apply the engine check-or-fold default) AND the commit/reveal HANDSHAKE phase (drop a non-responder, re-derive the deck among the survivors, continue) — both with acceptance tests in `timeout-claim.test.ts` that prove byte-for-byte convergence + rejection of premature/forged claims. The commit/reveal two-phase ordering (no reveal before all commits) is preserved so late-entropy protection (core §4.1) is intact. Heads-up where the sole opponent vanishes correctly aborts (a one-player hand cannot form). |
 
 ## Defect-class hardening applied across the stack (v3.74)
 
@@ -93,18 +93,18 @@ deadline the table waits and a properly-signed but premature/forged claim (`d` b
 is rejected — the seat is NOT dropped (negative); structural rejection of malformed claims
 (`message-validation.test.ts`: missing/negative/non-integer `d`, missing `subject`, self-claim).
 The forfeiture branch's value-conservation + branch-exclusivity guards are proven in-interpreter
-(`INV-BOND-1..5`) and on the real regtest node by `onchain-forfeit-e2e` (owner reclaims via REVEAL; a
-wrong preimage fails IN-SCRIPT; the beneficiary settles the FORFEIT branch conserving exactly the
-bond; the forfeited owner can never reclaim it — double-spend rejected), plus tx-level recovery in
-`onchain-recovery-e2e`.
+(`INV-BOND-1..5`) and on the project's **in-tree** node by `onchain-forfeit-e2e` (owner reclaims via
+REVEAL; a wrong preimage fails IN-SCRIPT; a **premature FORFEIT is REJECTED by the nLockTime finality
+gate**; the beneficiary settles the FORFEIT at maturity conserving exactly the bond; the forfeited
+owner can never reclaim it — double-spend rejected), plus tx-level recovery in `onchain-recovery-e2e`.
 
-**Honest node caveat (maturity gate):** the FORFEIT branch's maturity is the spending transaction's
-`nLockTime`, enforced by a production BSV node (CLTV is a no-op post-Genesis, so it cannot live
-in-script). The local `bonded-subsat-channel` regtest node does NOT enforce `nLockTime` finality at
-admission (no finality check in `node/validation.py`), so `onchain-forfeit-e2e` probes and reports
-this rather than asserting a guarantee that node cannot provide; the maturity gate is therefore a
-production-node responsibility, while the branch STRUCTURE (only the beneficiary can spend FORFEIT,
-only the owner can spend REVEAL) is proven independently of the node.
+**Standalone node (no external dependency):** the on-chain layer runs against the project's OWN
+in-tree node, `@bsv-poker/adapters/regtest-node` — no separate project, no external process. It reuses
+only this repository's hardened components (the transaction parser, the new bounds-checked script
+deserializer, the real interpreter, the BIP-143 sighash) and ENFORCES the consensus rules the
+forfeiture depends on: `nLockTime` finality (`IsFinalTx`) and sequence replacement. The maturity gate
+is therefore asserted, not disclaimed (`INV-NODE-2` proves it in isolation; `onchain-forfeit-e2e`
+proves it end-to-end).
 
 **The commit/reveal handshake remains fail-closed by design:** a non-responder during the entropy
 handshake aborts the hand (funds recoverable via the proven pre-signed refund graph). Re-deriving a

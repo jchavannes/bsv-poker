@@ -35,6 +35,19 @@ node --test "packages/script-templates-ts/test/**/*.test.ts"
 | INV-BOND-4 | The owner cannot take the forfeit branch (it pays the beneficiary key). | negative: owner-on-forfeit rejected |
 | INV-BOND-5 | The beneficiary cannot take the reveal branch without the preimage (commitment binds it). | negative: beneficiary-on-reveal rejected |
 
+## Script deserializer (bytes → Script) — `deserialize-script.test.ts`
+
+The inverse of `serializeScript`, used by the in-tree node to run the interpreter on parsed txs.
+
+| ID | Claim | Proof (test) |
+|---|---|---|
+| INV-DSC-1 | Round-trips opcodes + every push form (direct / PUSHDATA1 / PUSHDATA2). | `INV-DSC-1 positive: round-trips opcodes + pushes of every push form` |
+| INV-DSC-2 | An empty script deserializes to an empty Script. | `INV-DSC-2 positive: empty script` |
+| INV-DSC-3 | A truncated direct push (claims more bytes than remain) is rejected, never OOB-read. | `INV-DSC-3 negative: truncated direct push rejected` |
+| INV-DSC-4 | Truncated PUSHDATA1/2/4 length or data is rejected. | `INV-DSC-4 negative: truncated PUSHDATA1/2 length or data rejected` |
+| INV-DSC-5 | Oversize / non-Uint8Array is rejected. | `INV-DSC-5 negative: oversize / non-Uint8Array rejected` |
+| INV-DSC-F1 | No random byte string throws/OOB-reads; any accepted parse re-serializes to the same bytes (200k fuzz). | `INV-DSC-F1 fuzz: 200k random scripts never throw; accepted parses round-trip` |
+
 ## DER signature normalisation — covered in `protocol-types/test/safe.test.ts`
 
 | ID | Claim | Proof |

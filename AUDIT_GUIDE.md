@@ -50,7 +50,8 @@ node tools/validating-indexer-e2e.ts    # live signed play accepted + forged rec
 ## The honest state (be fair, look here)
 
 [`FAILURE_MODES.md`](./FAILURE_MODES.md) and [`docs/audit-response-03.md`](./docs/audit-response-03.md)
-state it plainly. All three originally-deferred audit findings (3, 5, 7) are now closed and verified.
-The one remaining **environment** limitation (not a code gap): the local regtest node does not enforce
-`nLockTime` finality, so `onchain-forfeit-e2e` documents — rather than asserts — the premature-rejection
-maturity gate (a production-node guarantee), while proving the rest on the real node.
+state it plainly. All three originally-deferred audit findings (3, 5, 7) are closed and verified. The
+project is **standalone**: every part, including the on-chain layer, runs on in-tree code with no
+external system — the BSV regtest node is the in-tree `@bsv-poker/adapters/regtest-node`, which runs
+the real interpreter and enforces `nLockTime` finality + sequence replacement, so the bond-forfeiture
+maturity gate is asserted for real (`onchain-forfeit-e2e`, `INV-NODE-2`).

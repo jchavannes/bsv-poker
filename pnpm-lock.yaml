@@ -60,6 +60,12 @@ importers:
       '@bsv-poker/protocol-types':
         specifier: workspace:*
         version: link:../protocol-types
+      '@bsv-poker/script-templates-ts':
+        specifier: workspace:*
+        version: link:../script-templates-ts
+      '@bsv-poker/tx-builder':
+        specifier: workspace:*
+        version: link:../tx-builder
 
   packages/app-services:
     dependencies:

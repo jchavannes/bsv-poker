@@ -64,8 +64,9 @@ locking branch with two unilateral exits: REVEAL (the owner reclaims by revealin
 preimage + signing) and FORFEIT (the pot beneficiary claims past a chain-anchored maturity — the
 spending tx's `nLockTime` — without the owner's signature). A responsive owner reveals before
 maturity and reclaims; an absent owner's bond is forfeited to the pot. Proven in-interpreter
-(`INV-BOND-1..5`) and on the real regtest node (`onchain-forfeit-e2e`: REVEAL reclaim, in-script
-wrong-preimage failure, FORFEIT settlement + exact value conservation, post-forfeit double-spend
-rejection). The OFF-CHAIN decision of *when* maturity is reached is the anchored-deadline mechanism
-in `interactive-client.ts` (`STATE_MACHINE.md`). The maturity gate itself is a production-node
-guarantee (this regtest node does not enforce `nLockTime` finality — see `FAILURE_MODES.md`).
+(`INV-BOND-1..5`) and on the project's **in-tree** node `@bsv-poker/adapters/regtest-node`
+(`onchain-forfeit-e2e`: REVEAL reclaim, in-script wrong-preimage failure, **premature FORFEIT rejected
+by the nLockTime finality gate**, FORFEIT settlement at maturity + exact value conservation,
+post-forfeit double-spend rejection). The OFF-CHAIN decision of *when* maturity is reached is the
+anchored-deadline mechanism in `interactive-client.ts` (`STATE_MACHINE.md`); the maturity gate itself
+is enforced by the in-tree node (`IsFinalTx` — `INV-NODE-2`).

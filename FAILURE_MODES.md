@@ -45,10 +45,13 @@ No parser can crash the caller on hostile input. The caller MUST fail closed on 
 | no CSPRNG available | **fail-closed**: `cryptoRandomBytes` / the shuffle RNG throw rather than fall back to `Math.random`. |
 | commitment/MAC/token comparison | constant-time; a mismatch is simply "not equal" (no early exit, no timing leak). |
 
-## Known environment limitation (not a code gap)
+## On-chain maturity gate — enforced in-tree
 
-| # | Item | Status |
-|---|---|---|
-| node-maturity | The on-chain bond FORFEIT branch's maturity is the spending tx's `nLockTime`, enforced by a **production** BSV node (CLTV is a no-op post-Genesis, so it cannot live in-script). The local `bonded-subsat-channel` regtest node does **not** enforce `nLockTime` finality, so `onchain-forfeit-e2e` cannot assert the *premature-rejection* on it (it documents this honestly and proves the rest: REVEAL reclaim, in-script wrong-preimage failure, FORFEIT settlement + value conservation, post-forfeit double-spend rejection). The code is correct and a production node enforces the gate. | documented, not a code gap |
+The bond FORFEIT branch's maturity is the spending tx's `nLockTime`. The project's **own** in-tree node
+(`@bsv-poker/adapters/regtest-node`) enforces `nLockTime` finality (`IsFinalTx`): a non-final
+transaction (any input `nSequence != 0xffffffff`) with a future locktime is **rejected** until its
+locktime is reached. `tools/onchain-forfeit-e2e.ts` asserts this for real — a premature FORFEIT claim
+is rejected, and it confirms only at maturity (`INV-NODE-2` proves the gate in isolation). No external
+node, no disclaimer.
 
 If you find a failure mode that does **not** fail closed, that is a finding — see `AUDIT_GUIDE.md`.
