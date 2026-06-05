@@ -102,7 +102,7 @@ export const TRACE_MAP: Readonly<Record<string, Trace>> = {
   'REQ-APP-082': { files: ['packages/ui-core/src/view-models/signing.ts'], tests: ['packages/ui-core/test/showdown-signing-lobby-vm.test.ts'] },
   'REQ-APP-083': { files: ['packages/adapters/src/real-va.ts'], tests: ['packages/adapters/test/conformance.test.ts'] },
   'REQ-CRYPTO-008': { files: ['packages/wallet-custody/src/custody.ts'], tests: ['packages/wallet-custody/test/custody.test.ts'] },
-  'REQ-CRYPTO-010': { files: ['packages/crypto-mentalpoker/src/realct.ts', 'packages/app-services/src/mp-shuffle.ts', 'docs/KEY-LIFECYCLE.md'], tests: ['packages/crypto-mentalpoker/test/realct.test.ts', 'packages/app-services/test/key-lifecycle.test.ts'] },
+  'REQ-CRYPTO-010': { files: ['packages/crypto-mentalpoker/src/realct.ts', 'packages/app-services/src/mp-shuffle.ts', 'packages/app-services/src/key-lifecycle.ts', 'docs/KEY-LIFECYCLE.md'], tests: ['packages/crypto-mentalpoker/test/realct.test.ts', 'packages/app-services/test/key-lifecycle.test.ts'] },
   'REQ-CRYPTO-012': { files: ['packages/tx-builder/src/fallback.ts'], tests: ['packages/sdk/test/adversarial.test.ts'] },
   'REQ-APP-050': { files: ['packages/ui-core/src/store/index.ts'], tests: ['packages/ui-core/test/store.test.ts'] },
   'REQ-APP-052': { files: ['packages/ui-core/src/view-models/lobby.ts', 'packages/ui-core/src/view-models/table.ts', 'packages/ui-core/src/view-models/wallet-panel.ts'], tests: ['packages/ui-core/test/lobby-vm.test.ts', 'packages/ui-core/test/table-vm.test.ts', 'packages/ui-core/test/table-room-vm.test.ts'] },

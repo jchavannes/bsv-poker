@@ -18,7 +18,6 @@ import {
   sha256,
   bytesToHex,
   hexToBytes,
-  ByteWriter,
   safeJsonParse,
   constantTimeEqualHex,
 } from '@bsv-poker/protocol-types';
@@ -28,6 +27,7 @@ import { deckFromEntropies } from './mp-shuffle.ts';
 import { seatedForNextHand } from './table-participants.ts';
 import { type SessionAuth, verifySig, envelopeMessage } from './session-auth.ts';
 import { validateEnvelope } from './message-validation.ts';
+import { perHandEntropy } from './key-lifecycle.ts';
 
 /**
  * Browser-safe debug flag. This module is loaded in the browser bundle (no `process` global) AND in
@@ -662,8 +662,9 @@ export class InteractiveNetworkedTableClient {
         if (!participants.some((p) => p.seat === this.mySeat)) break; // I busted → I'm out
         const seats: TablePlayer[] = participants.map((s) => ({ seat: s.seat, stack: stacks.get(s.seat)! }));
         const buttonIndex = button % seats.length;
-        // fresh, per-hand entropy bound to the hand index (a new N-party shuffle each hand)
-        const handEntropy = sha256(concat(this.entropy, u32(hand)));
+        // fresh, per-hand entropy bound to the hand index (a new N-party shuffle each hand) — the
+        // single source of this derivation is the key-lifecycle manifest module (audit #33).
+        const handEntropy = perHandEntropy(this.entropy, hand);
         const final = await this.playOneHand(hand, seats, buttonIndex, handEntropy);
         for (const s of final.seats) stacks.set(s.seat, s.stack);
         button += 1;
@@ -675,14 +676,3 @@ export class InteractiveNetworkedTableClient {
   }
 }
 
-function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
-  const out = new Uint8Array(a.length + b.length);
-  out.set(a, 0);
-  out.set(b, a.length);
-  return out;
-}
-function u32(n: number): Uint8Array {
-  const w = new ByteWriter();
-  w.u32(n);
-  return w.toBytes();
-}

@@ -9,11 +9,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { sessionAuthFromSeed, deriveSeatSeed } from '../src/session-auth.ts';
+// Test the REAL exported derivation + manifest (audit #33), not a replica.
+import { perHandEntropy, KEY_LIFECYCLE } from '../src/key-lifecycle.ts';
 import { sha256, bytesToHex } from '@bsv-poker/protocol-types';
 
-/** The per-hand entropy derivation documented in the manifest: SHA-256(tableEntropy ‖ u32le(hand)),
- *  matching the code's `concat(entropy, u32(hand))` where ByteWriter.u32 is little-endian. */
-function perHandEntropy(tableEntropy: Uint8Array, hand: number): Uint8Array {
+/** Independent little-endian reference, to cross-check the exported `perHandEntropy` byte-for-byte. */
+function perHandEntropyRef(tableEntropy: Uint8Array, hand: number): Uint8Array {
   const idx = new Uint8Array(4);
   new DataView(idx.buffer).setUint32(0, hand, true); // little-endian (matches ByteWriter.u32)
   const buf = new Uint8Array(tableEntropy.length + 4);
@@ -51,6 +52,26 @@ test('per-hand entropy is distinct per hand, deterministic, and never reuses the
     seen.add(e);
     assert.equal(e, bytesToHex(perHandEntropy(tableEntropy, hand)), 'per-hand entropy must be deterministic from (tableEntropy, hand)');
     assert.notEqual(e, bytesToHex(tableEntropy), 'a hand must never reuse the raw table entropy as its secret');
+    assert.equal(e, bytesToHex(perHandEntropyRef(tableEntropy, hand)), 'the exported derivation must match the LE reference byte-for-byte');
   }
   assert.equal(seen.size, 64, 'all 64 per-hand entropies were distinct');
+  // The exported function rejects out-of-range hand indices (fail-closed).
+  assert.throws(() => perHandEntropy(tableEntropy, -1), /out of range/);
+  assert.throws(() => perHandEntropy(tableEntropy, 2 ** 32), /out of range/);
+});
+
+test('the key-lifecycle manifest is well-formed and covers session/table/hand scopes (audit #33)', () => {
+  const names = KEY_LIFECYCLE.map((k) => k.name);
+  assert.deepEqual(new Set(names).size, names.length, 'manifest entries must be uniquely named');
+  for (const k of KEY_LIFECYCLE) {
+    assert.ok(k.derivation.length > 0, `${k.name} must state its derivation`);
+    assert.ok(['session', 'table', 'hand'].includes(k.scope), `${k.name} has an unknown scope`);
+    assert.ok(k.reuse.startsWith('never-'), `${k.name} must state a no-reuse guarantee`);
+  }
+  // Every scope is represented, and per-hand entropy is the hand-scoped, never-reused-across-hands one.
+  assert.ok(KEY_LIFECYCLE.some((k) => k.scope === 'session'));
+  assert.ok(KEY_LIFECYCLE.some((k) => k.scope === 'table'));
+  const perHand = KEY_LIFECYCLE.find((k) => k.name === 'per-hand-entropy');
+  assert.equal(perHand?.scope, 'hand');
+  assert.equal(perHand?.reuse, 'never-across-hands');
 });

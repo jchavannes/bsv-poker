@@ -1,4 +1,10 @@
-# Key & entropy lifecycle manifest (audit #40)
+# Key & entropy lifecycle manifest (audit #40, #33)
+
+> This prose manifest is mirrored as a discoverable **code** artifact:
+> `packages/app-services/src/key-lifecycle.ts` exports the real `perHandEntropy(...)` derivation the
+> live client uses and a machine-readable `KEY_LIFECYCLE` array (one entry per secret: origin,
+> derivation, scope, no-reuse guarantee). Tests in `key-lifecycle.test.ts` exercise both.
+
 
 Explicit, repository-wide statement of every key and entropy value a player uses, where it comes
 from, how long it lives, and the no-reuse boundaries. This is the "one-game key lifecycle" manifest:

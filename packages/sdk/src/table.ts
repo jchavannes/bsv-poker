@@ -27,7 +27,7 @@ import {
   type Tx,
   buildFunding,
   buildSettlement,
-  sighashPreimage,
+  sighashMessage,
 } from '@bsv-poker/tx-builder';
 import {
   evaluate,
@@ -188,7 +188,12 @@ export function createSdk(deps?: { ct?: CTContract; bs?: BSContract }): Sdk {
       outputs: [settleOut],
       nLockTime: 0,
     };
-    const preimage = sighashPreimage(tx, 0);
+    // Production BSV sighash (audit #32): the REAL BIP-143 (FORKID) digest over the funding input's
+    // scriptCode (`fundingLocking`) and value (`potSats`) — the same `wire.ts::sighashMessage` the
+    // on-chain settlement/fold/recovery and the node use (proven byte-for-byte vs bitcoinx). The SDK
+    // orchestration no longer signs a simplified preimage; the close-out is bound to the exact BSV
+    // sighash that would be broadcast.
+    const preimage = sighashMessage(tx, 0, fundingLocking, potSats);
     // Every party signs the cooperative close-out (N-of-N funding multisig).
     const sigs = ordered.map((p) =>
       p.custody.sign(gid, 0, IDENTITY_ROLE, {
