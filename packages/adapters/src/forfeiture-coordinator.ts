@@ -10,9 +10,15 @@
  * browser-safe client: it consumes a STRUCTURAL drop event, so app-services need not be imported here.
  *
  * Lifecycle: `record(drop)` is synchronous and idempotent per seat (safe to call from the client's
- * drop callback); `flush()` submits every recorded forfeiture whose maturity height has been reached.
- * A premature claim is rejected by the node's nLockTime finality gate and stays pending for the next
- * flush — exactly the gate proven in onchain-forfeit-e2e, now driven by a live drop.
+ * drop callback); `flush()` submits every recorded forfeiture whose maturity height has been reached;
+ * `settle()` is the convenience driver a node client runs to drive recorded forfeitures to completion
+ * as the chain matures. A premature claim is rejected by the node's nLockTime finality gate and stays
+ * pending — exactly the gate proven in onchain-forfeit-e2e, now driven by a LIVE drop.
+ *
+ * WHO invokes it: the BROWSER client is custody-free and only EMITS the drop event (it cannot sign
+ * on-chain txs); a custody-bearing NODE client (or the SDK) wires `onSeatDropped → coordinator.record`
+ * and calls `coordinator.settle()`. So forfeiture is a Node-side capability driven by the real
+ * client's event — see onchain-live-forfeit-e2e.ts for the end-to-end client path.
  */
 import { bondForfeitClaimUnlocking, signPreimage, type KeyPair, type Script } from '@bsv-poker/script-templates-ts';
 import { type Tx, serializeTxWire, txidWire, sighashMessage } from '@bsv-poker/tx-builder';
@@ -138,5 +144,24 @@ export class ForfeitureCoordinator {
   /** Seats with a recorded-but-not-yet-confirmed forfeiture. */
   pendingSeats(): number[] {
     return [...this.pending.keys()];
+  }
+
+  /**
+   * The "invoke in the client path" driver (audit #21): flush, and retry until no forfeiture remains
+   * pending or `maxTries` is reached. A node client calls this after a hand (or on each new block) so a
+   * reveal non-responder's bond is actually FORFEITED on-chain, not merely recorded. With the default
+   * single try it is exactly `flush()`; with `delayMs` it polls while the chain matures past the
+   * deadlines. Returns the results of the LAST flush.
+   */
+  async settle(opts?: { maxTries?: number; delayMs?: number }): Promise<FlushResult[]> {
+    const maxTries = Math.max(1, opts?.maxTries ?? 1);
+    const delayMs = opts?.delayMs ?? 0;
+    let last: FlushResult[] = [];
+    for (let i = 0; i < maxTries; i++) {
+      last = await this.flush();
+      if (this.pending.size === 0) break;
+      if (delayMs > 0 && i + 1 < maxTries) await new Promise((r) => setTimeout(r, delayMs));
+    }
+    return last;
   }
 }

@@ -181,7 +181,9 @@ async function main(): Promise<void> {
   }
 
   // (3b) POSITIVE — at maturity the recorded forfeiture is accepted; the bond is forfeited to bene.
-  const flushed = await coordinator.flush();
+  // settle() is the client-path driver (audit #21): a node client calls it to drive recorded
+  // forfeitures to completion as the chain matures.
+  const flushed = await coordinator.settle();
   const r2 = flushed.find((f) => f.seat === 2);
   assert.equal(r2?.submitted, true, `forfeiture at maturity rejected: ${r2?.reason}`);
   await node.generateBlock(hex(funder.pubCompressed)); // confirm

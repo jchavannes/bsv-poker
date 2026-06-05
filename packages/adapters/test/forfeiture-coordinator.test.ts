@@ -77,3 +77,17 @@ test('flush respects maturity: held back below the deadline, submitted at/after 
   assert.equal(node.submitted.length, 1, 'exactly one forfeiture tx sent');
   assert.deepEqual(coord.pendingSeats(), [], 'a submitted forfeiture is cleared');
 });
+
+test('settle() drives a recorded forfeiture to completion across maturity (audit #21 client-path driver)', async () => {
+  const { coord, node, commitment } = build();
+  coord.record({ seat: 2, hand: 0, phase: 'reveal', deadlineHeight: 3, commitment });
+  // A node client calls settle() to actually FORFEIT (not just record). The "chain" matures across
+  // tries; settle stops as soon as the forfeiture lands.
+  let advanced = 0;
+  const origHeight = node.height.bind(node);
+  node.height = async () => { advanced += 1; node.h = advanced; return origHeight(); }; // height climbs each poll
+  const res = await coord.settle({ maxTries: 10, delayMs: 0 });
+  assert.equal(res[0]?.submitted, true, 'settle must submit the forfeiture once the chain reaches maturity');
+  assert.equal(node.submitted.length, 1, 'exactly one forfeiture tx, despite multiple immature tries');
+  assert.deepEqual(coord.pendingSeats(), [], 'settle clears the forfeiture once confirmed');
+});
