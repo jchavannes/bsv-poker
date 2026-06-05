@@ -27,7 +27,12 @@ const REFERENCE_DOC_TARGETS: string[] = [
   'packages/protocol-types',
   'packages/tx-builder',
   'packages/script-templates-ts',
+  'packages/crypto-mentalpoker',
+  'packages/wallet-custody',
+  'packages/engine',
+  'packages/adapters',
   'apps/indexer-go',
+  'apps/relay-go',
 ];
 
 /** Doc files required for a reference-standard target. */
