@@ -9,7 +9,8 @@
   },
   "include": [
     "packages/ui-core/src/dom.ts",
-    "packages/ui-core/src/components/*.ts"
+    "packages/ui-core/src/components/*.ts",
+    "apps/client-web/src/**/*.ts"
   ],
   "exclude": ["**/node_modules", "**/dist"]
 }

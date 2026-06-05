@@ -1,0 +1,37 @@
+{
+  "//": "IN-TREE BROWSER EMIT (no bundler). This config drives `build.ts`: tsc type-strips the app + its browser-safe workspace dependencies to native ES modules under dist/esm, preserving the source tree. `rewriteRelativeImportExtensions` turns every relative `./x.ts` import into `./x.js`; bare `@bsv-poker/*` specifiers are LEFT INTACT and resolved at load time by the generated import map (see build.ts). There is NO Vite/Rollup/esbuild — the browser's own module loader is the runtime. Only the 10 browser-safe packages are included; the node:crypto packages (crypto-mentalpoker, wallet-custody, adapters, tx-builder, script-templates-ts, sdk) are intentionally excluded and never reached by the app's static graph.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": [],
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noEmit": false,
+    "noEmitOnError": false,
+    "rootDir": "../..",
+    "outDir": "dist/esm"
+  },
+  "include": [
+    "src/**/*.ts",
+    "../../packages/protocol-types/src/**/*.ts",
+    "../../packages/engine/src/**/*.ts",
+    "../../packages/hand-eval/src/**/*.ts",
+    "../../packages/game-holdem/src/**/*.ts",
+    "../../packages/game-omaha/src/**/*.ts",
+    "../../packages/game-stud/src/**/*.ts",
+    "../../packages/game-draw/src/**/*.ts",
+    "../../packages/game-razz/src/**/*.ts",
+    "../../packages/ui-core/src/**/*.ts",
+    "../../packages/app-services/src/**/*.ts"
+  ],
+  "exclude": ["**/node_modules", "**/dist", "**/test"]
+}

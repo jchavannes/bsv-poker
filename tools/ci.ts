@@ -42,15 +42,23 @@ const stages: Stage[] = [
     args: ['node_modules/typescript/bin/tsc', '-p', 'tsconfig.web.json', '--noEmit'],
   },
   {
-    // The web client is its own Vite build (excluded from the root tsconfig); build it in CI so a
-    // broken client bundle fails the pipeline (audit 8).
-    name: 'web client build (vite)',
+    // The web client is built by the IN-TREE builder (tsc emit + import map, NO bundler — Vite/React
+    // are removed). A broken client emit fails the pipeline (audit 8): build.ts exits non-zero if the
+    // entry module is not emitted.
+    name: 'web client build (in-tree: tsc emit + import map)',
     cmd: 'node',
-    args: ['node_modules/vite/bin/vite.js', 'build'],
+    args: ['build.ts'],
     cwd: join(ROOT, 'apps/client-web'),
-    // Missing Vite FAILS CI (audit 10) — a misinstalled env must not report green without building
-    // the web client. Skip only under an explicit local-dev flag.
-    skipIf: () => process.env.BSV_CI_SKIP_WEB === '1',
+  },
+  {
+    // Prove the built client actually RENDERS in a real DOM (not just "process alive"): load
+    // dist/esm/index.html in headless Chrome via CDP and assert the lobby mounted. Skips only if no
+    // headless browser is discoverable on this host (the build stage above still gates the bundle).
+    name: 'web client render check (headless DOM)',
+    cmd: 'node',
+    args: ['verify-render.ts'],
+    cwd: join(ROOT, 'apps/client-web'),
+    skipIf: () => process.env.BSV_CI_SKIP_RENDER === '1',
   },
   {
     name: 'go vet+test relay-go',

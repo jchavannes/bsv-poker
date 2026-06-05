@@ -5,8 +5,9 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./dom": "./src/dom.ts",
     "./view-models": "./src/view-models/index.ts",
-    "./components": "./src/components/index.tsx",
+    "./components": "./src/components/index.ts",
     "./store": "./src/store/index.ts"
   },
   "scripts": {
@@ -17,15 +18,5 @@
     "@bsv-poker/hand-eval": "workspace:*",
     "@bsv-poker/engine": "workspace:*",
     "@bsv-poker/game-holdem": "workspace:*"
-  },
-  "peerDependencies": {
-    "react": "^18",
-    "react-dom": "^18"
-  },
-  "devDependencies": {
-    "@types/react": "^18",
-    "@types/react-dom": "^18",
-    "react": "^18",
-    "react-dom": "^18"
   }
 }

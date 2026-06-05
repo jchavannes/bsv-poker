@@ -29,6 +29,15 @@ import { seatedForNextHand } from './table-participants.ts';
 import { type SessionAuth, verifySig, envelopeMessage } from './session-auth.ts';
 import { validateEnvelope } from './message-validation.ts';
 
+/**
+ * Browser-safe debug flag. This module is loaded in the browser bundle (no `process` global) AND in
+ * Node. Reading `process.env` directly throws ReferenceError in the browser, so we reach `process`
+ * through `globalThis` (typed locally, no @types/node needed) and capture the flag once. `false` in
+ * any environment without a Node `process` — the in-tree browser build ships no `process` shim.
+ */
+const NODE_PROCESS = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process;
+const MP_DEBUG = Boolean(NODE_PROCESS?.env?.MP_DEBUG);
+
 export interface TablePlayer {
   readonly seat: number;
   readonly stack: number;
@@ -341,11 +350,11 @@ export class InteractiveNetworkedTableClient {
           const pub = this.seatPubs[env.seat];
           const sig = (raw as { sig?: string }).sig;
           if (!pub || !sig || !(await verifySig(pub, envelopeMessage(this.tableId, env as Envelope), sig))) {
-            if (process.env.MP_DEBUG) console.error(`[icx seat${this.mySeat}] REJECTED unsigned/forged ${env.t} seat=${env.seat}`);
+            if (MP_DEBUG) console.error(`[icx seat${this.mySeat}] REJECTED unsigned/forged ${env.t} seat=${env.seat}`);
             return; // unsigned, wrong-seat, or forged → reject
           }
         }
-        if (process.env.MP_DEBUG) console.error(`[icx seat${this.mySeat}] rx ${env.t} h${env.hand} seat=${env.seat}`);
+        if (MP_DEBUG) console.error(`[icx seat${this.mySeat}] rx ${env.t} h${env.hand} seat=${env.seat}`);
         this.inbox.push(env as Envelope);
       })();
     });
@@ -492,7 +501,7 @@ export class InteractiveNetworkedTableClient {
         });
         const prev = this.module.stateHash(this.state); // state hash BEFORE the action (audit 8)
         const actHeight = await this.nowHeight(); // anchors this turn's floor for the NEXT seat (audit 3)
-        if (process.env.MP_DEBUG) console.error(`[icx seat${this.mySeat}] MINE ${action.kind} amt=${action.amount} h=${actHeight}`);
+        if (MP_DEBUG) console.error(`[icx seat${this.mySeat}] MINE ${action.kind} amt=${action.amount} h=${actHeight}`);
         this.state = this.module.apply(this.state, action);
         await this.publish({
           t: 'action',
@@ -513,10 +522,10 @@ export class InteractiveNetworkedTableClient {
           // A timeout consumes NO real envelope, so the cursor is NOT advanced: a flaky seat's later
           // genuine actions stay index-aligned (a folded seat simply never reaches this branch again).
           const def = this.defaultAction(toAct);
-          if (process.env.MP_DEBUG) console.error(`[icx seat${this.mySeat}] DROP seat=${toAct} -> ${def.kind}`);
+          if (MP_DEBUG) console.error(`[icx seat${this.mySeat}] DROP seat=${toAct} -> ${def.kind}`);
           this.state = this.module.apply(this.state, def);
         } else {
-          if (process.env.MP_DEBUG) console.error(`[icx seat${this.mySeat}] APPLY peer seat=${toAct} ${outcome.kind} amt=${outcome.amount ?? 0}`);
+          if (MP_DEBUG) console.error(`[icx seat${this.mySeat}] APPLY peer seat=${toAct} ${outcome.kind} amt=${outcome.amount ?? 0}`);
           cursor.set(toAct, seen + 1);
           this.state = this.module.apply(this.state, {
             kind: outcome.kind!,

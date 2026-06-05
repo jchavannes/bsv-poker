@@ -68,12 +68,72 @@ export interface Subscribable {
 }
 
 /**
+ * A stable identity for the currently-focused element, used to restore focus across a full-subtree
+ * re-render. Prefers `id`, then `aria-label`, then `name` — every interactive control in the view
+ * carries at least one of these. Returns null when the element cannot be re-found deterministically
+ * (in which case focus is simply not restored, which is correct: we never guess).
+ */
+function focusKeyOf(node: Element): string | null {
+  const id = node.getAttribute('id');
+  if (id) return `#${CSS.escape(id)}`;
+  const aria = node.getAttribute('aria-label');
+  if (aria) return `[aria-label="${cssAttrEscape(aria)}"]`;
+  const name = node.getAttribute('name');
+  if (name) return `[name="${cssAttrEscape(name)}"]`;
+  return null;
+}
+
+/** Escape a string for safe use inside a CSS attribute-selector double-quoted value. */
+function cssAttrEscape(value: string): string {
+  return value.replace(/["\\]/g, '\\$&');
+}
+
+/**
  * Mount a reactive view: render once into `root`, then re-render (replace `root`'s subtree) whenever
  * `store` notifies. Returns an unmount function. No diffing — a full subtree replace per change; the
  * poker UI is small and this keeps the model trivially correct and auditable.
+ *
+ * FOCUS PRESERVATION: a naive full replace would steal focus from an `<input>` the human is typing
+ * into (and drop the caret position). Before replacing, we record the focused control's stable key
+ * (id / aria-label / name) and its text-selection range; after replacing, we re-focus the matching
+ * control and restore the caret. This makes the trivially-correct "replace the whole subtree" model
+ * behave seamlessly for forms, with no virtual-DOM diffing. Selection access is guarded because some
+ * input types (e.g. number) throw on `selectionStart` — we simply skip caret restore there.
  */
 export function mount(root: HTMLElement, render: () => HTMLElement, store: Subscribable): () => void {
-  const update = (): void => replaceChildren(root, render());
+  const update = (): void => {
+    const active = document.activeElement;
+    let key: string | null = null;
+    let selStart: number | null = null;
+    let selEnd: number | null = null;
+    if (active instanceof HTMLElement && active !== root && root.contains(active)) {
+      key = focusKeyOf(active);
+      if (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement) {
+        try {
+          selStart = active.selectionStart;
+          selEnd = active.selectionEnd;
+        } catch {
+          // selectionStart is unsupported on this input type (e.g. number) — caret restore skipped.
+        }
+      }
+    }
+
+    replaceChildren(root, render());
+
+    if (key) {
+      const next = root.querySelector(key);
+      if (next instanceof HTMLElement) {
+        next.focus();
+        if ((next instanceof HTMLInputElement || next instanceof HTMLTextAreaElement) && selStart !== null) {
+          try {
+            next.setSelectionRange(selStart, selEnd ?? selStart);
+          } catch {
+            // Same guard as above on restore.
+          }
+        }
+      }
+    }
+  };
   update();
   return store.subscribe(update);
 }

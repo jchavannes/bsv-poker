@@ -1,23 +1,12 @@
 {
+  "//": "Editor/IDE typecheck for the web client (framework-free vanilla DOM). The AUTHORITATIVE CI typecheck for the whole view layer is the repo-root tsconfig.web.json (which includes this app's src plus the ui-core view files); this per-app config exists so editors resolve the same lib/options when a file under apps/client-web is opened. No JSX, no React, no Vite types. The browser EMIT is tsconfig.build.json (driven by build.ts).",
+  "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "target": "ES2022",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "module": "ESNext",
-    "moduleResolution": "Bundler",
-    "allowImportingTsExtensions": true,
-    "rewriteRelativeImportExtensions": true,
-    "verbatimModuleSyntax": true,
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": [],
     "noEmit": true,
-    "jsx": "react-jsx",
-    "strict": true,
-    "noUnusedLocals": true,
-    "noUnusedParameters": true,
-    "noUncheckedIndexedAccess": true,
-    "skipLibCheck": true,
-    "resolveJsonModule": true,
-    "isolatedModules": true,
-    "esModuleInterop": true,
-    "types": ["vite/client"]
+    "composite": false
   },
-  "include": ["src", "vite.config.ts"]
+  "include": ["src/**/*.ts"],
+  "exclude": ["**/node_modules", "dist"]
 }
