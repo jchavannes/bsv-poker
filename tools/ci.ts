@@ -61,6 +61,15 @@ const stages: Stage[] = [
     skipIf: () => process.env.BSV_CI_SKIP_RENDER === '1',
   },
   {
+    // Browser-executed tests for the in-tree DOM view core (dom.ts): el semantics, the no-innerHTML
+    // XSS guarantee (positive + negative), event handlers, and mount() focus/caret preservation.
+    name: 'web view-core DOM tests (headless)',
+    cmd: 'node',
+    args: ['verify-dom.ts'],
+    cwd: join(ROOT, 'apps/client-web'),
+    skipIf: () => process.env.BSV_CI_SKIP_RENDER === '1',
+  },
+  {
     // Native Windows desktop host (Win32 + WebView2; Tauri/Rust removed). Compiles bsv-poker.exe +
     // test-lifecycle.exe with cl.exe. Skips on non-Windows / when MSVC Build Tools are absent.
     name: 'desktop native build (cl.exe)',

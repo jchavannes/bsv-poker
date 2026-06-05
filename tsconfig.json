@@ -4,11 +4,14 @@
     "composite": false,
     "types": ["node"]
   },
+  "//include": "Root-level app TOOLS (in-tree build, static server, headless verifiers) are Node scripts (no DOM) — typechecked here. The browser VIEW layer under apps/client-web/src/** is NOT (it is DOM, covered by tsconfig.web.json).",
   "include": [
     "packages/*/src/**/*.ts",
     "packages/*/test/**/*.ts",
     "tools/**/*.ts",
-    "tests/**/*.ts"
+    "tests/**/*.ts",
+    "apps/client-web/*.ts",
+    "apps/client-desktop/*.ts"
   ],
   "//": "The browser view layer (ui-core/src/dom.ts + components) is framework-free vanilla DOM and is typechecked by tsconfig.web.json (DOM lib), NOT here — the Node-side root has no DOM lib by design.",
   "exclude": [
