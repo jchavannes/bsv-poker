@@ -41,10 +41,21 @@ export interface Tx {
 }
 
 /**
- * The sighash preimage for input `index` (a self-contained, deterministic commitment to the
- * spend: version ‖ each input outpoint+sequence ‖ each output value+lockingScript ‖ nLockTime ‖
- * the index being signed). The interpreter verifies ECDSA over SHA-256(preimage); production
- * swaps the embedded node's BIP-143-style double-SHA-256 sighash — same template tests apply.
+ * SIMPLIFIED in-process sighash preimage for input `index` (version ‖ each input outpoint+sequence ‖
+ * each output value+lockingScript ‖ nLockTime ‖ the index being signed). The interpreter verifies
+ * ECDSA over SHA-256(preimage).
+ *
+ * SCOPE — this is NOT the on-chain sighash. It is used only by the SDK's higher-level in-process
+ * orchestration (`sdk/table.ts runHand`) to exercise the Script templates through the real
+ * interpreter without needing each input's scriptCode+value. The REAL, production BSV sighash — full
+ * **BIP-143 (FORKID)** double-SHA-256 with hashPrevouts/hashSequence/hashOutputs/scriptCode/value and
+ * `SIGHASH_ALL|FORKID` (0x41) — is `wire.ts::sighashMessage`, and it is what every ON-CHAIN money path
+ * actually signs/verifies: the settlement/fold/recovery fallback graph (`fallback.ts`), the bonded
+ * micro-payment channel (`adapters/bonded-channel.ts`), and the in-tree regtest node
+ * (`adapters/regtest-node.ts`) — all proven against committed bitcoinx reference vectors
+ * (`tx-builder/test/wire.test.ts`, byte-for-byte) and accepted+mined by the node in the on-chain
+ * e2es. So the production sighash is real BIP-143/FORKID; this function is the deliberate
+ * orchestration-only simplification, never the artifact broadcast on-chain.
  */
 export function sighashPreimage(tx: Tx, index: number): Uint8Array {
   const w = new ByteWriter();
