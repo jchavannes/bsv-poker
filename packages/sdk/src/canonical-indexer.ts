@@ -1,0 +1,69 @@
+/**
+ * Canonical validating indexer (audit findings #24 + #25). The transport indexer (relay-go) is a mere
+ * authenticated projection (P3, ADR 0005); THIS is the indexer-side component that makes the served
+ * truth both LEGAL and CANONICAL by integrating the two validators into one object:
+ *
+ *   - POKER LEGALITY (#24): `validateHand` replays the authenticated transcript records through the ONE
+ *     canonical engine and returns a verdict, rejecting any illegal action, forged/extra record, or
+ *     commit-mismatch (no second poker engine).
+ *   - CANONICAL TRANSACTION GRAPH (#25): `addTransaction` feeds the on-chain funding/settlement txs into
+ *     a `TransactionGraph` that enforces parent-existence, no-double-spend and value-conservation, and
+ *     exposes the authoritative UTXO set — the truth a settlement rests on, validated.
+ *
+ * A node/operator runs this over the authenticated record stream + the on-chain transactions to serve
+ * a transcript that is provably legal AND a transaction graph that is provably consistent. It rebuilds
+ * independently from the same inputs (P2) and matches what the node accepted.
+ */
+import { validateHandLegality, rebuildHand, type LegalityVerdict, type TxRecord } from '@bsv-poker/app-services';
+import { TransactionGraph, type AddResult, type GraphOutput } from '@bsv-poker/adapters/transaction-graph';
+import type { Ruleset, GameState } from '@bsv-poker/protocol-types';
+import type { TablePlayer } from '@bsv-poker/app-services';
+
+export class CanonicalIndexer {
+  private readonly graph = new TransactionGraph();
+
+  // ---- canonical transaction graph (#25) ----
+
+  /** Register a pre-existing outpoint (e.g. a mined coinbase) the on-chain graph may spend from. */
+  addRoot(txid: string, vout: number, satoshis: bigint): void {
+    this.graph.addRoot(txid, vout, satoshis);
+  }
+
+  /** Ingest an on-chain transaction into the canonical graph (validated before commit). */
+  addTransaction(rawHex: string): AddResult {
+    return this.graph.add(rawHex);
+  }
+
+  /** The authoritative UTXO set the validated transaction graph represents. */
+  utxos(): GraphOutput[] {
+    return this.graph.utxos();
+  }
+
+  /** Is this outpoint unspent in the canonical graph? */
+  isUnspent(txid: string, vout: number): boolean {
+    return this.graph.isUnspent(txid, vout);
+  }
+
+  // ---- poker legality over the authenticated transcript (#24) ----
+
+  /** Validate that the authenticated transcript records form a LEGAL hand through the canonical engine. */
+  validateHand(records: readonly TxRecord[], ruleset: Ruleset, seats: readonly TablePlayer[], handNo = 0, buttonIndex = 0): LegalityVerdict {
+    return validateHandLegality(records, ruleset, seats, handNo, buttonIndex);
+  }
+
+  /** Rebuild the (legality-validated) state of a hand from the transcript (P2 deterministic replay). */
+  rebuildHand(records: readonly TxRecord[], ruleset: Ruleset, seats: readonly TablePlayer[], handNo = 0, buttonIndex = 0): { state: GameState; stateHash: string } {
+    return rebuildHand(records, ruleset, seats, handNo, buttonIndex);
+  }
+
+  /**
+   * Serve the canonical view for a hand: the legality verdict AND the validated UTXO set. A served
+   * transcript is admitted only when it is legality-valid (a node would refuse to serve an illegal one).
+   */
+  canonicalView(records: readonly TxRecord[], ruleset: Ruleset, seats: readonly TablePlayer[], handNo = 0, buttonIndex = 0): {
+    legality: LegalityVerdict;
+    utxos: GraphOutput[];
+  } {
+    return { legality: this.validateHand(records, ruleset, seats, handNo, buttonIndex), utxos: this.utxos() };
+  }
+}

@@ -184,6 +184,9 @@ importers:
       '@bsv-poker/adapters':
         specifier: workspace:*
         version: link:../adapters
+      '@bsv-poker/app-services':
+        specifier: workspace:*
+        version: link:../app-services
       '@bsv-poker/crypto-mentalpoker':
         specifier: workspace:*
         version: link:../crypto-mentalpoker

@@ -19,7 +19,8 @@
     "@bsv-poker/tx-builder": "workspace:*",
     "@bsv-poker/script-templates-ts": "workspace:*",
     "@bsv-poker/adapters": "workspace:*",
-    "@bsv-poker/wallet-custody": "workspace:*"
+    "@bsv-poker/wallet-custody": "workspace:*",
+    "@bsv-poker/app-services": "workspace:*"
   },
   "scripts": {
     "test": "node --test \"test/**/*.test.ts\""
