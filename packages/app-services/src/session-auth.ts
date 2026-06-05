@@ -98,9 +98,11 @@ export async function verifySig(pubHex: string, msg: string, sigHex: string): Pr
  */
 export function envelopeMessage(
   tableId: string,
-  e: { t: string; seat: number; hand: number; kind?: string; amount?: number; c?: string; r?: string; discard?: readonly number[]; prev?: string },
+  e: { t: string; seat: number; hand: number; kind?: string; amount?: number; c?: string; r?: string; discard?: readonly number[]; prev?: string; d?: number; h?: number; subject?: number },
 ): string {
-  // `prev` binds the action to the prior state hash (audit 8) — a signed action cannot be replayed
-  // against a different transcript position.
-  return JSON.stringify([tableId, e.t, e.seat, e.hand, e.kind ?? '', e.amount ?? 0, e.c ?? '', e.r ?? '', e.discard ?? [], e.prev ?? '']);
+  // `prev` binds the prior state hash (audit 8); `d` the anchored deadline of a timeout-claim and
+  // `subject` the seat it drops (a claim is signed BY `seat`, the claimant, ABOUT `subject`); `h` the
+  // anchored height an action/reveal was emitted at — the floor a timeout deadline must clear so an
+  // honest-but-slow seat cannot be dropped prematurely (audit 3). All make signatures positional.
+  return JSON.stringify([tableId, e.t, e.seat, e.hand, e.kind ?? '', e.amount ?? 0, e.c ?? '', e.r ?? '', e.discard ?? [], e.prev ?? '', e.d ?? 0, e.h ?? 0, e.subject ?? -1]);
 }

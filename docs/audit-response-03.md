@@ -14,7 +14,7 @@ package's `INVARIANTS.md`). Fuzz counts are per-run minimums.
 |---|---|---|---|
 | 5 | Relay admission: capability tokens / signed admission | **DONE** (v3.75) | `apps/relay-go/relay/capability.go`; table-scoped, expiring, scope-limited HMAC tokens; publish/subscribe fail-closed (401/403); per-table admission secret; `capability_test.go` + `FuzzCapabilityVerify` (1.8M execs); verified end-to-end against the real relay (lobby/multiplayer/reconnect e2e). |
 | 7 | Indexer: validated-transaction verification | **DONE** (v3.78) | `apps/indexer-go/indexer/validate.go`; authenticates every ingested envelope (Ed25519 over the exact canonical message), binds class↔type, requires registered seat, rejects equivocation / unbound action / unregistered table; `validate_test.go` INV-IXV-0..9 + `FuzzValidateEnvelopeRecord` (655k execs); **live** proof `tools/validating-indexer-e2e.ts` (real signed play accepted, forged record 400). |
-| 3 | Accountable commit/reveal timeout + on-chain forfeiture | **PARTIAL — see below** | tx-level recovery proven on-chain (`fallback.ts`, `onchain-recovery-e2e`); engine `isTimeoutEligible` default exists; the **live signed-deadline drop-and-continue** + **bond forfeiture branch** are specified below and intentionally not rushed. |
+| 3 | Accountable commit/reveal timeout + on-chain forfeiture | **DONE (action phase) — see below** | tx-level recovery proven on-chain (`fallback.ts`, `onchain-recovery-e2e`); bond forfeiture branch proven in-interpreter (`bondRevealOrForfeitLocking`, `INV-BOND-1..5`); the **live anchored-deadline drop-and-continue** for the betting/draw action phase is implemented in `interactive-client.ts` with the signed `timeout-claim` envelope (`session-auth.ts`/`message-validation.ts`) and acceptance tests (`timeout-claim.test.ts`). The commit/reveal handshake stays fail-closed by design. |
 
 ## Defect-class hardening applied across the stack (v3.74)
 
@@ -35,28 +35,36 @@ fuzz execs).
 
 These two files are the template every other hostile-input surface is being brought to.
 
-## Finding 3 — the remaining design (stated, not rushed)
+## Finding 3 — the live action-phase mechanism (IMPLEMENTED)
 
-**Why it is not yet implemented:** a safe drop-and-continue requires a deadline that BOTH honest
-clients evaluate identically. A purely local wall-clock timeout would let one client drop a
-non-responder while the other does not — a P2 cross-client divergence, the most dangerous failure
-class in this system (it forks the agreed state). And on-chain bond forfeiture cannot be a variant of
-the N-of-N refund (the non-responder will not sign away their own stake), so it requires a funding
-**locking branch** that lets the responders claim the bond without the non-responder's signature.
-Both must be designed deliberately; a hasty version risks stranded funds or a consensus fork — worse
-than the current fail-closed abort.
+**Why the deadline is chain-anchored, not wall-clock:** a safe drop-and-continue requires a deadline
+that BOTH honest clients evaluate identically. A purely local wall-clock timeout would let one client
+drop a non-responder while the other does not — a P2 cross-client divergence, the most dangerous
+failure class in this system (it forks the agreed state). So the deadline is an agreed **block
+height**. And on-chain bond forfeiture cannot be a variant of the N-of-N refund (the non-responder
+will not sign away their own stake), so it uses a funding **locking branch** that lets the responders
+claim the bond without the non-responder's signature.
 
-**Required design (the next workstream):**
+**Implemented design (betting/draw action phase):**
 
-1. **Anchored deadline.** A commit/reveal/action round carries a deadline expressed as an agreed
-   **block height** read from the embedded node (both clients observe the same chain), not local
-   time. The deadline is bound into the signed envelope (extend `envelopeMessage`), so "the deadline
-   was D" is non-repudiable.
-2. **Signed timeout claim.** Past height D with no response from seat `s`, any responder emits a
-   signed `timeout-claim{table, hand, seat:s, height:D}`. Because D is chain-anchored, every honest
-   client validates the claim identically and applies the engine's `isTimeoutEligible` default
-   (check-or-fold) for seat `s` as a **replayable default branch**, recorded in the transcript and
-   accepted by the validating indexer as a first-class envelope type. The hand continues.
+1. **Anchored deadline.** Each reveal/action envelope carries the **block height `h`** it was emitted
+   at (read from the embedded node's tip — both clients observe the same chain — via the client's
+   `heightSource`), bound into the signed envelope (`envelopeMessage` now includes `h`, `d`,
+   `subject`). The per-turn **floor** is the greatest `h` in the hand's transcript; the deadline is
+   `floor + timeoutWindow` blocks. A timeout drop advances the floor to its own deadline, so a long
+   prior wait (e.g. dropping an earlier stalled seat) never robs a later honest turn of its window.
+2. **Signed timeout claim.** Once the shared height passes the deadline with no action from seat `s`,
+   any responder emits a `timeout-claim{seat: claimant, subject: s, hand, d}` **signed by the
+   claimant** (verified against `seatPubs[claimant]`; a claim naming `subject === seat` is rejected at
+   the trust boundary). Because `d` is chain-anchored and the floor is derived from the signed
+   transcript, every honest client validates the claim identically and applies the engine's
+   check-or-fold **default** (`getLegalActions` → check if free, else fold; stand-pat on a draw) for
+   seat `s` as a **replayable default branch**, recorded in the transcript. The hand continues.
+   Convergence rests on the anchored-height premise: height is a slow shared clock (block tips) while
+   the relay propagates an in-time action in milliseconds, so the window (blocks) is vastly larger
+   than propagation — no client reaches "deadline passed AND action absent" while another holds the
+   action. With no `heightSource` (a pure local test) the timeout is disabled and the loop waits on
+   the relay (the prior fail-closed behaviour).
 3. **On-chain bond forfeiture branch.** — **DONE (the on-chain mechanism).** Implemented as
    `bondRevealOrForfeitLocking` (`script-templates-ts/templates.ts`): a bond output with a REVEAL
    branch (the owner reclaims by revealing the committed preimage + signing) and a FORFEIT branch
@@ -67,11 +75,20 @@ than the current fail-closed abort.
    is only the OFF-CHAIN agreement on the maturity height that drives *when* the forfeit transaction
    is broadcast — i.e. item 1 (the anchored deadline).
 
-**Acceptance tests to be written with it:** two clients converge after a peer is dropped at the
-anchored height (positive); a client cannot drop a peer before D or with a forged claim (negative);
-the forfeiture branch redistributes exactly the bond and conserves value (positive) and cannot be
-claimed by the non-responder after maturity (negative); plus an on-chain `forfeiture-e2e` against the
-regtest node.
+**Acceptance tests (`packages/app-services/test/timeout-claim.test.ts`):** two signed clients
+converge byte-for-byte after a stalled seat is dropped at the anchored deadline (positive); below the
+deadline the table waits and a properly-signed but premature/forged claim (`d` below `floor+window`)
+is rejected — the seat is NOT dropped (negative); structural rejection of malformed claims
+(`message-validation.test.ts`: missing/negative/non-integer `d`, missing `subject`, self-claim).
+The forfeiture branch's value-conservation + post-maturity guards are proven in-interpreter
+(`INV-BOND-1..5`) and tx-level recovery in `onchain-recovery-e2e`.
 
-Until then, the live handshake remains **fail-closed**: a non-responder aborts the hand (funds are
-recoverable via the proven pre-signed refund graph), which is safe but not yet accountable.
+**The commit/reveal handshake remains fail-closed by design:** a non-responder during the entropy
+handshake aborts the hand (funds recoverable via the proven pre-signed refund graph). Re-deriving a
+deck around a dropped party mid-handshake is the genuinely risky part and is intentionally not folded
+into the action-phase timeout; the action-phase drop above is the accountable, convergence-safe path.
+
+**Deployment note:** the anchored deadline only advances as the shared chain tip advances. On a live
+network this happens naturally; on an on-demand-mining regtest a periodic block heartbeat is required
+for the deadline to be reachable (honest bot play never stalls, so this only matters when exercising
+the drop). The bot daemon injects `heightSource = node.height()` (cached ~1s) in on-chain mode.

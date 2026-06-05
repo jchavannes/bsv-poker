@@ -35,7 +35,7 @@ export interface TablePlayer {
 }
 
 interface Envelope {
-  t: 'commit' | 'reveal' | 'action';
+  t: 'commit' | 'reveal' | 'action' | 'timeout-claim';
   seat: number;
   /** Hand index within the session — separates each hand's commits/reveals/actions. */
   hand: number;
@@ -46,6 +46,12 @@ interface Envelope {
   discard?: readonly number[];
   /** Prior state hash the action acts on — bound into the signature (audit 8). */
   prev?: string;
+  /** Anchored deadline block height of a timeout-claim (audit 3). */
+  d?: number;
+  /** Anchored block height a reveal/action was emitted at — the floor a timeout deadline clears (audit 3). */
+  h?: number;
+  /** timeout-claim: the seat being dropped (signed BY `seat`, the claimant, ABOUT `subject`) (audit 3). */
+  subject?: number;
   /** Ed25519 signature by the seat's session key over envelopeMessage(tableId, env) (audit 1–3). */
   sig?: string;
 }
@@ -77,6 +83,17 @@ export class InteractiveNetworkedTableClient {
   private readonly indexer: IndexerClient | null;
   private readonly auth: SessionAuth | null;
   private readonly seatPubs: readonly string[] | null;
+  // Accountable action timeout (audit 3): a shared, monotone chain-height observation is the agreed
+  // clock. When a seat fails to act by an anchored deadline (floor + window blocks), any peer drops it
+  // with the engine's check-or-fold default via a signed timeout-claim. Disabled when no heightSource
+  // is supplied (e.g. a pure in-process test that never stalls) — the loop then waits unbounded-on-relay.
+  private readonly heightSource: (() => Promise<number>) | null;
+  private readonly timeoutWindow: number;
+  // The greatest timeout deadline already APPLIED this hand. A drop advances the transcript's logical
+  // clock to its deadline, so the NEXT turn's floor is at least that height and an honest seat is not
+  // instantly timed out just because earlier waits (e.g. dropping a prior stalled seat) burned blocks.
+  // Deterministic across clients: the deadline is floor+window, computed identically from the transcript.
+  private timeoutFloorAdvance = 0;
 
   constructor(opts: {
     relay: RelayClient;
@@ -94,6 +111,12 @@ export class InteractiveNetworkedTableClient {
     seatPubs?: readonly string[];
     /** TEST FIXTURES ONLY (audit 1): permit unsigned play. Production live play must NOT set this. */
     allowUnsigned?: boolean;
+    /** Shared chain-height observation — the agreed clock for the accountable action timeout (audit 3).
+     *  All seated clients MUST read the same chain (e.g. the embedded node's tip) so the deadline is
+     *  reached at the same height everywhere. Omit to disable the timeout (the loop waits on the relay). */
+    heightSource?: () => Promise<number>;
+    /** Blocks past the per-turn floor after which an unacted seat may be dropped (audit 3). Default 3. */
+    timeoutWindow?: number;
   }) {
     // Live multiplayer requires authentication: a signing key to emit and the seat→key map to verify
     // inbound. Unsigned mode is permitted only behind an explicit test flag (audit 1).
@@ -109,6 +132,11 @@ export class InteractiveNetworkedTableClient {
     this.indexer = opts.indexer ?? null;
     this.auth = opts.auth ?? null;
     this.seatPubs = opts.seatPubs ?? null;
+    this.heightSource = opts.heightSource ?? null;
+    if (opts.timeoutWindow !== undefined && (!Number.isInteger(opts.timeoutWindow) || opts.timeoutWindow < 1)) {
+      throw new Error('timeoutWindow must be a positive integer number of blocks');
+    }
+    this.timeoutWindow = opts.timeoutWindow ?? 3;
   }
 
   onUpdate(cb: (u: ClientUpdate) => void): () => void {
@@ -190,13 +218,6 @@ export class InteractiveNetworkedTableClient {
   private peerActions(seat: number, hand: number): Envelope[] {
     return this.inbox.filter((e) => e.t === 'action' && e.seat === seat && e.hand === hand);
   }
-  private async awaitCond(done: () => boolean, timeoutMs: number): Promise<void> {
-    const deadline = Date.now() + timeoutMs;
-    while (!done()) {
-      if (Date.now() > deadline) throw new Error('timeout waiting for a table message');
-      await new Promise((r) => setTimeout(r, 25));
-    }
-  }
   /**
    * Re-broadcast `envs` every 300ms until `done()`. CRITICAL: a peer who subscribed late must
    * still receive my earlier envelopes, so callers keep re-sending the commit during the reveal
@@ -260,6 +281,83 @@ export class InteractiveNetworkedTableClient {
     });
   }
 
+  /** Current shared chain height, or undefined when the timeout is disabled (no heightSource). */
+  private async nowHeight(): Promise<number | undefined> {
+    if (!this.heightSource) return undefined;
+    const h = await this.heightSource();
+    return Number.isFinite(h) && h >= 0 ? Math.floor(h) : 0;
+  }
+
+  /**
+   * The timeout FLOOR for `handNo`: the greatest anchored height bound into any reveal or action seen
+   * this hand. A deadline must clear floor + window, so each turn (which raises the floor with its own
+   * `h`) gets a fresh window and an honest-but-slow seat cannot be dropped before the window elapses.
+   */
+  private handFloor(handNo: number): number {
+    let f = this.timeoutFloorAdvance; // a prior drop this hand moved the logical clock forward
+    for (const e of this.inbox) {
+      if (e.hand === handNo && (e.t === 'reveal' || e.t === 'action') && typeof e.h === 'number' && e.h > f) f = e.h;
+    }
+    return f;
+  }
+
+  /**
+   * The engine's default move for an unresponsive seat (audit 3): check when checking is free, else
+   * fold; on a draw decision, stand pat. Replayable from the legal-action set, so every client applies
+   * the identical default and converges (P2).
+   */
+  private defaultAction(seat: number): Action {
+    const legal = this.module!.getLegalActions(this.state!, seat);
+    if (legal.draw) return { kind: 'stand', seat, amount: 0 };
+    if (legal.check) return { kind: 'check', seat, amount: 0 };
+    return { kind: 'fold', seat, amount: 0 };
+  }
+
+  /**
+   * Wait for `seat`'s next action (index `seen`) OR for the anchored deadline to pass so the seat is
+   * dropped with the default (audit 3). Returns the peer's action envelope, or 'timeout' to drop.
+   *
+   * Convergence rests on the anchored-height model: height is a slow, shared clock (block tips) while
+   * the relay propagates an in-time action in milliseconds, so the window (blocks) is vastly larger
+   * than propagation — no client reaches "deadline passed AND action absent" while another holds the
+   * action. We also broadcast our own signed timeout-claim once matured so peers converge on the drop.
+   * With no heightSource the timeout is disabled and we wait on the relay (bounded fallback).
+   */
+  private async awaitPeerActionOrTimeout(seat: number, handNo: number, seen: number): Promise<Envelope | 'timeout'> {
+    const floor = this.handFloor(handNo);
+    const deadline = floor + this.timeoutWindow;
+    const fallback = Date.now() + 120000;
+    let claimSent = false;
+    for (;;) {
+      if (this.aborted) throw new Error('client aborted while waiting for a peer');
+      const acts = this.peerActions(seat, handNo);
+      if (acts.length > seen) return acts[seen]!; // in-time action wins (fast path)
+      const h = await this.nowHeight();
+      if (h !== undefined) {
+        // Accept a peer's signed, matured timeout-claim (verified in subscribe()) whose deadline clears
+        // the agreed floor — a forged/premature claim (d < floor+window) or one not yet matured is ignored.
+        const claim = this.inbox.find(
+          (e) => e.t === 'timeout-claim' && e.subject === seat && e.hand === handNo && typeof e.d === 'number' && e.d >= deadline && h >= e.d,
+        );
+        if (claim) {
+          // Advance by our own deterministic deadline (not the claim's possibly-larger d) so every
+          // client moves the clock to the identical height for this drop.
+          this.timeoutFloorAdvance = Math.max(this.timeoutFloorAdvance, deadline);
+          return 'timeout';
+        }
+        if (!claimSent && h >= deadline && seat !== this.mySeat) {
+          claimSent = true;
+          await this.publish({ t: 'timeout-claim', seat: this.mySeat, hand: handNo, subject: seat, d: deadline });
+          this.timeoutFloorAdvance = Math.max(this.timeoutFloorAdvance, deadline);
+          return 'timeout';
+        }
+      } else if (Date.now() > fallback) {
+        throw new Error('timeout waiting for a table message');
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
+  }
+
   /** Run ONE hand at `handNo` over `seats` with `buttonIndex`, using `entropy` for the shuffle. */
   private async playOneHand(
     handNo: number,
@@ -267,8 +365,18 @@ export class InteractiveNetworkedTableClient {
     buttonIndex: number,
     entropy: Uint8Array,
   ): Promise<GameState> {
+    this.timeoutFloorAdvance = 0; // fresh logical clock per hand (audit 3)
     const commitEnv: Envelope = { t: 'commit', seat: this.mySeat, hand: handNo, c: bytesToHex(sha256(entropy)) };
-    const revealEnv: Envelope = { t: 'reveal', seat: this.mySeat, hand: handNo, r: bytesToHex(entropy) };
+    // Anchor the reveal to the current height: it is the per-hand timeout floor baseline (audit 3), so
+    // the first betting turn's deadline is measured from when the hand's entropy went on the record.
+    const startHeight = await this.nowHeight();
+    const revealEnv: Envelope = {
+      t: 'reveal',
+      seat: this.mySeat,
+      hand: handNo,
+      r: bytesToHex(entropy),
+      ...(startHeight !== undefined ? { h: startHeight } : {}),
+    };
     const has = (t: 'commit' | 'reveal', seat: number): boolean =>
       !!this.received((e) => e.t === t && e.seat === seat && e.hand === handNo);
     await this.gossip([commitEnv], () => seats.every((s) => has('commit', s.seat)));
@@ -298,6 +406,8 @@ export class InteractiveNetworkedTableClient {
           this.emit(); // your turn (legal actions in the update)
         });
         const prev = this.module.stateHash(this.state); // state hash BEFORE the action (audit 8)
+        const actHeight = await this.nowHeight(); // anchors this turn's floor for the NEXT seat (audit 3)
+        if (process.env.MP_DEBUG) console.error(`[icx seat${this.mySeat}] MINE ${action.kind} amt=${action.amount} h=${actHeight}`);
         this.state = this.module.apply(this.state, action);
         await this.publish({
           t: 'action',
@@ -306,19 +416,30 @@ export class InteractiveNetworkedTableClient {
           kind: action.kind,
           amount: action.amount,
           prev,
+          ...(actHeight !== undefined ? { h: actHeight } : {}),
           ...(action.discard ? { discard: action.discard } : {}),
         });
       } else {
         const seen = cursor.get(toAct) ?? 0;
-        await this.awaitCond(() => this.peerActions(toAct, handNo).length > seen, 120000);
-        const env = this.peerActions(toAct, handNo)[seen]!;
-        cursor.set(toAct, seen + 1);
-        this.state = this.module.apply(this.state, {
-          kind: env.kind!,
-          seat: toAct,
-          amount: env.amount ?? 0,
-          ...(env.discard ? { discard: env.discard } : {}),
-        });
+        const outcome = await this.awaitPeerActionOrTimeout(toAct, handNo, seen);
+        if (outcome === 'timeout') {
+          // The seat missed the anchored deadline: apply the engine's check-or-fold default (audit 3).
+          // Deterministic and replayable — every client computes the identical default from the state.
+          // A timeout consumes NO real envelope, so the cursor is NOT advanced: a flaky seat's later
+          // genuine actions stay index-aligned (a folded seat simply never reaches this branch again).
+          const def = this.defaultAction(toAct);
+          if (process.env.MP_DEBUG) console.error(`[icx seat${this.mySeat}] DROP seat=${toAct} -> ${def.kind}`);
+          this.state = this.module.apply(this.state, def);
+        } else {
+          if (process.env.MP_DEBUG) console.error(`[icx seat${this.mySeat}] APPLY peer seat=${toAct} ${outcome.kind} amt=${outcome.amount ?? 0}`);
+          cursor.set(toAct, seen + 1);
+          this.state = this.module.apply(this.state, {
+            kind: outcome.kind!,
+            seat: toAct,
+            amount: outcome.amount ?? 0,
+            ...(outcome.discard ? { discard: outcome.discard } : {}),
+          });
+        }
       }
       this.emit();
     }

@@ -171,6 +171,19 @@ async function main(): Promise<void> {
   view.status = 'playing';
   log(`SEATED at seat ${s.mySeat}; opponents are remote over the relay`);
 
+  // In on-chain mode the embedded node's chain tip is the SHARED clock for the accountable action
+  // timeout (audit 3): every seated client reads the same height, so an unresponsive seat is dropped
+  // (with the engine's check-or-fold default) at the same anchored deadline on every client.
+  const node = NODE_PORT ? new RealBsvNode('127.0.0.1', NODE_PORT) : null;
+  // Cache the tip for ~1s: the timeout loop polls the height every ~25ms, but the chain tip changes on
+  // the order of blocks, so re-querying the node socket each poll is wasteful.
+  let tipCache = { h: 0, at: 0 };
+  const cachedHeight = async (): Promise<number> => {
+    const now = Date.now();
+    if (now - tipCache.at > 1000) tipCache = { h: await node!.height(), at: now };
+    return tipCache.h;
+  };
+
   const client = new InteractiveNetworkedTableClient({
     relay,
     tableId: table.id,
@@ -180,6 +193,7 @@ async function main(): Promise<void> {
     entropy: new Uint8Array(randomBytes(32)),
     auth, // sign every envelope I emit
     seatPubs: s.players.map((p) => p.pub), // verify peers: seat → registered session key
+    ...(node ? { heightSource: cachedHeight } : {}),
   });
 
   client.onUpdate((u: ClientUpdate) => {
@@ -201,7 +215,7 @@ async function main(): Promise<void> {
     const pubs = pubHexes.map((h) => Uint8Array.from(Buffer.from(h, 'hex')));
     const fundingScript = fundingLocking(BIND, pubs);
     const escrow = n * s.seats[0]!.stack * SCALE;
-    const node = new RealBsvNode('127.0.0.1', NODE_PORT);
+    if (!node) throw new Error('on-chain mode requires a node');
 
     let fundingTxid: string;
     if (s.mySeat === 0) {
