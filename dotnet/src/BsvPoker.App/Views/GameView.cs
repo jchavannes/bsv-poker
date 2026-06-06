@@ -170,7 +170,8 @@ public sealed class GameView : UserControl
             _onCardsChanged();
         }
         foreach (var c in hand.Seats[me].Hole) { var cv = new CardView(); cv.ShowCard(c); _botCards.Children.Add(cv); }
-        for (int i = 0; i < 2; i++) { var cv = new CardView(); if (hand.Complete) cv.ShowCard(hand.Seats[opp].Hole[i]); else cv.ShowBack(); _topCards.Children.Add(cv); }
+        // opponent holes are face-down sentinels of the variant's hole count until showdown reveals them
+        foreach (var c in hand.Seats[opp].Hole) { var cv = new CardView(); if (c.IsFaceDown) cv.ShowBack(); else cv.ShowCard(c); _topCards.Children.Add(cv); }
         for (int i = 0; i < 5; i++) { var cv = new CardView(); if (i < hand.Board.Count) cv.ShowCard(hand.Board[i]); else cv.ShowEmpty(); _board.Children.Add(cv); }
         _pot.Text = $"Pot: {hand.Pot}";
         bool myTurn = !hand.Complete && hand.ToAct == me;
