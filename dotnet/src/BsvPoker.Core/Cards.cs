@@ -13,6 +13,10 @@ public readonly record struct Card(int Rank, Suit Suit)
     public int Index => (Rank - 2) * 4 + (int)Suit; // 0..51
     public static Card FromIndex(int i) => new(i / 4 + 2, (Suit)(i % 4));
     public override string ToString() => $"{RankLabel}{Glyph}";
+
+    /// <summary>A face-down placeholder (rank 0 is not a real card) — an opponent hole card not yet revealed.</summary>
+    public static readonly Card FaceDown = new(0, Suit.Spades);
+    public bool IsFaceDown => Rank == 0;
 }
 
 /// <summary>The ordered 52-card deck (index 0..51) and a local CSPRNG shuffle (mental-poker shuffle is in MentalPoker).</summary>

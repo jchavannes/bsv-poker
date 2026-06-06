@@ -42,16 +42,21 @@ public sealed class HoldemState
     public long MinRaise;                     // minimum raise increment
     public int ToAct = -1;
     public bool Complete;
+    public bool AwaitingShowdown;             // betting done, but opponent hole cards not yet revealed/unmasked
+    public bool AwaitingBoard;               // street advanced, but the new board cards not yet revealed
+    public int PendingBoardCount;            // how many board cards the next reveal must supply
+    private Street _pendingStreet;
+    private bool _deferShowdown;              // when true (networked), board + showdown pause for reveals
     public string Message = "";
     public Variant Variant = Variant.TexasHoldem;
     public Dictionary<int, long> Payouts = new(); // seat -> chips won at showdown
 
     public long Pot => Seats.Sum(s => s.TotalCommit) - Payouts.Values.Sum();
 
-    public static HoldemState Create(IReadOnlyList<long> stacks, int button, long sb, long bb, IReadOnlyList<Card> deck, Variant variant = Variant.TexasHoldem)
+    public static HoldemState Create(IReadOnlyList<long> stacks, int button, long sb, long bb, IReadOnlyList<Card> deck, Variant variant = Variant.TexasHoldem, bool deferShowdown = false)
     {
         if (stacks.Count < 2) throw new ArgumentException("need >= 2 players");
-        var st = new HoldemState { Button = button, SmallBlind = sb, BigBlind = bb, _deck = deck.ToList(), Variant = variant };
+        var st = new HoldemState { Button = button, SmallBlind = sb, BigBlind = bb, _deck = deck.ToList(), Variant = variant, _deferShowdown = deferShowdown };
         for (int i = 0; i < stacks.Count; i++) st.Seats.Add(new SeatState { Seat = i, Stack = stacks[i] });
         // hole cards (the variant's count)
         int holeCount = Variants.HoleCards(variant);
@@ -182,15 +187,36 @@ public sealed class HoldemState
 
     private void NextStreet()
     {
+        if (Street == Street.River) { Settle(); return; }
         foreach (var s in Seats) { s.StreetCommit = 0; s.ActedThisStreet = false; }
         CurrentBet = 0; MinRaise = BigBlind;
-        switch (Street)
+        int need = Street == Street.Preflop ? 3 : 1;
+        var next = Street == Street.Preflop ? Street.Flop : Street == Street.Flop ? Street.Turn : Street.River;
+        if (_deferShowdown)
         {
-            case Street.Preflop: Board.AddRange(new[] { _deck[_deckPos++], _deck[_deckPos++], _deck[_deckPos++] }); Street = Street.Flop; Message = "Flop"; break;
-            case Street.Flop: Board.Add(_deck[_deckPos++]); Street = Street.Turn; Message = "Turn"; break;
-            case Street.Turn: Board.Add(_deck[_deckPos++]); Street = Street.River; Message = "River"; break;
-            case Street.River: Settle(); return;
+            // networked: pause so both peers reveal/unmask THIS street's board before anyone sees it
+            _pendingStreet = next; PendingBoardCount = need; AwaitingBoard = true; ToAct = -1;
+            Message = $"Revealing the {next.ToString().ToLowerInvariant()}…";
+            return;
         }
+        for (int i = 0; i < need; i++) Board.Add(_deck[_deckPos++]);
+        Street = next; Message = next.ToString();
+        FinishStreetTransition();
+    }
+
+    /// <summary>Supply the just-revealed board cards for a deferred street, then continue play.</summary>
+    public void SupplyBoard(IReadOnlyList<Card> cards)
+    {
+        if (!AwaitingBoard) return;
+        if (cards.Count != PendingBoardCount) throw new ArgumentException("wrong number of board cards");
+        Board.AddRange(cards);
+        Street = _pendingStreet; AwaitingBoard = false; PendingBoardCount = 0;
+        Message = Street.ToString();
+        FinishStreetTransition();
+    }
+
+    private void FinishStreetTransition()
+    {
         // if <=1 can act (everyone else all-in), keep dealing streets to showdown with no betting
         if (CanActCount() <= 1) { if (Street != Street.River) NextStreet(); else Settle(); return; }
         ToAct = NextActive(this, Button);
@@ -199,16 +225,41 @@ public sealed class HoldemState
 
     private void Settle()
     {
-        Complete = true; Street = Street.Complete;
         var contenders = Seats.Where(s => !s.Folded).ToList();
         if (contenders.Count == 1)
         {
+            // uncontested — no hole cards needed, pay immediately even in deferred mode
+            Complete = true; Street = Street.Complete;
             long won = Seats.Sum(s => s.TotalCommit);
             contenders[0].Stack += won;
             Payouts[contenders[0].Seat] = won;
             Message = $"Seat {contenders[0].Seat} wins {won} (all others folded)";
             return;
         }
+        if (_deferShowdown)
+        {
+            // a real showdown: pause so each peer can reveal/unmask the opponent's hole cards first
+            AwaitingShowdown = true; ToAct = -1;
+            Message = "Showdown — revealing hole cards…";
+            return;
+        }
+        Complete = true; Street = Street.Complete;
+        ScoreAndPay();
+    }
+
+    /// <summary>Fill in an opponent's hole cards once they have been revealed and unmasked at showdown.</summary>
+    public void SetRevealedHole(int seat, IReadOnlyList<Card> hole) => Seats[seat].Hole = hole.ToArray();
+
+    /// <summary>Finish a deferred showdown after every live contender's hole cards have been set.</summary>
+    public void CompleteShowdown()
+    {
+        if (!AwaitingShowdown) return;
+        AwaitingShowdown = false; Complete = true; Street = Street.Complete;
+        ScoreAndPay();
+    }
+
+    private void ScoreAndPay()
+    {
         // layered side pots by distinct total-commit levels
         var levels = Seats.Select(s => s.TotalCommit).Where(v => v > 0).Distinct().OrderBy(v => v).ToList();
         long prev = 0;
