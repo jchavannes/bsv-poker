@@ -220,6 +220,14 @@ public static class Chain
 
     // ---- strict, bounds-checked parsers (new escrow code is built to consensus-grade strictness) ----
 
+    /// <summary>The FORKID sighash digest a smart-contract CHECKSIG must sign (scriptCode = the contract script).</summary>
+    public static byte[] ContractSighash(Tx tx, int index, byte[] scriptCode, long amount) => SighashForkId(tx, index, scriptCode, amount);
+
+    /// <summary>Strict canonical-DER → 64-byte compact (r‖s), or null if non-canonical. For contract sig checking.</summary>
+    public static byte[]? ParseStrictDer(byte[] der) => StrictDerToCompact(der);
+
+    public const byte ContractHashType = SighashAllForkId; // 0x41
+
     /// <summary>Read a single canonical data push (1..75 bytes) at <paramref name="p"/>; returns (null, p) if malformed/OOB.</summary>
     private static (byte[]? data, int next) ReadPush(byte[] s, int p)
     {

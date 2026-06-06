@@ -1,3 +1,4 @@
+using BsvPoker.Core;
 using BsvPoker.Core.Script;
 using BsvPoker.Crypto;
 
@@ -80,6 +81,37 @@ public static class ScriptTests
             byte[] reserveGate(long reserve) => new ScriptBuilder().Num(reserve).Op(ScriptEngine.OP_GREATERTHAN).Build();
             T.True(ScriptEngine.Verify(new ScriptBuilder().Num(150).Build(), reserveGate(100), new ScriptEngine.NoChecker()), "150 > 100 passes");
             T.False(ScriptEngine.Verify(new ScriptBuilder().Num(100).Build(), reserveGate(100), new ScriptEngine.NoChecker()), "100 > 100 fails");
+        });
+
+        T.Run("on-chain: a REAL transaction spends a Script contract via the FORKID sighash", () =>
+        {
+            const string fund = "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12";
+            var contract = Contracts.P2pkh(seller.Pub);
+            var tx = new Chain.Tx(2, new() { new(fund, 0, Array.Empty<byte>(), 0xffffffff) }, new() { new(9000, Contracts.P2pkh(bidder.Pub)) }, 0);
+            var sig = TxScriptChecker.Sign(tx, 0, contract, 10000, seller.Priv);
+            var scriptSig = new ScriptBuilder().Push(sig).Push(seller.Pub).Build();
+            T.True(ScriptEngine.Verify(scriptSig, contract, new TxScriptChecker(tx, 0, contract, 10000)), "real tx spends the contract");
+            T.False(ScriptEngine.Verify(scriptSig, contract, new TxScriptChecker(tx, 0, contract, 9999)), "tampered amount breaks the spend");
+        });
+
+        T.Run("on-chain auction: winner claims with a tx-bound sig+preimage; bidder refunds after CLTV", () =>
+        {
+            const string fund = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+            var preimage = System.Text.Encoding.ASCII.GetBytes("the-winning-bid");
+            long amount = 50000, timeout = 850000;
+            var contract = Contracts.AuctionEscrow(Hashes.Hash160(preimage), seller.Pub, timeout, bidder.Pub);
+            // winner branch
+            var wtx = new Chain.Tx(2, new() { new(fund, 0, Array.Empty<byte>(), 0xffffffff) }, new() { new(amount - 500, Contracts.P2pkh(seller.Pub)) }, 0);
+            var wsig = TxScriptChecker.Sign(wtx, 0, contract, amount, seller.Priv);
+            T.True(ScriptEngine.Verify(Contracts.AuctionWinUnlock(wsig, preimage), contract, new TxScriptChecker(wtx, 0, contract, amount)), "winner claims on-chain");
+            // refund branch: locktime reached + non-final sequence
+            var rtx = new Chain.Tx(2, new() { new(fund, 0, Array.Empty<byte>(), 0xfffffffe) }, new() { new(amount - 500, Contracts.P2pkh(bidder.Pub)) }, (uint)timeout + 1);
+            var rsig = TxScriptChecker.Sign(rtx, 0, contract, amount, bidder.Priv);
+            T.True(ScriptEngine.Verify(Contracts.AuctionRefundUnlock(rsig), contract, new TxScriptChecker(rtx, 0, contract, amount)), "bidder refunds after timeout on-chain");
+            // refund attempted too early (locktime not reached) fails
+            var etx = new Chain.Tx(2, new() { new(fund, 0, Array.Empty<byte>(), 0xfffffffe) }, new() { new(amount - 500, Contracts.P2pkh(bidder.Pub)) }, (uint)timeout - 10);
+            var esig = TxScriptChecker.Sign(etx, 0, contract, amount, bidder.Priv);
+            T.False(ScriptEngine.Verify(Contracts.AuctionRefundUnlock(esig), contract, new TxScriptChecker(etx, 0, contract, amount)), "no early refund");
         });
 
         T.Run("HOSTILE: malformed scripts return false, never throw", () =>
