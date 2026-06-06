@@ -24,6 +24,7 @@ NetChatTests.All();
 BsvProtocolTests.All();
 BsvHeadersTests.All();
 MerkleProofTests.All();
+SpvFundingTests.All();
 ScriptTests.All();
 
 return T.Summary();
