@@ -36,6 +36,7 @@ public sealed class GameView : UserControl
     private readonly TextBlock _botInfo = new() { Foreground = Brushes.White, FontWeight = FontWeights.Bold, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 6, 0, 0) };
     private readonly TextBlock _pot = new() { Foreground = new SolidColorBrush(Color.FromRgb(0xFF, 0xE0, 0x82)), FontSize = 18, FontWeight = FontWeights.Bold, HorizontalAlignment = HorizontalAlignment.Center };
     private readonly TextBlock _msg = new() { Foreground = new SolidColorBrush(Color.FromRgb(0xE8, 0xF5, 0xE9)), FontSize = 15, HorizontalAlignment = HorizontalAlignment.Center, TextWrapping = TextWrapping.Wrap };
+    private readonly TextBlock _standings = new() { Foreground = new SolidColorBrush(Color.FromRgb(0xCF, 0xD8, 0xDC)), FontSize = 12, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 4, 0, 0), TextWrapping = TextWrapping.Wrap };
     private readonly TextBox _bet = new() { Width = 70, Text = "6", VerticalContentAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 4, 0) };
     private readonly Button _deal = Mk("Practice deal", "#444444");
     private readonly Button _fold = Mk("Fold", "#7A2E2E");
@@ -57,7 +58,7 @@ public sealed class GameView : UserControl
         var top = new StackPanel { VerticalAlignment = VerticalAlignment.Top, HorizontalAlignment = HorizontalAlignment.Center };
         top.Children.Add(_topInfo); top.Children.Add(_topCards); Grid.SetRow(top, 0); g.Children.Add(top);
         var mid = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
-        mid.Children.Add(_pot); mid.Children.Add(_board); mid.Children.Add(_msg); Grid.SetRow(mid, 1); g.Children.Add(mid);
+        mid.Children.Add(_pot); mid.Children.Add(_board); mid.Children.Add(_msg); mid.Children.Add(_standings); Grid.SetRow(mid, 1); g.Children.Add(mid);
         var bot = new StackPanel { VerticalAlignment = VerticalAlignment.Bottom, HorizontalAlignment = HorizontalAlignment.Center };
         bot.Children.Add(_botCards); bot.Children.Add(_botInfo); Grid.SetRow(bot, 2); g.Children.Add(bot);
         inner.Child = g; felt.Child = inner;
@@ -144,7 +145,7 @@ public sealed class GameView : UserControl
 
     private void Render()
     {
-        _topCards.Children.Clear(); _botCards.Children.Clear(); _board.Children.Clear();
+        _topCards.Children.Clear(); _botCards.Children.Clear(); _board.Children.Clear(); _standings.Text = "";
         if (_net != null) RenderNet(); else RenderPractice();
     }
 
@@ -186,7 +187,8 @@ public sealed class GameView : UserControl
         _pot.Text = $"Pot: {hand.Pot}";
         bool myTurn = !hand.Complete && hand.ToAct == me;
         _botInfo.Text = $"You (seat {me}) — stack {hand.Seats[me].Stack}{(myTurn ? "  ◀ your turn" : "")}";
-        _msg.Text = ng.Status;
+        _msg.Text = ng.Status + (ng.HandLog.Count > 0 ? "   •   " + ng.HandLog[^1] : "");
+        _standings.Text = "Session — " + ng.Standings;
         var la = myTurn ? hand.Legal() : null;
         _fold.IsEnabled = la?.CanFold ?? false;
         _check.IsEnabled = la?.CanCheck ?? false;

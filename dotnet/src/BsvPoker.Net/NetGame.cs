@@ -71,6 +71,13 @@ public sealed class NetGame
     public long TableChips => _stacks.Values.Sum();
     public bool Eliminated { get; private set; }
 
+    private readonly List<string> _handLog = new();
+    /// <summary>A running log of completed hands (most recent last) — who won what.</summary>
+    public IReadOnlyList<string> HandLog => _handLog;
+    /// <summary>Session chip standings across all admitted players (fixed seat order), marking you and the busted.</summary>
+    public string Standings => _sessionSeats == null ? "" :
+        string.Join("    ", _sessionSeats.Select((p, i) => $"P{i}: {_stacks[p]}{(p == _myPubHex ? " (you)" : "")}{(_stacks[p] == 0 ? " ✗" : "")}"));
+
     private int HandSeats => _inPubs.Length;
     private int HoleCount => Variants.HoleCards(Variant);
     private int BoardStart => HoleCount * HandSeats;
@@ -284,6 +291,8 @@ public sealed class NetGame
         if (_handFinalized || Hand is not { Complete: true }) return;
         _handFinalized = true;
         for (int i = 0; i < _inPubs.Length; i++) _stacks[_inPubs[i]] = Hand.Seats[i].Stack;
+        _handLog.Add($"Hand #{_handNo + 1}: {Hand.Message}");
+        if (_handLog.Count > 100) _handLog.RemoveAt(0);
         StartHand();
     }
 

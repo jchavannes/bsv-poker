@@ -62,6 +62,8 @@ public static class NetGameTests
             T.True(g1.HandNumber >= 3 && g2.HandNumber >= 3, "at least 3 hands were played (continuity)");
             T.Eq(g1.TableChips, 200L, "chips conserved across hands on A");
             T.Eq(g2.TableChips, 200L, "chips conserved across hands on B");
+            T.True(g1.HandLog.Count >= 1, "completed hands are logged");
+            T.True(g1.Standings.Contains("(you)"), "standings mark the local player");
             foreach (var g in games) g.Stop();
         });
 
