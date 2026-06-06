@@ -5,6 +5,7 @@ Console.WriteLine("=== BsvPoker .NET test suite ===\n");
 Secp256k1Tests.All();
 CryptoPrimitivesTests.All();
 GameTests.All();
+PokerEvalTests.All();
 MentalPokerECTests.All();
 VariantTests.All();
 ChainTests.All();
