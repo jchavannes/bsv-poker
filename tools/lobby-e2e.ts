@@ -1,55 +1,23 @@
 /**
  * Waiting-room + real multiplayer E2E (app §A6.3/§A6.5/§A7) — proves two REAL players (not a bot)
- * find a table, join the waiting room, get seated by agreement, and play a full hand
- * interactively over the relay, converging byte-for-byte (REQ-TEST-002).
+ * find a table, join the waiting room, get seated by agreement, and play a full hand interactively
+ * over the PEER-TO-PEER mesh, converging byte-for-byte (REQ-TEST-002).
  *
- *   Host creates a 2-seat table → both join the waiting room → seats agreed → both run the
- *   interactive client (a scripted human acts on each turn) → identical final state.
+ *   Host creates a 2-seat table (gossiped directory announce) → both join the waiting room → seats
+ *   agreed → both run the interactive client (a scripted human acts on each turn) → identical final
+ *   state. There is NO relay server and NO indexer server — each player is its own P2P node.
  */
 
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import type { Action, LegalActions } from '@bsv-poker/protocol-types';
 import {
-  RelayClient,
   LobbyClient,
   InteractiveNetworkedTableClient,
   type TableMeta,
   type ClientUpdate,
 } from '@bsv-poker/app-services';
-
-const ROOT = process.cwd();
-const isWin = process.platform === 'win32';
-const children: ChildProcess[] = [];
-
-function startService(dir: string, addr: string, bin: string): void {
-  const exe = isWin ? `${bin}.exe` : bin;
-  const b = spawnSync('go', ['build', '-o', exe, '.'], { cwd: join(ROOT, dir), stdio: 'inherit' });
-  if (b.status !== 0) throw new Error(`go build -o failed in ${dir}`);
-  children.push(spawn(join(ROOT, dir, exe), ['-addr', addr], { stdio: 'ignore' }));
-}
-async function waitHealthy(url: string, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    try {
-      if ((await fetch(url, { signal: AbortSignal.timeout(1000) })).ok) return;
-    } catch {
-      /* not up */
-    }
-    if (Date.now() > deadline) throw new Error(`not healthy: ${url}`);
-    await new Promise((r) => setTimeout(r, 400));
-  }
-}
-function cleanup(): void {
-  for (const c of children) {
-    try {
-      c.kill();
-    } catch {
-      /* ignore */
-    }
-  }
-}
+import { P2PTransport } from '@bsv-poker/adapters/p2p-transport';
+import { p2pMesh } from './p2p-mesh.ts';
 
 const passive = (legal: LegalActions, seat: number): Action => {
   if (legal.check) return { kind: 'check', seat, amount: 0 };
@@ -67,12 +35,12 @@ const META: TableMeta = {
 };
 
 async function player(
-  relayBase: string,
+  transport: P2PTransport,
   me: { id: string; pub: string },
   tableId: string,
   entropySeed: number,
 ): Promise<{ stateHash: string }> {
-  const lobby = new LobbyClient(new RelayClient(relayBase));
+  const lobby = new LobbyClient(transport);
   const { seated } = lobby.joinWaitingRoom(
     tableId,
     me,
@@ -84,7 +52,7 @@ async function player(
   console.log(`[${me.id}] seated at seat ${seat.mySeat} of ${seat.seats.length}`);
 
   const client = new InteractiveNetworkedTableClient({
-    relay: new RelayClient(relayBase),
+    relay: transport, // the player's own P2P node — structural Relay, no server
     tableId,
     mySeat: seat.mySeat,
     seats: seat.seats,
@@ -101,37 +69,41 @@ async function player(
 }
 
 async function main(): Promise<void> {
-  console.log('[lobby-e2e] starting relay (:8091) + indexer (:8092)…');
-  startService('apps/relay-go', '127.0.0.1:8091', 'relay-go');
-  startService('apps/indexer-go', '127.0.0.1:8092', 'indexer-go');
-  await waitHealthy('http://127.0.0.1:8091/healthz', 30000);
+  console.log('[lobby-e2e] standing up a 2-node P2P mesh (NO relay/indexer server)…');
+  const mesh = await p2pMesh(2);
+  const [nodeAlice, nodeBob] = mesh.transports;
 
-  const base = 'http://127.0.0.1:8091';
-  const host = new LobbyClient(new RelayClient(base));
+  // Host (Alice's node) creates the table; the announce gossips across the mesh.
+  const host = new LobbyClient(nodeAlice!);
   const tableId = await host.createTable(META);
-  console.log(`[lobby-e2e] host created table ${tableId} (${META.name}); now visible in the lobby:`);
+  console.log(`[lobby-e2e] host created table ${tableId} (${META.name}); discovering via gossip…`);
+  // Bob's node must SEE it via the gossiped directory before joining.
+  const bobLobby = new LobbyClient(nodeBob!);
+  const dl = Date.now() + 8000;
+  for (;;) {
+    if ((await bobLobby.listTables()).some((t) => t.id === tableId)) break;
+    if (Date.now() > dl) throw new Error('table never appeared in the gossiped directory');
+    await new Promise((r) => setTimeout(r, 100));
+  }
   for (const t of await host.listTables()) console.log(`   - ${t.id}: ${t.meta.name} (${t.meta.maxSeats} seats)`);
 
-  // Two real players discover + join the waiting room and play.
+  // Two real players discover + join the waiting room and play — each on its own P2P node.
   const [a, b] = await Promise.all([
-    player(base, { id: 'alice', pub: '02aa' }, tableId, 7),
-    player(base, { id: 'bob', pub: '03bb' }, tableId, 19),
+    player(nodeAlice!, { id: 'alice', pub: '02aa' }, tableId, 7),
+    player(nodeBob!, { id: 'bob', pub: '03bb' }, tableId, 19),
   ]);
 
   console.log(`[lobby-e2e] alice final stateHash: ${a.stateHash.slice(0, 24)}…`);
   console.log(`[lobby-e2e] bob   final stateHash: ${b.stateHash.slice(0, 24)}…`);
   assert.equal(a.stateHash, b.stateHash, 'both players converged on identical state');
-  console.log('\n[lobby-e2e] PASS — two players joined a waiting room and played a real hand (no bot).');
+  mesh.close();
+  console.log('\n[lobby-e2e] PASS — two players joined a waiting room and played a real hand peer-to-peer (no bot, no server).');
 }
 
 main().then(
-  () => {
-    cleanup();
-    process.exit(0);
-  },
+  () => process.exit(0),
   (e) => {
     console.error('[lobby-e2e] FAIL:', (e as Error).message);
-    cleanup();
     process.exit(1);
   },
 );

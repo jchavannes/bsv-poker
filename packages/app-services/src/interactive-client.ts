@@ -21,7 +21,7 @@ import {
   safeJsonParse,
   constantTimeEqualHex,
 } from '@bsv-poker/protocol-types';
-import type { RelayClient, IndexerClient } from './network.ts';
+import type { RelayChannel, IndexerClient } from './network.ts';
 import { createGameModule, type GenericGameModule } from './game-registry.ts';
 import { deckFromEntropies } from './mp-shuffle.ts';
 import { seatedForNextHand } from './table-participants.ts';
@@ -95,7 +95,7 @@ export interface SeatDrop {
 }
 
 export class InteractiveNetworkedTableClient {
-  private readonly relay: RelayClient;
+  private readonly relay: RelayChannel;
   private readonly tableId: string;
   private readonly mySeat: number;
   private readonly seats: TablePlayer[];
@@ -130,7 +130,7 @@ export class InteractiveNetworkedTableClient {
   private timeoutFloorAdvance = 0;
 
   constructor(opts: {
-    relay: RelayClient;
+    relay: RelayChannel;
     tableId: string;
     mySeat: number;
     seats: TablePlayer[];

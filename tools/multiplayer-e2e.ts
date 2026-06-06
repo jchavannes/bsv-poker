@@ -1,41 +1,16 @@
 /**
- * Real multiplayer E2E (core §8, REQ-TEST-002 cross-client agreement). Starts the relay +
- * indexer, then runs TWO independent NetworkedTableClients (Alice seat 0, Bob seat 1) that
- * exchange their entropy commit/reveal and betting actions ONLY over the relay channel, each
- * deriving state through its own engine. The test passes iff both clients converge to the
- * byte-identical final state hash — proving the relay is transport-only and the truth is the
- * client-reconstructed tx set (P2/P3).
+ * Real multiplayer E2E (core §8, REQ-TEST-002 cross-client agreement). Runs TWO independent
+ * NetworkedTableClients (Alice seat 0, Bob seat 1) — each its OWN peer-to-peer node — that exchange
+ * their entropy commit/reveal and betting actions ONLY over the P2P table channel, each deriving
+ * state through its own engine. The test passes iff both clients converge to the byte-identical final
+ * state hash — proving the transport is transport-only and the truth is the client-reconstructed tx
+ * set (P2/P3). There is NO relay server and NO indexer server.
  */
 
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import type { Action, LegalActions, Ruleset } from '@bsv-poker/protocol-types';
-import { RelayClient, NetworkedTableClient } from '@bsv-poker/app-services';
-
-const ROOT = process.cwd();
-const children: ChildProcess[] = [];
-const isWin = process.platform === 'win32';
-
-// Build a standalone binary and run IT directly so kill() stops the server (no orphaned zombie).
-function startService(dir: string, addr: string, bin: string): void {
-  const exe = isWin ? `${bin}.exe` : bin;
-  const b = spawnSync('go', ['build', '-o', exe, '.'], { cwd: join(ROOT, dir), stdio: 'inherit' });
-  if (b.status !== 0) throw new Error(`go build -o failed in ${dir}`);
-  children.push(spawn(join(ROOT, dir, exe), ['-addr', addr], { stdio: 'ignore' }));
-}
-async function waitHealthy(url: string, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    try {
-      if ((await fetch(url, { signal: AbortSignal.timeout(1000) })).ok) return;
-    } catch {
-      /* not up */
-    }
-    if (Date.now() > deadline) throw new Error(`not healthy: ${url}`);
-    await new Promise((r) => setTimeout(r, 400));
-  }
-}
+import { NetworkedTableClient } from '@bsv-poker/app-services';
+import { p2pMesh } from './p2p-mesh.ts';
 
 const RULES: Ruleset = {
   variant: 'holdem',
@@ -60,23 +35,18 @@ const passive = (legal: LegalActions, seat: number): Action => {
 };
 
 async function main(): Promise<void> {
-  console.log('[mp-e2e] starting relay (:8091) + indexer (:8092)…');
-  startService('apps/relay-go', '127.0.0.1:8091', 'relay-go');
-  startService('apps/indexer-go', '127.0.0.1:8092', 'indexer-go');
-  await waitHealthy('http://127.0.0.1:8091/healthz', 30000);
-  await waitHealthy('http://127.0.0.1:8092/healthz', 30000);
-
-  const relayA = new RelayClient('http://127.0.0.1:8091');
-  const relayB = new RelayClient('http://127.0.0.1:8091');
+  console.log('[mp-e2e] standing up a 2-node P2P mesh (NO relay/indexer server)…');
+  const mesh = await p2pMesh(2);
+  const [relayA, relayB] = mesh.transports; // each player's own P2P node (a structural RelayChannel)
   const tableId = `mp-table-${Date.now()}`;
-  await relayA.createTable(tableId, 'Multiplayer HU');
+  await relayA!.createTable(tableId, 'Multiplayer HU');
   const seats = [
     { seat: 0, stack: 100 },
     { seat: 1, stack: 100 },
   ];
 
   const alice = new NetworkedTableClient({
-    relay: relayA,
+    relay: relayA!,
     tableId,
     mySeat: 0,
     seats,
@@ -84,7 +54,7 @@ async function main(): Promise<void> {
     entropy: Uint8Array.from(Array.from({ length: 32 }, (_, i) => (i * 7 + 1) % 251)),
   });
   const bob = new NetworkedTableClient({
-    relay: relayB,
+    relay: relayB!,
     tableId,
     mySeat: 1,
     seats,
@@ -100,27 +70,14 @@ async function main(): Promise<void> {
   assert.equal(ra.stateHash, rb.stateHash, 'cross-client agreement: both engines agree exactly');
   assert.equal(ra.state.handComplete, true);
   assert.equal(ra.state.board.length, 5);
-  console.log('\n[mp-e2e] PASS — two networked clients converged to byte-identical state (REQ-TEST-002).');
-}
-
-function cleanup(): void {
-  for (const c of children) {
-    try {
-      c.kill();
-    } catch {
-      /* ignore */
-    }
-  }
+  mesh.close();
+  console.log('\n[mp-e2e] PASS — two peer-to-peer clients converged to byte-identical state (REQ-TEST-002), no server.');
 }
 
 main().then(
-  () => {
-    cleanup();
-    process.exit(0);
-  },
+  () => process.exit(0),
   (e) => {
     console.error('[mp-e2e] FAIL:', (e as Error).message);
-    cleanup();
     process.exit(1);
   },
 );

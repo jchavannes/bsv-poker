@@ -17,7 +17,6 @@ import {
   type ClientUpdate,
   type TablePlayer,
 } from '@bsv-poker/app-services';
-import type { RelayClient } from '@bsv-poker/app-services';
 
 const TABLE = 'p2p-table';
 
@@ -47,7 +46,7 @@ async function main(): Promise<void> {
 
   const clients = auths.map((auth, mySeat) =>
     new InteractiveNetworkedTableClient({
-      relay: transports[mySeat] as unknown as RelayClient, // the P2P mesh IS the transport — no relay server
+      relay: transports[mySeat]!, // the P2P mesh IS the transport (a structural `Relay`) — no relay server, no cast
       tableId: TABLE,
       mySeat,
       seats: seatDefs,

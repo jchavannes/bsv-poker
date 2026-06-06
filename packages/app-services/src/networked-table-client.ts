@@ -23,7 +23,7 @@ import {
   constantTimeEqualHex,
 } from '@bsv-poker/protocol-types';
 import { createHoldem, type HoldemState } from '@bsv-poker/game-holdem';
-import type { RelayClient } from './network.ts';
+import type { RelayChannel } from './network.ts';
 import { validateEnvelope } from './message-validation.ts';
 
 export interface NetworkedSeat {
@@ -75,7 +75,7 @@ function seededShuffle(seed: Uint8Array, n: number): number[] {
 }
 
 export class NetworkedTableClient {
-  private readonly relay: RelayClient;
+  private readonly relay: RelayChannel;
   private readonly tableId: string;
   private readonly mySeat: number;
   private readonly seats: NetworkedSeat[];
@@ -85,7 +85,7 @@ export class NetworkedTableClient {
   private unsub: (() => void) | null = null;
 
   constructor(opts: {
-    relay: RelayClient;
+    relay: RelayChannel;
     tableId: string;
     mySeat: number;
     seats: NetworkedSeat[];

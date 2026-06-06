@@ -7,7 +7,7 @@
  */
 
 import { type Ruleset, type Variant, sha256, bytesToHex, safeJsonParse, randomId } from '@bsv-poker/protocol-types';
-import type { RelayClient } from './network.ts';
+import type { Relay } from './network.ts';
 import { type TablePlayer } from './interactive-client.ts';
 import { verifySig } from './session-auth.ts';
 
@@ -104,8 +104,8 @@ export function rulesetFromMeta(meta: TableMeta): Ruleset {
 }
 
 export class LobbyClient {
-  private readonly relay: RelayClient;
-  constructor(relay: RelayClient) {
+  private readonly relay: Relay;
+  constructor(relay: Relay) {
     this.relay = relay;
   }
 

@@ -27,6 +27,41 @@ export interface TxRecord {
 
 type FetchFn = typeof fetch;
 
+/**
+ * The minimal TABLE-CHANNEL seam an in-hand client programs to (P3: transport/index only, never
+ * source of truth): publish an opaque frame to a table, subscribe to the table's frames. This is ALL
+ * `NetworkedTableClient`/`InteractiveNetworkedTableClient` need — they never do discovery. Both the
+ * HTTP `RelayClient` AND the serverless `P2PTransport` (peer-to-peer gossip mesh) satisfy it, so a
+ * hand can be carried by a central relay OR directly between players with no server.
+ */
+export interface RelayChannel {
+  /** Subscribe to a table channel's opaque frames; returns an unsubscribe. */
+  subscribe(tableId: string, onEvent: (text: string) => void): () => void;
+  /** Publish an opaque frame to a table channel; returns a best-effort delivery/peer count. */
+  publish(tableId: string, object: Uint8Array): Promise<number>;
+}
+
+/**
+ * The FULL transport the lobby programs to: a {@link RelayChannel} plus serverless DISCOVERY — how
+ * players FIND a game. Over a central relay these are HTTP lookups; over P2P they are gossip on a
+ * reserved directory topic (see `P2PTransport`). Clients depend on this interface, never the concrete
+ * class, so the entire flow runs over a relay OR fully peer-to-peer with no server.
+ */
+export interface Relay extends RelayChannel {
+  /** Register a gated table's admission secret so this client may participate (best-effort over P2P). */
+  setAdmission(tableId: string, secret: string): void;
+  /** Liveness probe. Over P2P a node is always live to itself (returns true). */
+  health(): Promise<boolean>;
+  /** Announce presence (player → reachable address) so peers can discover/dial. */
+  heartbeat(playerId: string, addr: string): Promise<void>;
+  /** Currently-live presence announcements. */
+  listPresence(): Promise<PresenceEntry[]>;
+  /** Host a table (its `name` carries the JSON meta). Over P2P this gossips a directory announce. */
+  createTable(id: string, name: string, admission?: string): Promise<TableInfo>;
+  /** Discover open tables. Over P2P this is the gossiped directory view. */
+  listTables(): Promise<TableInfo[]>;
+}
+
 /** Hard cap on a buffered HTTP JSON response (CWE-400). The relay/indexer payloads are small. */
 const MAX_HTTP_JSON = 16 * 1024 * 1024; // 16 MiB
 /** Hard cap on the unframed SSE accumulation buffer (CWE-400) — a frame must arrive within this. */
@@ -44,8 +79,8 @@ async function asJson<T>(res: Response): Promise<T> {
   return (await res.json()) as T;
 }
 
-/** Tier-A discovery + Tier-B opaque fan-out (core §8.2). */
-export class RelayClient {
+/** Tier-A discovery + Tier-B opaque fan-out (core §8.2). HTTP implementation of {@link Relay}. */
+export class RelayClient implements Relay {
   private readonly base: string;
   private readonly fetchFn: FetchFn;
   // Capability tokens (audit 5): the relay requires a table-scoped token to publish/subscribe. The

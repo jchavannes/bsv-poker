@@ -83,3 +83,53 @@ export function presignFallbackGraph(
   const sigs = signers.map((sign, i) => sign(i, sighash));
   return { kind: 'timeout-refund', tx, scriptSig: fundingUnlocking(sigs), sighash };
 }
+
+/** A fully-signed, time-locked recovery every contributor holds BEFORE the pot is funded. */
+export interface NlocktimeRecovery {
+  readonly kind: 'nlocktime-recovery';
+  /** The recovery transaction: spends the funded pot back to every contributor, time-locked. */
+  readonly tx: Tx;
+  /** The N-of-N unlock (every contributor's signature) — so ANY single holder can broadcast it alone. */
+  readonly scriptSig: Script;
+  readonly sighash: Uint8Array;
+  /** The block height at/after which the node will admit this recovery (the unilateral exit opens). */
+  readonly recoverableAtHeight: number;
+}
+
+/**
+ * ABSOLUTE / life-critical (see memory `always-nlocktime-recovery-all-funds`): produce the
+ * **guaranteed unilateral nLockTime recovery** that EVERY player must hold BEFORE risking a single
+ * sat. It spends the N-of-N funded pot back to each contributor (100% of stake, minus only an
+ * explicit miner `fee` that defaults to 0), with:
+ *   - a FUTURE `nLockTime` (height) — the node rejects it as non-final until that height, so it
+ *     cannot race a cooperative settlement that happens in time; and
+ *   - a NON-FINAL input `nSequence` — required for the locktime to actually bind (a final input
+ *     0xffffffff would make the tx final regardless of locktime and defeat the gate).
+ * It is pre-signed N-of-N, so after the locktime ANY one player can broadcast it ALONE and every
+ * contributor recovers their funds with no counterparty cooperation and no server. A funded pot
+ * without this in every player's hands is a hard FAIL — there is no path in which a player is stranded.
+ *
+ * Throws (fail-closed) rather than emit a recovery that does not actually protect funds: a
+ * non-future locktime, a final sequence, missing/short signer set, or a fee that consumes the pot.
+ */
+export function presignNlocktimeRecovery(
+  b: BranchBinding,
+  funding: FundingRef,
+  contributors: readonly Contributor[],
+  signers: readonly Signer[],
+  recoverableAtHeight: number,
+  opts: { fee?: number; sequence?: number } = {},
+): NlocktimeRecovery {
+  if (signers.length !== contributors.length) throw new Error('one signer per contributor required (no partial recovery)');
+  if (contributors.length === 0) throw new Error('a recovery needs at least one contributor');
+  if (!Number.isInteger(recoverableAtHeight) || recoverableAtHeight <= 0) {
+    throw new Error('recoverableAtHeight must be a positive future block height (a real time-lock, not 0)');
+  }
+  const sequence = opts.sequence ?? 0xfffffffe; // non-final → the nLockTime gate actually binds
+  if (sequence >= 0xffffffff) throw new Error('recovery input sequence must be non-final (< 0xffffffff) or the locktime does not bind');
+  const fee = opts.fee ?? 0; // default returns 100% of the pot to the contributors
+  const tx = buildTimeoutRefund(b, funding, contributors, { fee, sequence, nLockTime: recoverableAtHeight });
+  const sighash = sighashMessage(tx, 0, funding.scriptCode, funding.value);
+  const sigs = signers.map((sign, i) => sign(i, sighash));
+  return { kind: 'nlocktime-recovery', tx, scriptSig: fundingUnlocking(sigs), sighash, recoverableAtHeight };
+}
