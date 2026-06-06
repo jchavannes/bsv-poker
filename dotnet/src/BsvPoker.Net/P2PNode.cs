@@ -17,12 +17,14 @@ namespace BsvPoker.Net;
 /// </summary>
 public sealed class P2PNode : IDisposable
 {
-    private const int MaxFrameBytes = 1 << 20;
+    private const int MaxFrameBytes = 1 << 20;        // hard per-frame BYTE cap (byte-accurate, not chars)
+    private const int MaxTopicBytes = 256;            // a topic string may not exceed this many UTF-8 bytes
+    private const int MaxPayloadBytes = 1 << 20;      // decoded payload byte cap
     private const int MaxSeen = 100_000;
     private const int MaxDirectory = 10_000;
     private const int MaxPeers = 64;
-    private const int RateCapacity = 1000;
-    private const int RateRefillPerSec = 500;
+    private const double RateCapacityBytes = 8 << 20;     // token bucket measured in BYTES (8 MiB burst)
+    private const double RateRefillBytesPerSec = 4 << 20; // refilled at 4 MiB/s
     private static readonly TimeSpan EntryTtl = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan Reannounce = TimeSpan.FromSeconds(5);
     private const string DirTopic = " bsvp/dir";
@@ -55,6 +57,9 @@ public sealed class P2PNode : IDisposable
 
     public int BoundPort { get; private set; }
     public int PeerCount => _peers.Count;
+    public long DroppedFrames { get; private set; }
+    public string? LastDrop { get; private set; }
+    private void Drop(string why) { DroppedFrames++; LastDrop = why; }
 
     public Task StartAsync(IReadOnlyList<PeerAddr>? peers = null)
     {
@@ -108,13 +113,17 @@ public sealed class P2PNode : IDisposable
     {
         if (_peers.Count >= MaxPeers) { try { sock.Dispose(); } catch { } return; }
         var id = Guid.NewGuid();
-        var rate = new RateState { Tokens = RateCapacity, Last = Environment.TickCount64 };
+        var rate = new RateState { Tokens = RateCapacityBytes, Last = Environment.TickCount64 };
         _peers[id] = (sock, rate);
         sock.NoDelay = true;
         _ = Task.Run(async () =>
         {
-            var buf = new StringBuilder();
+            // BYTE-accurate framing: accumulate raw bytes, split on the '\n' byte, and hard-cap the byte
+            // length of any single frame. An oversize frame is dropped and we resync to the next newline
+            // rather than tearing down the connection.
+            var acc = new MemoryStream();
             var bytes = new byte[8192];
+            bool skipping = false;
             try
             {
                 var stream = sock.GetStream();
@@ -122,14 +131,20 @@ public sealed class P2PNode : IDisposable
                 {
                     int n = await stream.ReadAsync(bytes);
                     if (n <= 0) break;
-                    buf.Append(Encoding.UTF8.GetString(bytes, 0, n));
-                    if (buf.Length > MaxFrameBytes) break;
-                    int nl;
-                    while ((nl = IndexOf(buf, '\n')) >= 0)
+                    for (int i = 0; i < n; i++)
                     {
-                        var line = buf.ToString(0, nl);
-                        buf.Remove(0, nl + 1);
-                        if (line.Length > 0) OnFrame(line, id, rate);
+                        byte ch = bytes[i];
+                        if (ch == (byte)'\n')
+                        {
+                            if (skipping) { skipping = false; acc.SetLength(0); continue; }
+                            if (acc.Length > 0) { OnFrame(Encoding.UTF8.GetString(acc.ToArray()), id, rate, (int)acc.Length); acc.SetLength(0); }
+                        }
+                        else if (skipping) { /* discard until newline */ }
+                        else
+                        {
+                            acc.WriteByte(ch);
+                            if (acc.Length > MaxFrameBytes) { Drop("oversize frame"); skipping = true; acc.SetLength(0); }
+                        }
                     }
                 }
             }
@@ -138,22 +153,23 @@ public sealed class P2PNode : IDisposable
         });
     }
 
-    private static int IndexOf(StringBuilder sb, char c) { for (int i = 0; i < sb.Length; i++) if (sb[i] == c) return i; return -1; }
-
-    private bool Allow(RateState r)
+    // token bucket measured in BYTES, so a few large frames cost as much as many small ones (byte-cost
+    // rate limiting, not frame-count) — an attacker cannot bypass the limit with big frames.
+    private bool Allow(RateState r, int costBytes)
     {
         long now = Environment.TickCount64;
-        r.Tokens = Math.Min(RateCapacity, r.Tokens + (now - r.Last) / 1000.0 * RateRefillPerSec);
+        r.Tokens = Math.Min(RateCapacityBytes, r.Tokens + (now - r.Last) / 1000.0 * RateRefillBytesPerSec);
         r.Last = now;
-        if (r.Tokens < 1) return false;
-        r.Tokens -= 1; return true;
+        if (r.Tokens < costBytes) return false;
+        r.Tokens -= costBytes; return true;
     }
 
-    private void OnFrame(string line, Guid from, RateState rate)
+    private void OnFrame(string line, Guid from, RateState rate, int costBytes)
     {
-        if (!Allow(rate)) return;
+        if (!Allow(rate, costBytes)) { Drop("rate limit"); return; }
         Frame? f;
-        try { f = JsonSerializer.Deserialize<Frame>(line); if (f?.t == null || f.d == null || f.id == null) return; } catch { return; }
+        try { f = JsonSerializer.Deserialize<Frame>(line); if (f?.t == null || f.d == null || f.id == null) { Drop("malformed frame"); return; } } catch { Drop("parse error"); return; }
+        if (Encoding.UTF8.GetByteCount(f.t) > MaxTopicBytes) { Drop("topic too long"); return; }
         if (MarkSeen(f.id)) return;
         DeliverLocal(f);
         Flood(line, from);
@@ -170,7 +186,9 @@ public sealed class P2PNode : IDisposable
     private void DeliverLocal(Frame f)
     {
         if (!_subs.TryGetValue(f.t, out var set)) return;
-        string text; try { text = Encoding.UTF8.GetString(Convert.FromBase64String(f.d)); } catch { return; }
+        string text;
+        try { var raw = Convert.FromBase64String(f.d); if (raw.Length > MaxPayloadBytes) { Drop("payload too large"); return; } text = Encoding.UTF8.GetString(raw); }
+        catch { Drop("bad base64"); return; }
         Action<string>[] cbs; lock (set) cbs = set.ToArray();
         foreach (var cb in cbs) { try { cb(text); } catch { } }
     }

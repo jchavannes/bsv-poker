@@ -1,3 +1,4 @@
+using System.Net.Sockets;
 using System.Text;
 using BsvPoker.Net;
 
@@ -43,6 +44,26 @@ public static class NetTests
             T.True(Until(() => a.PeerCount >= 1 && b.PeerCount >= 1), "connected");
             a.CreateTableAsync("t1", "Friday").Wait();
             T.True(Until(() => b.ListTables().Any(x => x.id == "t1")), "B discovered A's table");
+        });
+
+        T.Run("transport hardening: an oversize frame is dropped (byte cap) and the link keeps serving valid frames", () =>
+        {
+            using var node = new P2PNode(0, "127.0.0.1");
+            node.StartAsync().Wait();
+            string? got = null;
+            node.Subscribe("topic-x", t => got = t);
+            using var c = new TcpClient();
+            c.Connect("127.0.0.1", node.BoundPort);
+            var s = c.GetStream();
+            // a single frame far larger than the 1 MiB cap, terminated by a newline
+            var big = new byte[(1 << 20) + 1000]; Array.Fill(big, (byte)'a');
+            s.Write(big); s.WriteByte((byte)'\n');
+            // then a perfectly valid frame on the same connection (must resync past the dropped one)
+            var payload = Convert.ToBase64String(Encoding.UTF8.GetBytes("hello-valid"));
+            var frame = $"{{\"t\":\"topic-x\",\"d\":\"{payload}\",\"id\":\"{Guid.NewGuid():N}\"}}\n";
+            s.Write(Encoding.UTF8.GetBytes(frame)); s.Flush();
+            T.True(Until(() => node.DroppedFrames > 0), "the oversize frame was dropped");
+            T.True(Until(() => got == "hello-valid"), "a valid frame after the oversize one still delivers (resync)");
         });
     }
 }
