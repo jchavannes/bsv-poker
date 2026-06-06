@@ -176,6 +176,20 @@ exists on Ethereum or any blockchain, we build here in Bitcoin Script:
 This is **stage one of hundreds.** The architecture must be built to scale to every blockchain capability
 ever discussed — think a billion times bigger than a single poker table.
 
+### 3.1.2 Typed transaction templates (every type its own documented template)
+
+A transaction is like a frame in IP: **each kind of action has its own transaction TYPE — its own
+template, its own type marker ("frame type"), its own smart contract, its own documentation, published.**
+ALL of them, not some. No transaction is generic or assumed; every one declares what it is for via a type
+marker bound with `OP_DROP` (never `OP_RETURN`). If there is a quick way and a thorough way, only the
+thorough way is acceptable. **Assumptions are failures** — nothing is left implicit or undocumented.
+
+The type taxonomy (each a distinct, documented template, extended as the system grows):
+`Payment, KeepAlive, ChatDirect, ChatGroup, CardNft, Commitment, Reveal, ShuffleStage, Deal,
+BoardReveal, Showdown, Bet, PotEscrow, Settlement, Recovery, Bid, Auction, RoleClaim, TableGenesis,
+GameStart, HandStart` (and more). Every template: a unique tag, a version, a documented purpose, and its
+own conditional Script contract. Peers recognize a transaction's purpose from its type marker.
+
 ### 3.2 Lobby network selector
 
 The lobby has a **network selector: regtest / testnet / mainnet** (same code path; only the network
