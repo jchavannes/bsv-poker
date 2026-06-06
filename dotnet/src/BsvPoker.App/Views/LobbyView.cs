@@ -23,6 +23,8 @@ public sealed class LobbyView : UserControl
     private readonly TextBox _name = new() { Text = "Friday night", Width = 180 };
     private readonly ComboBox _variant = new();
     private readonly ComboBox _seats = new();
+    private readonly TextBox _stack = new() { Text = "100", Width = 64, ToolTip = "starting chips per player" };
+    private readonly TextBox _bb = new() { Text = "2", Width = 48, ToolTip = "big blind (small blind = half)" };
     private readonly TextBox _peer = new() { Width = 200, ToolTip = "e.g. 192.168.1.50:9700" };
     private readonly TextBlock _nodeInfo = new() { Foreground = Brushes.LightGreen };
     private readonly TextBlock _status = new() { Foreground = Brushes.Gray, Margin = new Thickness(0, 8, 0, 0), TextWrapping = TextWrapping.Wrap };
@@ -48,6 +50,10 @@ public sealed class LobbyView : UserControl
         for (int p = 2; p <= 6; p++) _seats.Items.Add(p);
         _seats.SelectedIndex = 0; _seats.Width = 56; _seats.Margin = new Thickness(0, 0, 4, 0);
         create.Children.Add(_seats);
+        create.Children.Add(new TextBlock { Text = "  buy-in ", Foreground = Brushes.Gray, VerticalAlignment = VerticalAlignment.Center });
+        create.Children.Add(_stack);
+        create.Children.Add(new TextBlock { Text = "  blind ", Foreground = Brushes.Gray, VerticalAlignment = VerticalAlignment.Center });
+        create.Children.Add(_bb);
         var createBtn = Btn("Create", "#2E7D32"); createBtn.Click += (_, _) => Create();
         create.Children.Add(createBtn);
         create.Children.Add(new TextBlock { Text = "    Connect to player ", Foreground = Brushes.Gray, VerticalAlignment = VerticalAlignment.Center });
@@ -84,10 +90,13 @@ public sealed class LobbyView : UserControl
     {
         var v = Variants.All[Math.Max(0, _variant.SelectedIndex)];
         int seats = _seats.SelectedIndex >= 0 ? (int)_seats.Items[_seats.SelectedIndex]! : 2;
-        // encode the variant AND seat count in the id so peers agree on the game without extra messages
-        var id = "t-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(6)).ToLowerInvariant() + "~" + v + "~p" + seats;
+        long stack = long.TryParse(_stack.Text.Trim(), out var s) && s >= 2 ? s : 100;
+        long bb = long.TryParse(_bb.Text.Trim(), out var b) && b >= 2 ? b : 2;
+        if (bb > stack) bb = stack;
+        // encode the variant, seat count and stakes in the id so peers agree without extra messages
+        var id = "t-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(6)).ToLowerInvariant() + "~" + v + "~p" + seats + "~s" + stack + "~b" + bb;
         _ = _node.CreateTableAsync(id, _name.Text.Trim());
-        _status.Text = $"Hosting '{_name.Text.Trim()}' ({Variants.Name(v)}, {seats} players). Join it (or wait for players) to play.";
+        _status.Text = $"Hosting '{_name.Text.Trim()}' ({Variants.Name(v)}, {seats} players, {stack} chips, blind {bb}). Join it (or wait for players) to play.";
         Refresh();
     }
 

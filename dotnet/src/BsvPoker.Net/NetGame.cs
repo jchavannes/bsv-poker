@@ -27,6 +27,8 @@ public sealed class NetGame
     private readonly string _table;
     private readonly string _myPubHex;
     private readonly int _seatCount;          // table capacity (admission target)
+    private readonly long _startStack;        // starting chips per player (buy-in)
+    private readonly long _bigBlind;          // big blind (small blind = bb/2, min 1)
     private Action? _unsub;
     private System.Threading.Timer? _ticker;
     private readonly object _gate = new();
@@ -54,6 +56,8 @@ public sealed class NetGame
     private readonly HashSet<int> _boardStreetsSupplied = new();
     private int _applied;
     private bool _handFinalized;
+    private bool _sentShuf, _sentRem, _sentHoleD, _sentShowD;   // one-shot immediate-send guards (per hand)
+    private readonly HashSet<int> _sentBoardKeys = new();
 
     public Phase State { get; private set; } = Phase.WaitingForPlayer;
     public int MySeat => _myHandSeat;
@@ -79,9 +83,15 @@ public sealed class NetGame
         _players[_myPubHex] = 1;
         var parts = tableId.Split('~');
         Variant = parts.Length > 1 ? Variants.Parse(parts[1]) : Variant.TexasHoldem;
-        _seatCount = 2;
+        _seatCount = 2; _startStack = 100; _bigBlind = 2;
         for (int i = 2; i < parts.Length; i++)
-            if (parts[i].StartsWith("p", StringComparison.Ordinal) && int.TryParse(parts[i][1..], out var pc) && pc is >= 2 and <= 10) _seatCount = pc;
+        {
+            var seg = parts[i];
+            if (seg.StartsWith("p", StringComparison.Ordinal) && int.TryParse(seg[1..], out var pc) && pc is >= 2 and <= 10) _seatCount = pc;
+            else if (seg.StartsWith("s", StringComparison.Ordinal) && long.TryParse(seg[1..], out var st) && st is >= 2 and <= 1_000_000_000) _startStack = st;
+            else if (seg.StartsWith("b", StringComparison.Ordinal) && long.TryParse(seg[1..], out var bb) && bb is >= 2 and <= 1_000_000) _bigBlind = bb;
+        }
+        if (_bigBlind > _startStack) _bigBlind = _startStack; // a sane table
         _cardSet = Variants.CardSet(Variant);
         _n = _cardSet.Count;
     }
@@ -124,27 +134,27 @@ public sealed class NetGame
         catch { }
     }
 
+    // Periodic re-broadcast of my current artifacts (fallback for a dropped frame). Immediate one-shot
+    // sends in DriveDeal/DriveStreet handle the common case so the deal progresses at network latency.
     private void Broadcast()
     {
         if (_myHandSeat < 0) return;
-        if (Hand == null)
-        {
-            if (_shuf.TryGetValue(_myHandSeat, out var myShuf)) Send(new { t = "shuf", h = _handNo, step = _myHandSeat, pts = PtsHex(myShuf) });
-            if (_rem.TryGetValue(_myHandSeat, out var myRem)) Send(new { t = "rem", h = _handNo, step = _myHandSeat, pts = PtsHex(myRem) });
-        }
-        if (_final != null) Send(new { t = "holeD", h = _handNo, seat = _myHandSeat, d = ScalarMap(OtherSeatsHolePositions()) });
-        if (Hand is { AwaitingBoard: true })
-            Send(new { t = "boardD", h = _handNo, seat = _myHandSeat, d = ScalarMap(Enumerable.Range(BoardStart + Hand.Board.Count, Hand.PendingBoardCount)) });
-        if (Hand is { AwaitingShowdown: true })
-            Send(new { t = "showD", h = _handNo, seat = _myHandSeat, d = ScalarMap(HolePositions(_myHandSeat)) });
+        if (Hand == null) { SendShuf(); SendRem(); }
+        SendHoleD(); SendBoardD(); SendShowD();
     }
+
+    private void SendShuf() { if (_shuf.TryGetValue(_myHandSeat, out var p)) Send(new { t = "shuf", h = _handNo, step = _myHandSeat, pts = PtsHex(p) }); }
+    private void SendRem() { if (_rem.TryGetValue(_myHandSeat, out var p)) Send(new { t = "rem", h = _handNo, step = _myHandSeat, pts = PtsHex(p) }); }
+    private void SendHoleD() { if (_final != null) Send(new { t = "holeD", h = _handNo, seat = _myHandSeat, d = ScalarMap(OtherSeatsHolePositions()) }); }
+    private void SendBoardD() { if (Hand is { AwaitingBoard: true }) Send(new { t = "boardD", h = _handNo, seat = _myHandSeat, d = ScalarMap(Enumerable.Range(BoardStart + Hand.Board.Count, Hand.PendingBoardCount)) }); }
+    private void SendShowD() { if (Hand is { AwaitingShowdown: true }) Send(new { t = "showD", h = _handNo, seat = _myHandSeat, d = ScalarMap(HolePositions(_myHandSeat)) }); }
 
     private void TryAssignSeats()
     {
         if (_sessionSeats != null) return;
         if (_players.Count < _seatCount) { Status = $"Waiting for players… ({_players.Count}/{_seatCount})"; return; }
         _sessionSeats = _players.Keys.OrderBy(x => x, StringComparer.Ordinal).Take(_seatCount).ToArray();
-        foreach (var p in _sessionSeats) _stacks[p] = 100;
+        foreach (var p in _sessionSeats) _stacks[p] = _startStack;
         _handNo = -1;
         StartHand();
     }
@@ -163,6 +173,7 @@ public sealed class NetGame
         _ecPerm = RandomPerm(_n);
         _shuf.Clear(); _rem.Clear(); _final = null; _maskShares.Clear(); _boardStreetsSupplied.Clear();
         _applied = 0; _handFinalized = false; Hand = null;
+        _sentShuf = _sentRem = _sentHoleD = _sentShowD = false; _sentBoardKeys.Clear();
         State = Phase.Dealing;
         Status = $"Hand #{_handNo + 1} — you are seat {_myHandSeat}. Shuffling the deck (encrypted)…";
         Raise();
@@ -184,12 +195,15 @@ public sealed class NetGame
             byte[][]? input = _myHandSeat == 0 ? MentalPokerEC.BaseDeck(_n) : (_shuf.TryGetValue(_myHandSeat - 1, out var prev) ? prev : null);
             if (input != null) _shuf[_myHandSeat] = MentalPokerEC.ShuffleMask(input, _ecGlobal, _ecPerm);
         }
+        if (_shuf.ContainsKey(_myHandSeat) && !_sentShuf) { _sentShuf = true; SendShuf(); } // emit as soon as produced
         if (!_rem.ContainsKey(_myHandSeat) && _shuf.ContainsKey(HandSeats - 1))
         {
             byte[][]? input = _myHandSeat == 0 ? _shuf[HandSeats - 1] : (_rem.TryGetValue(_myHandSeat - 1, out var prev) ? prev : null);
             if (input != null) _rem[_myHandSeat] = MentalPokerEC.Remask(input, _ecGlobal, _ecPerCard);
         }
+        if (_rem.ContainsKey(_myHandSeat) && !_sentRem) { _sentRem = true; SendRem(); }
         if (_final == null && _rem.TryGetValue(HandSeats - 1, out var fin)) _final = fin;
+        if (_final != null && !_sentHoleD) { _sentHoleD = true; SendHoleD(); }
         TryCreateHand();
     }
 
@@ -222,7 +236,7 @@ public sealed class NetGame
         for (int i = 0; i < deck.Length; i++) deck[i] = Card.FaceDown;
         k = 0; foreach (var p in HolePositions(_myHandSeat)) deck[p] = myCards[k++];
         var stacks = _inPubs.Select(p => _stacks[p]).ToArray();
-        Hand = HoldemState.Create(stacks, button: _handButton, sb: 1, bb: 2, deck, Variant, deferShowdown: true);
+        Hand = HoldemState.Create(stacks, button: _handButton, sb: Math.Max(1, _bigBlind / 2), bb: _bigBlind, deck, Variant, deferShowdown: true);
         State = Phase.Playing;
         Status = $"Hand #{_handNo + 1} dealt. " + Hand.Message;
         Raise();
@@ -236,6 +250,7 @@ public sealed class NetGame
         {
             var positions = Enumerable.Range(BoardStart + Hand.Board.Count, Hand.PendingBoardCount).ToList();
             int key = Hand.Board.Count;
+            if (_sentBoardKeys.Add(key)) SendBoardD(); // emit my masks for this street's board once
             var cards = positions.Select(TryUnmask).ToList();
             if (cards.All(c => c != null) && _boardStreetsSupplied.Add(key))
             {
@@ -247,6 +262,7 @@ public sealed class NetGame
         }
         else if (Hand.AwaitingShowdown)
         {
+            if (!_sentShowD) { _sentShowD = true; SendShowD(); } // reveal my own holes at showdown
             var live = Hand.Seats.Where(s => !s.Folded && s.Seat != _myHandSeat).ToList();
             var revealed = new Dictionary<int, Card[]>();
             foreach (var t in live)

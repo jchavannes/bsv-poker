@@ -94,5 +94,25 @@ public static class NetGameTests
             foreach (var g in games) T.Eq(g.TableChips, 300L, "chips conserved across hands");
             foreach (var g in games) g.Stop();
         });
+
+        T.Run("configurable stakes: the table id sets buy-in and blinds", () =>
+        {
+            using var nodeA = new P2PNode(0, "127.0.0.1");
+            using var nodeB = new P2PNode(0, "127.0.0.1");
+            nodeA.StartAsync().Wait();
+            nodeB.StartAsync(new[] { new P2PNode.PeerAddr("127.0.0.1", nodeA.BoundPort) }).Wait();
+            T.True(Until(() => nodeA.PeerCount >= 1 && nodeB.PeerCount >= 1), "nodes connected");
+
+            const string table = "t-hi~TexasHoldem~p2~s500~b10";
+            var pa = Secp256k1.GenerateKeyPair(); var pb = Secp256k1.GenerateKeyPair();
+            var g1 = new NetGame(nodeA, table, pa.Pub); var g2 = new NetGame(nodeB, table, pb.Pub);
+            g1.Start(); g2.Start();
+
+            T.True(Until(() => g1.Hand != null && g2.Hand != null), "dealt at the custom stakes");
+            T.Eq(g1.TableChips, 1000L, "buy-in 500 × 2 players = 1000 chips");
+            T.Eq(g1.Hand!.BigBlind, 10L, "big blind from the table id");
+            T.Eq(g1.Hand!.SmallBlind, 5L, "small blind = half the big blind");
+            g1.Stop(); g2.Stop();
+        });
     }
 }
