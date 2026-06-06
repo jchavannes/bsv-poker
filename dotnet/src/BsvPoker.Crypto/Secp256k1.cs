@@ -272,6 +272,33 @@ public static class Secp256k1
         return To32(shared.X);
     }
 
+    /// <summary>
+    /// Scalar multiply an arbitrary point: returns the 33-byte compressed point k·P. Used by the
+    /// commutative-encryption mental-poker deal (masking/unmasking cards as curve points). Because
+    /// a·(b·P) == b·(a·P), masks applied by different players commute and can be removed in any order.
+    /// </summary>
+    public static byte[] PointMul(ReadOnlySpan<byte> pub33, ReadOnlySpan<byte> scalar32)
+    {
+        var k = NormalizeScalar(scalar32);
+        var pt = ScalarMul(k, Decompress(pub33));
+        if (pt.Inf) throw new InvalidOperationException("degenerate point (k·P = ∞)");
+        return Compress(pt);
+    }
+
+    /// <summary>The modular inverse of a scalar mod n, as 32 bytes — so a mask k can be removed via k⁻¹.</summary>
+    public static byte[] ScalarInverse(ReadOnlySpan<byte> scalar32)
+    {
+        var k = NormalizeScalar(scalar32);
+        return To32(InvMod(k, N));
+    }
+
+    /// <summary>The compressed base point for card index i: (i+1)·G. Distinct, public, and recoverable.</summary>
+    public static byte[] CardBasePoint(int i)
+    {
+        if (i < 0) throw new ArgumentOutOfRangeException(nameof(i));
+        return PublicKeyCompressed(To32(i + 1));
+    }
+
     /// <summary>Generate a fresh (private 32, compressed-public 33) keypair from the system CSPRNG.</summary>
     public static (byte[] Priv, byte[] Pub) GenerateKeyPair()
     {
