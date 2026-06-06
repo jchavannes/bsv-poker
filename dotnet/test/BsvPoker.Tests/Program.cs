@@ -6,6 +6,7 @@ Secp256k1Tests.All();
 CryptoPrimitivesTests.All();
 GameTests.All();
 PokerEvalTests.All();
+BlackjackTests.All();
 MentalPokerECTests.All();
 VariantTests.All();
 ChainTests.All();
