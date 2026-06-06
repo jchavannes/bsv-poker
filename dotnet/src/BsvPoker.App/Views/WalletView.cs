@@ -39,6 +39,8 @@ public sealed class WalletView : UserControl
     public WalletView(string dataDir, CardVault vault)
     {
         _vault = vault;
+        Background = new SolidColorBrush(Color.FromRgb(0x0D, 0x0D, 0x0D)); // dark behind light text (no white-on-white)
+        Foreground = Brushes.White;
         Directory.CreateDirectory(dataDir);
         _path = Path.Combine(dataDir, "wallet.json");
         Load();

@@ -35,6 +35,7 @@ public sealed class LobbyView : UserControl
     public LobbyView(P2PNode node, byte[] myPub, Action<string, string> onJoin, Action<Variant> onPlayBot)
     {
         _node = node; _onJoin = onJoin; _onPlayBot = onPlayBot;
+        Background = new SolidColorBrush(Color.FromRgb(0x0D, 0x0D, 0x0D)); Foreground = Brushes.White;
         var root = new StackPanel { Margin = new Thickness(20) };
         root.Children.Add(new TextBlock { Text = "Lobby — peer-to-peer (no server)", FontSize = 22, FontWeight = FontWeights.Bold, Foreground = Brushes.White });
         root.Children.Add(_nodeInfo);

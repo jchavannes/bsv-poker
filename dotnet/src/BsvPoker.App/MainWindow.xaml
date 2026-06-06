@@ -11,8 +11,16 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
         <Border Grid.Row="0" Background="{StaticResource Warn}" Padding="12,6">
-            <TextBlock Foreground="Black" FontWeight="SemiBold"
-                       Text="BSV POKER — REGTEST / play-money · peer-to-peer · no server" />
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Foreground="Black" FontWeight="Bold" Text="BSV POKER" VerticalAlignment="Center" Margin="0,0,16,0" />
+                <TextBlock Foreground="Black" Text="Network:" VerticalAlignment="Center" Margin="0,0,6,0" />
+                <ComboBox x:Name="NetworkBox" Width="140" VerticalAlignment="Center">
+                    <ComboBoxItem Content="Mainnet" />
+                    <ComboBoxItem Content="Testnet" />
+                    <ComboBoxItem Content="Regtest" />
+                </ComboBox>
+                <TextBlock x:Name="NetInfo" Foreground="Black" Text="   peer-to-peer · no server" VerticalAlignment="Center" Margin="8,0,0,0" />
+            </StackPanel>
         </Border>
         <TabControl x:Name="Tabs" Grid.Row="1" Background="{StaticResource Bg}" Foreground="Black" BorderThickness="0">
             <TabItem Header="Wallet"><ContentControl x:Name="WalletHost" /></TabItem>

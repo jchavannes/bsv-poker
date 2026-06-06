@@ -27,6 +27,7 @@ public partial class MainWindow : Window
 
         var lobby = new LobbyView(_node, _profile.IdentityPub, JoinTable, PlayBot);
         LobbyHost.Content = lobby;
+        InitNetworkSelector();
 
         Loaded += async (_, _) =>
         {
@@ -35,8 +36,42 @@ public partial class MainWindow : Window
             // announce the FULL pubkey as presence so peers can DM us (and find us in the lobby).
             await _node.HeartbeatAsync(Convert.ToHexString(_profile.IdentityPub).ToLowerInvariant(), $"127.0.0.1:{_node.BoundPort}");
             lobby.OnNodeReady(_node.BoundPort);
+
+            // LOCAL auto-discovery: two copies on one machine find and connect to each other (no manual IP).
+            var disc = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
+            disc.Tick += (_, _) =>
+            {
+                LocalDiscovery.Register(_node.BoundPort);
+                foreach (var port in LocalDiscovery.Peers(_node.BoundPort))
+                    if (_dialed.Add(port)) _node.Dial(new BsvPoker.Net.P2PNode.PeerAddr("127.0.0.1", port));
+            };
+            disc.Start();
+            LocalDiscovery.Register(_node.BoundPort);
         };
         Closed += (_, _) => { try { _node.Dispose(); } catch { } };
+    }
+
+    private readonly HashSet<int> _dialed = new();
+
+    private void InitNetworkSelector()
+    {
+        var file = System.IO.Path.Combine(_profile.Dir, "network.txt");
+        int sel = 0; // default MAINNET (Mainnet primary, Testnet backup, Regtest a distant 3rd never default)
+        try { if (System.IO.File.Exists(file) && int.TryParse(System.IO.File.ReadAllText(file).Trim(), out var v) && v is >= 0 and <= 2) sel = v; } catch { }
+        NetworkBox.SelectedIndex = sel;
+        UpdateNetInfo();
+        NetworkBox.SelectionChanged += (_, _) =>
+        {
+            try { System.IO.File.WriteAllText(file, NetworkBox.SelectedIndex.ToString()); } catch { }
+            UpdateNetInfo();
+        };
+    }
+
+    private void UpdateNetInfo()
+    {
+        var name = (NetworkBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "Regtest";
+        NetInfo.Text = $"   {name} · peer-to-peer · no server";
+        Title = $"BSV Poker — {_profile.Name} — {name}";
     }
 
     private void JoinTable(string tableId, string tableName)

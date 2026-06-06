@@ -48,6 +48,7 @@ public sealed class GameView : UserControl
     public GameView(P2PNode node, byte[] priv, byte[] pub, CardVault vault, Action onCardsChanged)
     {
         _node = node; _priv = priv; _pub = pub; _vault = vault; _onCardsChanged = onCardsChanged;
+        Background = new SolidColorBrush(Color.FromRgb(0x0D, 0x0D, 0x0D)); Foreground = Brushes.White;
 
         var felt = new Border { Margin = new Thickness(16), CornerRadius = new CornerRadius(160) };
         felt.Background = new RadialGradientBrush(Color.FromRgb(0x1F, 0x7A, 0x43), Color.FromRgb(0x0B, 0x4A, 0x28));

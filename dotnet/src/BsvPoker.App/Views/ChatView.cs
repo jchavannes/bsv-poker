@@ -25,6 +25,7 @@ public sealed class ChatView : UserControl
     public ChatView(ChatService chat)
     {
         _chat = chat;
+        Background = new SolidColorBrush(Color.FromRgb(0x0D, 0x0D, 0x0D)); Foreground = Brushes.White;
         var grid = new Grid { Margin = new Thickness(10) };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(320) });
         grid.ColumnDefinitions.Add(new ColumnDefinition());
@@ -32,6 +33,19 @@ public sealed class ChatView : UserControl
         // left: conversations + online peers + new-group
         var left = new DockPanel { Margin = new Thickness(0, 0, 10, 0) };
         var leftTop = new StackPanel();
+        leftTop.Children.Add(new TextBlock { Text = "Your chat ID — share it so others can message you:", Foreground = Brushes.Gray });
+        leftTop.Children.Add(new TextBox { Text = _chat.MyHex, IsReadOnly = true, FontFamily = new FontFamily("Consolas"), FontSize = 11, TextWrapping = TextWrapping.Wrap, Background = new SolidColorBrush(Color.FromRgb(0x0C, 0x0C, 0x0C)), Foreground = Brushes.LightGreen, BorderThickness = new Thickness(0) });
+        leftTop.Children.Add(new TextBlock { Text = "Start a DM — paste a peer's chat ID:", Foreground = Brushes.Gray, Margin = new Thickness(0, 8, 0, 2) });
+        var dmId = new TextBox { FontFamily = new FontFamily("Consolas"), FontSize = 11 };
+        leftTop.Children.Add(dmId);
+        var dmBtn = new Button { Content = "Start DM with this ID", Margin = new Thickness(0, 4, 0, 8), Padding = new Thickness(8, 6, 8, 6) };
+        dmBtn.Click += (_, _) =>
+        {
+            var id = dmId.Text.Trim().ToLowerInvariant();
+            if (id.Length == 66 && id != _chat.MyHex) { dmId.Clear(); OpenDm(id); }
+            else _title.Text = "Enter a valid 66-character chat ID (not your own).";
+        };
+        leftTop.Children.Add(dmBtn);
         leftTop.Children.Add(new TextBlock { Text = "Conversations", Foreground = Brushes.Gray });
         DockPanel.SetDock(leftTop, Dock.Top); left.Children.Add(leftTop);
         var leftBottom = new StackPanel();
