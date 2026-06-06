@@ -7,7 +7,7 @@ namespace BsvPoker.App;
 public partial class MainWindow : Window
 {
     private readonly Profile _profile = new();
-    private readonly P2PNode _node = new(0, "0.0.0.0");
+    private readonly P2PNode _node = new(0, "127.0.0.1"); // loopback by default; LAN is an explicit opt-in
     private GameView? _game;
 
     public MainWindow()
@@ -32,7 +32,7 @@ public partial class MainWindow : Window
         {
             await _node.StartAsync();
             // announce the FULL pubkey as presence so peers can DM us (and find us in the lobby).
-            await _node.HeartbeatAsync(Convert.ToHexString(_profile.IdentityPub).ToLowerInvariant(), $"0.0.0.0:{_node.BoundPort}");
+            await _node.HeartbeatAsync(Convert.ToHexString(_profile.IdentityPub).ToLowerInvariant(), $"127.0.0.1:{_node.BoundPort}");
             lobby.OnNodeReady(_node.BoundPort);
         };
         Closed += (_, _) => { try { _node.Dispose(); } catch { } };

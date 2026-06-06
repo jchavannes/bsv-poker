@@ -53,7 +53,10 @@ public sealed class P2PNode : IDisposable
     private sealed record Frame(string t, string d, string id);
     private sealed class RateState { public double Tokens; public long Last; }
 
-    public P2PNode(int port, string bindHost = "0.0.0.0") { _port = port; _bindHost = bindHost; }
+    // SECURITY: default to LOOPBACK. The node listens only on 127.0.0.1 until the user explicitly opts in
+    // to LAN/online play via EnableLan(). Outbound dials work regardless, so a player can still join others.
+    public P2PNode(int port, string bindHost = "127.0.0.1") { _port = port; _bindHost = bindHost; }
+    public bool LanEnabled { get; private set; }
 
     public int BoundPort { get; private set; }
     public int PeerCount => _peers.Count;
@@ -64,10 +67,11 @@ public sealed class P2PNode : IDisposable
     public Task StartAsync(IReadOnlyList<PeerAddr>? peers = null)
     {
         var addr = _bindHost == "0.0.0.0" ? IPAddress.Any : IPAddress.Parse(_bindHost);
+        if (_bindHost == "0.0.0.0") LanEnabled = true;
         _listener = new TcpListener(addr, _port);
         _listener.Start();
         BoundPort = ((IPEndPoint)_listener.LocalEndpoint).Port;
-        _ = AcceptLoop();
+        _ = AcceptLoop(_listener);
         Subscribe(DirTopic, OnDirAnnounce);
         Subscribe(PresenceTopic, OnPresenceAnnounce);
         Subscribe(DirQuery, _ => RepublishOwn());
@@ -76,15 +80,35 @@ public sealed class P2PNode : IDisposable
         return Task.CompletedTask;
     }
 
-    private async Task AcceptLoop()
+    private async Task AcceptLoop(TcpListener l)
     {
-        var l = _listener!;
         while (!_closed)
         {
             TcpClient s;
-            try { s = await l.AcceptTcpClientAsync(); } catch { if (_closed) return; else continue; }
+            try { s = await l.AcceptTcpClientAsync(); }
+            catch { if (_closed || !ReferenceEquals(l, _listener)) return; else { await Task.Delay(50); continue; } }
             Adopt(s);
         }
+    }
+
+    /// <summary>
+    /// Opt in to LAN/online play: rebind the listener from loopback to all interfaces (same port) so other
+    /// machines can connect inbound. No-op if already enabled. Existing peer connections are unaffected.
+    /// </summary>
+    public void EnableLan()
+    {
+        if (_closed || LanEnabled) return;
+        try
+        {
+            var old = _listener;
+            var lan = new TcpListener(IPAddress.Any, BoundPort);
+            lan.Start();
+            _listener = lan;                 // the old accept loop exits (its listener != _listener)
+            _ = AcceptLoop(lan);
+            try { old?.Stop(); } catch { }
+            LanEnabled = true;
+        }
+        catch { /* port unavailable for all-interfaces bind; stay loopback-only */ }
     }
 
     public void Dial(PeerAddr a)

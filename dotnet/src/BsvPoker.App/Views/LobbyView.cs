@@ -64,6 +64,10 @@ public sealed class LobbyView : UserControl
         create.Children.Add(dialBtn);
         root.Children.Add(create);
 
+        var lanBtn = Btn("Allow others to connect (LAN)", "#444444"); lanBtn.HorizontalAlignment = HorizontalAlignment.Left; lanBtn.Margin = new Thickness(0, 10, 0, 0);
+        lanBtn.Click += (_, _) => EnableLan();
+        root.Children.Add(lanBtn);
+
         root.Children.Add(new TextBlock { Text = "Open tables on the mesh", Foreground = Brushes.Gray, Margin = new Thickness(0, 16, 0, 4) });
         var gv = new GridView();
         gv.Columns.Add(new GridViewColumn { Header = "Table", Width = 280, DisplayMemberBinding = new System.Windows.Data.Binding("Name") });
@@ -82,7 +86,21 @@ public sealed class LobbyView : UserControl
         _timer.Start();
     }
 
-    public void OnNodeReady(int port) { _nodeInfo.Text = $"Your node is live on port {port} — share your IP:{port} so others can Connect to you."; Refresh(); }
+    public void OnNodeReady(int port) { _nodeInfo.Text = $"Your node is live on port {port} (loopback only). Press “Allow others to connect (LAN)” to host over the network."; Refresh(); }
+
+    private void EnableLan()
+    {
+        _node.EnableLan();
+        if (_node.LanEnabled)
+        {
+            var ips = string.Join(", ", System.Net.Dns.GetHostAddresses(System.Net.Dns.GetHostName())
+                .Where(a => a.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                .Select(a => $"{a}:{_node.BoundPort}"));
+            _nodeInfo.Text = $"Online — others can Connect to you at: {ips}";
+            _status.Text = "LAN play enabled. Share one of the addresses above.";
+        }
+        else _status.Text = "Could not enable LAN (port unavailable).";
+    }
 
     private static Button Btn(string t, string hex) { var c = (Color)ColorConverter.ConvertFromString(hex); return new Button { Content = t, Margin = new Thickness(8, 0, 0, 0), Padding = new Thickness(12, 6, 12, 6), Foreground = Brushes.White, BorderThickness = new Thickness(0), Background = new SolidColorBrush(c) }; }
 

@@ -65,5 +65,17 @@ public static class NetTests
             T.True(Until(() => node.DroppedFrames > 0), "the oversize frame was dropped");
             T.True(Until(() => got == "hello-valid"), "a valid frame after the oversize one still delivers (resync)");
         });
+
+        T.Run("transport: loopback by default, LAN is an explicit opt-in, and the rebind keeps accepting", () =>
+        {
+            using var n = new P2PNode(0, "127.0.0.1");
+            n.StartAsync().Wait();
+            T.False(n.LanEnabled, "listens on loopback only by default");
+            n.EnableLan();
+            T.True(n.LanEnabled, "LAN opt-in enables all-interfaces listening");
+            using var p = new P2PNode(0, "127.0.0.1");
+            p.StartAsync(new[] { new P2PNode.PeerAddr("127.0.0.1", n.BoundPort) }).Wait();
+            T.True(Until(() => n.PeerCount >= 1 && p.PeerCount >= 1), "a peer still connects after the LAN rebind");
+        });
     }
 }
