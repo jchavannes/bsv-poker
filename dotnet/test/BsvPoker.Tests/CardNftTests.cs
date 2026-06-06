@@ -14,7 +14,7 @@ public static class CardNftTests
 
         T.Run("owner can open their sealed card; a different key cannot", () =>
         {
-            var s = CardNft.SealToOwner(42, blind, alice.Pub);
+            var s = CardNft.SealToOwner(42, blind, alice.Priv);
             var o = CardNft.OpenAsOwner(s, alice.Priv);
             T.Eq(o.CardIndex, 42); T.Eq(T.Hex(o.Blind), T.Hex(blind));
             T.False(CardNft.CanOpen(s, bob.Priv), "wrong key cannot open");
@@ -22,28 +22,28 @@ public static class CardNftTests
 
         T.Run("TRANSFER: after Alice sends to Bob, Bob opens it and Alice CANNOT", () =>
         {
-            var toAlice = CardNft.SealToOwner(7, blind, alice.Pub);
-            var toBob = CardNft.Transfer(toAlice, alice.Priv, bob.Pub);
+            var toAlice = CardNft.SealToOwner(7, blind, alice.Priv);
+            var toBob = CardNft.Transfer(toAlice, alice.Priv, bob.Priv);
             T.Eq(CardNft.OpenAsOwner(toBob, bob.Priv).CardIndex, 7, "Bob opens to the same card");
             T.False(CardNft.CanOpen(toBob, alice.Priv), "sender LOST access on transfer");
         });
 
         T.Run("a non-owner cannot transfer (cannot open ⇒ cannot re-seal)", () =>
         {
-            var toAlice = CardNft.SealToOwner(3, blind, alice.Pub);
-            T.Throws(() => CardNft.Transfer(toAlice, bob.Priv, bob.Pub));
+            var toAlice = CardNft.SealToOwner(3, blind, alice.Priv);
+            T.Throws(() => CardNft.Transfer(toAlice, bob.Priv, bob.Priv));
         });
 
         T.Run("tampering the sealed blob is rejected (AES-GCM tag/AAD)", () =>
         {
-            var s = CardNft.SealToOwner(10, blind, alice.Pub);
+            var s = CardNft.SealToOwner(10, blind, alice.Priv);
             var b = Convert.FromHexString(s); b[^1] ^= 0x01;
             T.False(CardNft.CanOpen(Convert.ToHexString(b), alice.Priv));
         });
 
         T.Run("the 1-sat NFT script binds H(sealed) as PUSHDATA (never an OP_RETURN opcode)", () =>
         {
-            var s = CardNft.SealToOwner(20, blind, alice.Pub);
+            var s = CardNft.SealToOwner(20, blind, alice.Priv);
             var lockScript = CardNft.NftLock(s, alice.Pub);
             // structure: OP_PUSHDATA1 <len> <state> OP_DROP <33> <pub> OP_CHECKSIG. The commitment is
             // pushed DATA (a coincidental 0x6a inside the hash is fine); we never emit an OP_RETURN opcode.

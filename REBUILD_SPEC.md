@@ -29,12 +29,22 @@ Bitcoin Core wallet feature sets — the client must have **everything** those h
 5. **secp256k1 only.** Ed25519 and any non-secp256k1 curve are banned. No BIP32/39/44 or any BTC-derived
    key standard, and never even name them — BSV-native keys only (one 32-byte seed → HMAC-derived keys,
    Base58Check seed backup). The FORKID sighash is BSV consensus (never call it "BIP-143").
+   **Encryption is ECDH with an AES key — NEVER ECIES.** No ephemeral-key ECIES anywhere; derive the
+   AES-256-GCM key from an ECDH key agreement (chat: per-message fresh ECDH, no key reuse; cards:
+   owner-only ECDH so only the owner can open). The word/scheme "ECIES" is banned.
 6. **No `OP_RETURN`** is ever produced by our own scripts (card/commitment data is bound with `OP_DROP`).
 7. **Always recoverable.** Before a satoshi is ever at risk, every player holds a fully pre-signed
    unilateral nLockTime refund of 100% of their funds. No satoshi can ever be stranded.
 8. **Guaranteed termination.** Closing the window returns all funds and leaves zero orphan processes.
 9. **Design-award quality + an app icon.** The UI must be something Steve Jobs would give a design award
    to — beautiful, coherent, effortless. The exe **must ship with an app icon**. Ugly = rejected.
+11. **The bot is a SEPARATE automated player — never a clone.** "Play a bot" creates a genuine,
+    top-tier **automated** player with its OWN identity and wallet. It is **visually completely distinct**
+    from the main window — different size, different look/chrome, offset position; it must NEVER open over
+    the top of the main window, never be the same size, never look "remotely the same." It plays by
+    itself (it starts games itself). The human MAY take control (open the bot's wallet, make its moves) but
+    it remains a bot. **A bot must never run a bot, and we never spin up two identical copies / a second
+    exe.** If the bot is remotely the same as the human window, it is a failure.
 10. **Military-grade engineering.** Better than MilSpec — code good enough to run on military hardware:
     SANS/CWE, NASA Power-of-Ten, MS-SDL. Validate all hostile input, never panic, fuzz every parser.
     Exhaustive WHAT/HOW/WHY docs co-equal with code. Every claim has a positive **and** a hostile-negative

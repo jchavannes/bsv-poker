@@ -27,7 +27,7 @@ public sealed class CardVault
     /// <summary>Mint a card NFT sealed to me and store it (issued from the deal).</summary>
     public string AddCard(int cardIndex, byte[] blind)
     {
-        var s = CardNft.SealToOwner(cardIndex, blind, _pub);
+        var s = CardNft.SealToOwner(cardIndex, blind, _priv);
         _sealed.Add(s); Save();
         return s;
     }

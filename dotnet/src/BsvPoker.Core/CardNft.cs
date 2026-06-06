@@ -6,43 +6,42 @@ namespace BsvPoker.Core;
 
 /// <summary>
 /// A poker card as an ENCRYPTED 1-sat NFT held in a player's wallet. The card's reveal secret
-/// (cardIndex ‖ blind) is sealed to the OWNER's secp256k1 key via ECIES (ephemeral ECDH → HKDF →
-/// AES-256-GCM, owner pubkey bound as AAD). SENDING the card RE-SEALS it to the recipient and the
-/// sender LOSES ACCESS (the ephemeral private key is never kept). The on-chain 1-sat NFT binds
-/// H(sealed) + the owner; cards are issued from the player's own sats (no dealer/bank). Same model on
-/// every network.
+/// (cardIndex ‖ blind) is encrypted with an AES-256-GCM key derived by **ECDH** — the owner's own key
+/// agreement (ECDH of the owner's private key with the owner's public key), so ONLY the owner can derive
+/// the key. No ephemeral keys, no ECIES — ECDH with an AES key, exactly. A fresh random nonce per seal
+/// salts the key so no two seals reuse a key. TRANSFER re-seals to the recipient's own ECDH key, so the
+/// sender can no longer derive it and LOSES ACCESS. The on-chain 1-sat NFT binds H(sealed) + the owner.
 /// </summary>
 public static class CardNft
 {
-    private static readonly byte[] Salt = Encoding.ASCII.GetBytes("bsvpoker-card-ecies-salt-v1");
-    private static readonly byte[] Info = Encoding.ASCII.GetBytes("bsvpoker-card-key-v1");
+    private static readonly byte[] Info = Encoding.ASCII.GetBytes("bsvpoker-card-ecdh-key-v1");
 
     public readonly record struct Opened(int CardIndex, byte[] Blind);
 
-    /// <summary>Seal (cardIndex, blind) to the owner's compressed pubkey. Returns a hex blob = ephPub ‖ aead.</summary>
-    public static string SealToOwner(int cardIndex, byte[] blind, byte[] ownerPub33)
+    /// <summary>Seal (cardIndex, blind) so only the owner of <paramref name="ownerPriv32"/> can open it. Blob = nonce ‖ aead.</summary>
+    public static string SealToOwner(int cardIndex, byte[] blind, byte[] ownerPriv32)
     {
         if (cardIndex < 0 || cardIndex > 51) throw new ArgumentException("card index 0..51");
-        if (ownerPub33.Length != 33) throw new ArgumentException("ownerPub must be 33-byte compressed");
-        var (ephPriv, ephPub) = Secp256k1.GenerateKeyPair();           // FRESH ephemeral — dropped after this call
-        var shared = Secp256k1.Ecdh(ephPriv, ownerPub33);
-        var key = Aead.Hkdf(Concat(shared, ephPub), Salt, Info);
+        var ownerPub = Secp256k1.PublicKeyCompressed(ownerPriv32);
+        var shared = Secp256k1.Ecdh(ownerPriv32, ownerPub);            // ECDH key agreement (owner-only)
+        var nonce = RandomNumberGenerator.GetBytes(16);                // fresh salt → no key reuse
+        var key = Aead.Hkdf(shared, nonce, Info);
         var plaintext = Concat(new[] { (byte)cardIndex }, blind);
-        var aead = Aead.Seal(key, plaintext, ownerPub33);
-        return Convert.ToHexString(Concat(ephPub, aead)).ToLowerInvariant();
+        var aead = Aead.Seal(key, plaintext, ownerPub);               // owner pubkey bound as AAD
+        return Convert.ToHexString(Concat(nonce, aead)).ToLowerInvariant();
     }
 
     /// <summary>Open a sealed card with the owner's private key. Throws if not the owner / tampered.</summary>
     public static Opened OpenAsOwner(string sealedHex, byte[] ownerPriv32)
     {
         var blob = Convert.FromHexString(sealedHex);
-        if (blob.Length < 33 + 12 + 16 + 1) throw new ArgumentException("sealed blob too short");
-        var ephPub = blob[..33];
-        var aead = blob[33..];
+        if (blob.Length < 16 + 12 + 16 + 1) throw new ArgumentException("sealed blob too short");
+        var nonce = blob[..16];
+        var aead = blob[16..];
         var ownerPub = Secp256k1.PublicKeyCompressed(ownerPriv32);
-        var shared = Secp256k1.Ecdh(ownerPriv32, ephPub);
-        var key = Aead.Hkdf(Concat(shared, ephPub), Salt, Info);
-        var pt = Aead.Open(key, aead, ownerPub); // throws on wrong key / tamper (AAD = ownerPub)
+        var shared = Secp256k1.Ecdh(ownerPriv32, ownerPub);
+        var key = Aead.Hkdf(shared, nonce, Info);
+        var pt = Aead.Open(key, aead, ownerPub);                       // throws on wrong key / tamper
         return new Opened(pt[0], pt[1..]);
     }
 
@@ -52,11 +51,14 @@ public static class CardNft
         try { OpenAsOwner(sealedHex, ownerPriv32); return true; } catch { return false; }
     }
 
-    /// <summary>Transfer: current owner opens, re-seals to the recipient. Sender can no longer open the result.</summary>
-    public static string Transfer(string sealedHex, byte[] fromPriv32, byte[] toPub33)
+    /// <summary>
+    /// Transfer: the current owner opens, and re-seals to the RECIPIENT's own ECDH key. After this the
+    /// sender cannot derive the key (it needs the recipient's private key), so the sender LOSES ACCESS.
+    /// </summary>
+    public static string Transfer(string sealedHex, byte[] fromPriv32, byte[] toPriv32)
     {
         var opened = OpenAsOwner(sealedHex, fromPriv32);
-        return SealToOwner(opened.CardIndex, opened.Blind, toPub33);
+        return SealToOwner(opened.CardIndex, opened.Blind, toPriv32);
     }
 
     /// <summary>Commitment to a sealed blob (H(sealed)) — bound into the on-chain 1-sat NFT output.</summary>
@@ -71,8 +73,7 @@ public static class CardNft
         var tag = Encoding.ASCII.GetBytes("BSVPOKER-CARD-NFT-V1");
         var state = Concat(tag, SealCommitment(sealedHex));
         var b = new List<byte>();
-        // push state
-        b.Add(0x4c); b.Add((byte)state.Length); b.AddRange(state); // OP_PUSHDATA1
+        b.Add(0x4c); b.Add((byte)state.Length); b.AddRange(state); // OP_PUSHDATA1 <state>
         b.Add(0x75); // OP_DROP
         b.Add((byte)ownerPub33.Length); b.AddRange(ownerPub33);
         b.Add(0xac); // OP_CHECKSIG
