@@ -1,0 +1,13 @@
+# The player's OWN local node (tools/local-node.ts) — a P2PTransport peer that bridges the browser
+# (HTTP/SSE on loopback) to the peer-to-peer mesh. bsv-poker is fully peer-to-peer: there is NO
+# central relay/indexer. Each player runs their own local node; the nodes connect to EACH OTHER over
+# the mesh. Node 24 runs the TypeScript entrypoint directly (type-stripping), no build step.
+FROM node:24-alpine
+WORKDIR /app
+COPY package.json ./
+COPY packages/ ./packages/
+COPY tools/ ./tools/
+EXPOSE 8090
+# --http: the loopback HTTP/SSE surface the browser talks to. --listen: this node's P2P port.
+# In a real deployment add `--peer host:port` to dial another player's node into the mesh.
+ENTRYPOINT ["node", "tools/local-node.ts", "--http", "8090", "--listen", "9700"]

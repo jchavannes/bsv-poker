@@ -45,8 +45,13 @@ jobs:
           Copy-Item apps/client-desktop/build/bsv-poker.exe $dist/
           New-Item -ItemType Directory -Force "$dist/web" | Out-Null
           Copy-Item -Recurse apps/client-web/dist/esm/* "$dist/web/"
-          if (Test-Path apps/relay-go/relay-go.exe)   { Copy-Item apps/relay-go/relay-go.exe $dist/ }
-          if (Test-Path apps/indexer-go/indexer-go.exe) { Copy-Item apps/indexer-go/indexer-go.exe $dist/ }
+          # bsv-poker is fully peer-to-peer — there is NO relay/indexer server to bundle. The browser
+          # talks to the player's OWN local node (tools/local-node.ts), a P2PTransport peer the desktop
+          # launches via Node. Ship its sources so the host can run it.
+          New-Item -ItemType Directory -Force "$dist/node" | Out-Null
+          Copy-Item -Recurse tools "$dist/node/tools"
+          Copy-Item -Recurse packages "$dist/node/packages"
+          Copy-Item package.json "$dist/node/"
           Compress-Archive -Path "$dist/*" -DestinationPath dist-desktop/bsv-poker-windows-x64.zip -Force
 
       - name: Attach the portable app to the release
