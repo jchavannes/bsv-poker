@@ -1,0 +1,25 @@
+<!-- BsvPoker.App — the GAME you run. Native WPF, a TabControl: Wallet | Lobby | Game | Chat.
+     Published as a pure single-file self-contained poker.exe. -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>poker</AssemblyName>
+    <RootNamespace>BsvPoker.App</RootNamespace>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\BsvPoker.Crypto\BsvPoker.Crypto.csproj" />
+    <ProjectReference Include="..\BsvPoker.Core\BsvPoker.Core.csproj" />
+    <ProjectReference Include="..\BsvPoker.Net\BsvPoker.Net.csproj" />
+  </ItemGroup>
+</Project>

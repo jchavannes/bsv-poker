@@ -1,0 +1,18 @@
+<!--
+  BsvPoker.Crypto — the cryptographic foundation for the whole native .NET stack (bank-grade wallet,
+  ECDH-per-message encrypted chat, mental poker, on-chain signing). PURE, dependency-free C# over
+  System.Numerics + the built-in AES-GCM/HKDF/SHA-256. THIS IS BSV: every signature/keypair is
+  secp256k1; Ed25519 is BANNED. No external NuGet crypto — the curve math is in-tree and auditable.
+-->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>BsvPoker.Crypto</RootNamespace>
+    <AssemblyName>BsvPoker.Crypto</AssemblyName>
+    <Deterministic>true</Deterministic>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+</Project>

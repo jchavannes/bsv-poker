@@ -1,6 +1,6 @@
-# CI pipeline (core §16, app §A14.2, REQ-BUILD-003). A red stage blocks merge.
-# Stages: typecheck → OP_RETURN lint → unit+property+interpreter tests → reproduce →
-# traceability → Go vet+test. Runs the same `pnpm ci` the build uses locally.
+# CI pipeline for the pure-.NET BSV Poker app. A red stage blocks merge.
+# Builds the whole solution (secp256k1 crypto, core game/wallet, P2P/chat, WPF app) and runs the
+# dependency-free test suite. WPF requires Windows, so the job runs on windows-latest.
 name: CI
 
 on:
@@ -10,29 +10,21 @@ on:
     branches: [master, main]
 
 jobs:
-  ci:
-    runs-on: ubuntu-latest
+  build-and-test:
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Go (relay + indexer)
-        uses: actions/setup-go@v5
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
         with:
-          go-version: '1.24'
-          cache: false # the Go modules are stdlib-only (no go.sum)
+          dotnet-version: '8.0.x'
 
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        # version comes from package.json "packageManager" (pnpm@9.0.0)
+      - name: Restore
+        run: dotnet restore dotnet/BsvPoker.sln
 
-      - name: Set up Node 24 (native TypeScript type-stripping)
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: pnpm
+      - name: Build (Release)
+        run: dotnet build dotnet/BsvPoker.sln -c Release --no-restore
 
-      - name: Install
-        run: pnpm install --frozen-lockfile
-
-      - name: Run the full CI pipeline
-        run: pnpm run ci
+      - name: Test (dependency-free runner; non-zero exit fails the build)
+        run: dotnet run --project dotnet/test/BsvPoker.Tests/BsvPoker.Tests.csproj -c Release --no-build

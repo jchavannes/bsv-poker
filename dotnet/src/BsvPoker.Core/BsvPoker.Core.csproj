@@ -1,0 +1,15 @@
+<!-- BsvPoker.Core — the GAME: cards, dealerless mental-poker shuffle, hand evaluation, Texas Hold'em
+     engine, the bank-grade wallet, and the no-key-reuse encrypted chat. Pure C# over BsvPoker.Crypto. -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>BsvPoker.Core</RootNamespace>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\BsvPoker.Crypto\BsvPoker.Crypto.csproj" />
+  </ItemGroup>
+</Project>

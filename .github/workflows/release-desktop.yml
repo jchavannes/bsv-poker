@@ -1,6 +1,6 @@
-# Build the NATIVE Windows desktop app (Win32 + WebView2; NO Tauri, NO Rust) on a Windows runner and
-# attach a portable, double-click-and-play distribution to the GitHub Release for the pushed tag
-# (app §A14, REQ-VM-004). Reproducible from CI. Code signing is a later step (currently unsigned).
+# Build the pure-.NET native Windows app (single-file, self-contained WPF poker.exe — no installer, no
+# separate DLLs, no runtime prerequisite) on a Windows runner and attach it to the GitHub Release for the
+# pushed tag. Reproducible from CI. Code signing is a later step (currently unsigned).
 name: Release desktop app
 
 on:
@@ -13,56 +13,37 @@ permissions:
 
 jobs:
   windows-native:
-    runs-on: windows-latest   # ships VS 2022 C++ Build Tools (cl.exe) and the WebView2 runtime.
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
         with:
-          node-version: 24
-          cache: pnpm
+          dotnet-version: '8.0.x'
 
-      - name: Install workspace + build the web client (in-tree, no bundler)
+      - name: Build + test the solution
         run: |
-          pnpm install --frozen-lockfile
-          node apps/client-web/build.ts
+          dotnet build dotnet/BsvPoker.sln -c Release
+          dotnet run --project dotnet/test/BsvPoker.Tests/BsvPoker.Tests.csproj -c Release --no-build
 
-      - name: Build the native host + lifecycle test (cl.exe)
-        run: pwsh -NoProfile -File apps/client-desktop/native/build-native.ps1
-
-      - name: Run the lifecycle unit tests
-        run: apps/client-desktop/build/test-lifecycle.exe
-
-      - name: Prove the native host renders the client (headless WebView2)
-        run: node apps/client-desktop/verify-desktop.ts
-
-      - name: Assemble the portable distribution
+      - name: Publish the single-file self-contained poker.exe
         shell: pwsh
         run: |
-          $dist = "dist-desktop/bsv-poker"
-          New-Item -ItemType Directory -Force $dist | Out-Null
-          Copy-Item apps/client-desktop/build/bsv-poker.exe $dist/
-          New-Item -ItemType Directory -Force "$dist/web" | Out-Null
-          Copy-Item -Recurse apps/client-web/dist/esm/* "$dist/web/"
-          # bsv-poker is fully peer-to-peer — there is NO relay/indexer server to bundle. The browser
-          # talks to the player's OWN local node (tools/local-node.ts), a P2PTransport peer the desktop
-          # launches via Node. Ship its sources so the host can run it.
-          New-Item -ItemType Directory -Force "$dist/node" | Out-Null
-          Copy-Item -Recurse tools "$dist/node/tools"
-          Copy-Item -Recurse packages "$dist/node/packages"
-          Copy-Item package.json "$dist/node/"
-          Compress-Archive -Path "$dist/*" -DestinationPath dist-desktop/bsv-poker-windows-x64.zip -Force
+          dotnet publish dotnet/src/BsvPoker.App/BsvPoker.App.csproj -c Release -r win-x64 `
+            --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
+            -o dist
+          Remove-Item dist/*.pdb -ErrorAction SilentlyContinue
 
-      - name: Attach the portable app to the release
+      - name: Attach poker.exe to the release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist-desktop/bsv-poker-windows-x64.zip
+          files: dist/poker.exe
 
-      - name: Upload the portable app as a workflow artifact (non-tag runs)
+      - name: Upload poker.exe as a workflow artifact (non-tag runs)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: actions/upload-artifact@v4
         with:
-          name: bsv-poker-windows-x64
-          path: dist-desktop/bsv-poker-windows-x64.zip
+          name: poker-windows-x64
+          path: dist/poker.exe

@@ -1,0 +1,57 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{3A8C6406-B182-455E-994A-006279B4979C}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BsvPoker.Crypto", "src\BsvPoker.Crypto\BsvPoker.Crypto.csproj", "{5A806084-B4E5-4701-B21D-61B108865682}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BsvPoker.Core", "src\BsvPoker.Core\BsvPoker.Core.csproj", "{28EECB0F-4C0B-4620-B62D-B406DFBE963E}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BsvPoker.Net", "src\BsvPoker.Net\BsvPoker.Net.csproj", "{829849C8-F30F-4F0E-87E7-39C5CAAD75BA}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BsvPoker.App", "src\BsvPoker.App\BsvPoker.App.csproj", "{586DB789-88B3-4DB5-B0B1-D4AC900C4BF6}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "test", "test", "{F329448B-64D9-4796-A7C1-395587CD3F20}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BsvPoker.Tests", "test\BsvPoker.Tests\BsvPoker.Tests.csproj", "{C3BDA152-06AE-451B-92D6-D55232DC940C}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{5A806084-B4E5-4701-B21D-61B108865682}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{5A806084-B4E5-4701-B21D-61B108865682}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{5A806084-B4E5-4701-B21D-61B108865682}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{5A806084-B4E5-4701-B21D-61B108865682}.Release|Any CPU.Build.0 = Release|Any CPU
+		{28EECB0F-4C0B-4620-B62D-B406DFBE963E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{28EECB0F-4C0B-4620-B62D-B406DFBE963E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{28EECB0F-4C0B-4620-B62D-B406DFBE963E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{28EECB0F-4C0B-4620-B62D-B406DFBE963E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{829849C8-F30F-4F0E-87E7-39C5CAAD75BA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{829849C8-F30F-4F0E-87E7-39C5CAAD75BA}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{829849C8-F30F-4F0E-87E7-39C5CAAD75BA}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{829849C8-F30F-4F0E-87E7-39C5CAAD75BA}.Release|Any CPU.Build.0 = Release|Any CPU
+		{586DB789-88B3-4DB5-B0B1-D4AC900C4BF6}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{586DB789-88B3-4DB5-B0B1-D4AC900C4BF6}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{586DB789-88B3-4DB5-B0B1-D4AC900C4BF6}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{586DB789-88B3-4DB5-B0B1-D4AC900C4BF6}.Release|Any CPU.Build.0 = Release|Any CPU
+		{C3BDA152-06AE-451B-92D6-D55232DC940C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{C3BDA152-06AE-451B-92D6-D55232DC940C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{C3BDA152-06AE-451B-92D6-D55232DC940C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{C3BDA152-06AE-451B-92D6-D55232DC940C}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{5A806084-B4E5-4701-B21D-61B108865682} = {3A8C6406-B182-455E-994A-006279B4979C}
+		{28EECB0F-4C0B-4620-B62D-B406DFBE963E} = {3A8C6406-B182-455E-994A-006279B4979C}
+		{829849C8-F30F-4F0E-87E7-39C5CAAD75BA} = {3A8C6406-B182-455E-994A-006279B4979C}
+		{586DB789-88B3-4DB5-B0B1-D4AC900C4BF6} = {3A8C6406-B182-455E-994A-006279B4979C}
+		{C3BDA152-06AE-451B-92D6-D55232DC940C} = {F329448B-64D9-4796-A7C1-395587CD3F20}
+	EndGlobalSection
+EndGlobal

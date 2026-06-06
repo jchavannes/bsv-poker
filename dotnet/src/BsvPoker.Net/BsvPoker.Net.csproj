@@ -1,0 +1,16 @@
+<!-- BsvPoker.Net — pure peer-to-peer transport (NO server). A node:net-style gossip mesh over
+     System.Net.Sockets: every node is a listener + dialer; table channels + a gossiped directory.
+     Connection cap + per-peer rate limit + anti-eviction directory. Stdlib only. -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>BsvPoker.Net</RootNamespace>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\BsvPoker.Core\BsvPoker.Core.csproj" />
+  </ItemGroup>
+</Project>

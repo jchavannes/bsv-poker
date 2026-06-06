@@ -1,7 +1,0 @@
-# Web client placeholder for the VM compose. The REAL web image is apps/client-web/Dockerfile, which
-# runs the in-tree build (framework-free vanilla DOM; no Vite/React/bundler) and serves dist/esm via
-# nginx. This placeholder keeps the compose topology; bind to the bundled relay+node (bundled-local).
-FROM node:24-alpine
-WORKDIR /app
-EXPOSE 8080
-ENTRYPOINT ["sh", "-c", "echo 'bsv-poker web client placeholder — use apps/client-web/Dockerfile for the real image'; sleep infinity"]

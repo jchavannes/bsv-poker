@@ -1,0 +1,23 @@
+<Window x:Class="BsvPoker.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="BSV Poker" Width="1100" Height="820"
+        Background="{StaticResource Bg}" Foreground="{StaticResource Fg}"
+        FontFamily="Segoe UI" FontSize="14">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+        <Border Grid.Row="0" Background="{StaticResource Warn}" Padding="12,6">
+            <TextBlock Foreground="Black" FontWeight="SemiBold"
+                       Text="BSV POKER — REGTEST / play-money · peer-to-peer · no server" />
+        </Border>
+        <TabControl x:Name="Tabs" Grid.Row="1" Background="{StaticResource Bg}" Foreground="Black" BorderThickness="0">
+            <TabItem Header="Wallet"><ContentControl x:Name="WalletHost" /></TabItem>
+            <TabItem Header="Lobby"><ContentControl x:Name="LobbyHost" /></TabItem>
+            <TabItem Header="Game"><ContentControl x:Name="GameHost" /></TabItem>
+            <TabItem Header="Chat"><ContentControl x:Name="ChatHost" /></TabItem>
+        </TabControl>
+    </Grid>
+</Window>

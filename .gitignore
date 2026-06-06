@@ -1,16 +1,12 @@
-node_modules/
+# .NET build output
+bin/
+obj/
 dist/
-*.tsbuildinfo
-.DS_Store
-coverage/
-vm/.data/
-# Go build artifacts (binaries), NOT the relay/ and indexer/ package subdirectories.
+
+# Published single-file binaries (the release workflow produces poker.exe; it is not committed)
 *.exe
-apps/relay-go/relay-go
-apps/indexer-go/indexer-go
+
+# OS / editor / logs
+.DS_Store
 *.log
 .env.local
-target/
-# Native desktop build output (obj/exe). The vendored WebView2 SDK under native/{include,lib} IS
-# committed so the host builds standalone; only the compiler output is ignored.
-apps/client-desktop/build/
