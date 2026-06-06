@@ -24,8 +24,14 @@ test('dependency lockfiles are committed (locked deps — REQ-BUILD-002)', () =>
 
 test('container packaging exists: web image + the VM service images (REQ-VM-003)', () => {
   assert.ok(existsSync(join(ROOT, 'apps/client-web/Dockerfile')), 'web container');
-  for (const d of ['Dockerfile.node', 'Dockerfile.relay', 'Dockerfile.indexer', 'Dockerfile.client']) {
+  // bsv-poker is fully peer-to-peer: NO relay/indexer server images. The VM ships the chain node, the
+  // player's OWN local node (the P2P bridge), and the client.
+  for (const d of ['Dockerfile.node', 'Dockerfile.localnode', 'Dockerfile.client']) {
     assert.ok(existsSync(join(ROOT, 'vm', d)), `vm/${d}`);
+  }
+  // The removed central-server images must NOT reappear (the model has no relay/indexer).
+  for (const d of ['Dockerfile.relay', 'Dockerfile.indexer']) {
+    assert.ok(!existsSync(join(ROOT, 'vm', d)), `vm/${d} must NOT exist (no central server)`);
   }
 });
 
