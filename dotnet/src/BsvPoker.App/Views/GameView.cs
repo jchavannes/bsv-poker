@@ -44,6 +44,10 @@ public sealed class GameView : UserControl
     private readonly Button _check = Mk("Check", "#333333");
     private readonly Button _call = Mk("Call", "#333333");
     private readonly Button _betBtn = Mk("Bet / Raise", "#2E5A7A");
+    private readonly Button _leave = Mk("Leave table", "#555555");
+
+    /// <summary>Raised when the player leaves the table (so the host can stop any bot, etc.).</summary>
+    public event Action? OnLeaveTable;
 
     public GameView(P2PNode node, byte[] priv, byte[] pub, CardVault vault, Action onCardsChanged)
     {
@@ -71,7 +75,8 @@ public sealed class GameView : UserControl
         _check.Click += (_, _) => Do(ActionKind.Check, 0);
         _call.Click += (_, _) => Do(ActionKind.Call, 0);
         _betBtn.Click += (_, _) => { if (long.TryParse(_bet.Text.Trim(), out var to)) Do(ActionKind.Raise, to); };
-        bar.Children.Add(_deal); bar.Children.Add(_fold); bar.Children.Add(_check); bar.Children.Add(_call); bar.Children.Add(_bet); bar.Children.Add(_betBtn);
+        _leave.Click += (_, _) => LeaveTable();
+        bar.Children.Add(_deal); bar.Children.Add(_fold); bar.Children.Add(_check); bar.Children.Add(_call); bar.Children.Add(_bet); bar.Children.Add(_betBtn); bar.Children.Add(_leave);
 
         var root = new Grid();
         root.RowDefinitions.Add(new RowDefinition());
@@ -143,6 +148,19 @@ public sealed class GameView : UserControl
         if (_practice.Complete) { _stacks = _practice.Seats.Select(s => s.Stack).ToArray(); Render(); return; }
         if (_botMode) { DriveBot(); return; }
         Render();
+    }
+
+    /// <summary>
+    /// Leave the table at ANY time and keep your funds — without exception. Stops the networked session
+    /// (with real BSV this is where the pre-signed nLockTime recovery returns your stake), drops any bot,
+    /// and returns to a clean table. The button is never disabled.
+    /// </summary>
+    private void LeaveTable()
+    {
+        _net?.Stop(); _net = null; _practice = null; _botMode = false; _lastMintedHand = -1;
+        OnLeaveTable?.Invoke();
+        Render();
+        _msg.Text = "You left the table. Your funds are safe and yours — you can always walk away.";
     }
 
     private void Render()

@@ -23,6 +23,7 @@ public partial class MainWindow : Window
         var chat = new ChatService(_node, _profile.IdentityPriv, _profile.IdentityPub, _profile.Dir);
         ChatHost.Content = new ChatView(chat);
         _game = new GameView(_node, _profile.IdentityPriv, _profile.IdentityPub, vault, wallet.RefreshCards);
+        _game.OnLeaveTable += () => { try { _botWindow?.Close(); _bot?.Dispose(); _bot = null; _botWindow = null; } catch { } };
         GameHost.Content = _game;
 
         var lobby = new LobbyView(_node, _profile.IdentityPub, JoinTable, PlayBot);
