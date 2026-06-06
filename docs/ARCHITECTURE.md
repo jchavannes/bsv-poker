@@ -54,9 +54,11 @@ The game and money logic — no I/O.
 
 - **`P2PNode`** — a TCP gossip mesh: flood-with-dedup delivery, a serverless table/presence directory,
   a connection cap, per-peer inbound rate limiting, and anti-eviction. No server.
-- **`NetGame`** — the networked 2-player protocol (hello → commit → reveal → act) over a per-table
-  channel, with deterministic seat assignment by sorted public key. The variant travels inside the
-  table id (`t-<hex>~<Variant>`) so both peers agree on the game with no extra message.
+- **`NetGame`** — the networked **N-player** protocol over a per-table channel: a commutative-encryption
+  deal (`MentalPokerEC`) for true hole-card privacy, deterministic seat assignment by sorted public key,
+  per-street board reveals, and showdown reveals, then betting actions applied through the shared engine.
+  The variant and seat count travel inside the table id (`t-<hex>~<Variant>~p<N>`) so peers agree with no
+  extra message. (The transport is not yet authenticated — see [SECURITY.md](SECURITY.md).)
 - **`ChatService`** — direct and group encrypted messaging; persists history per profile.
 
 ## BsvPoker.App

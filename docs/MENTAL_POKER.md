@@ -15,15 +15,35 @@ There is no trusted dealer and no single party that knows the deck order.
 4. **Per-card keys.** `CombinedKey(seed, j)` is a real secp256k1 point derived from the combined seed,
    bound to card position `j` (rehashing on the rare invalid scalar).
 
-This is verified by tests: composed permutations are valid bijections, the shuffle is deterministic
-given the same entropies, and two networked peers independently compute the identical deck.
+This composed shuffle (`MentalPoker`) is used for the local practice/bot table, where one screen holds
+all hands anyway. Tests verify the permutations are valid bijections and the shuffle is deterministic
+given the same entropies.
 
-> **Roadmap — true hole-card privacy.** Today, once both peers reveal entropy they can both reconstruct
-> the deck, so hole cards are not yet cryptographically private from the opponent during play. The
-> planned upgrade is a commutative-encryption deal (secp256k1 scalar masking: every player masks every
-> card, cards are dealt by other players stripping their masks so only the recipient can unmask theirs),
-> which keeps each hole card private until showdown while remaining verifiable. This is secp256k1-only
-> and adds no new dependency.
+## True per-card privacy for networked play (`MentalPokerEC`)
+
+Networked play uses a stronger deal that keeps each hole card private — a **commutative-encryption**
+scheme on secp256k1 (the BSV curve, no new dependency). Each card `i` is a fixed public curve point
+`Mᵢ = (i+1)·G`. Masking a card is scalar multiplication, and because `a·(b·P) == b·(a·P)` the masks
+**commute**, so players can mask in any order and strip them in any order:
+
+1. **Shuffle pass** — in seat order, each player multiplies every card by one secret global scalar and
+   applies a secret permutation. After everyone, the deck is `(∏c)·M_{σ(k)}` in a hidden order.
+2. **Re-mask pass** — in seat order, each player removes their global scalar and re-applies an
+   independent **per-card** scalar `d_k`. Now position `k` holds `(∏_p d_{p,k})·M_{σ(k)}` — its own key.
+3. **Dealing** — to give position `k` to player T, every *other* player reveals only `d_{·,k}`; T strips
+   them and its own mask to recover `M_{σ(k)}`. No one else can, because they lack T's secret `d_{T,k}`.
+   The **board** is revealed by *all* players revealing their `d` at those positions; **opponent hole
+   cards** are revealed only at **showdown**, when each player reveals the `d` at its own positions.
+
+Privacy holds under the DDH-style hardness of the curve: a non-recipient who strips only the masks it
+knows is left with `d_T·M`, which matches no base point. Tests prove this end to end — including a
+**multiway (3-player)** simulation and a live 3-node networked hand — showing each peer reads only its
+own hole cards, the board agrees across all peers, and showdown reveals every hand with chips conserved.
+
+> **Honest scope.** This gives cryptographic *card privacy* against an honest-but-curious opponent. The
+> network channel itself is **not yet authenticated** (messages are unsigned), so it is not secure
+> against an *active* hostile peer who forges or replays protocol messages. Authenticating the transport
+> is part of the (deferred) red-team hardening, not yet done — see [SECURITY.md](SECURITY.md).
 
 ## Cards as NFTs (`CardNft`)
 

@@ -15,19 +15,28 @@ There is **no server** anywhere — no relay, no indexer, no directory service. 
 
 ## Networked game protocol (`NetGame`)
 
-A table is a channel keyed by its id. The id encodes the variant as `t-<hex>~<Variant>`, so when a peer
-joins it already knows which of the six games to play with no extra handshake message.
+A table is a channel keyed by its id. The id encodes the variant and seat count as
+`t-<hex>~<Variant>~p<N>`, so when a peer joins it already knows which of the six games and how many
+players, with no extra handshake message.
 
-Flow over the table channel:
+Flow over the table channel (N players):
 
-1. `hello` — peers announce their public keys; **seats are assigned deterministically** by sorting the
-   public keys, so both sides agree on who is in seat 0 without negotiation.
-2. `commit` — each peer sends `SHA-256(entropy)`.
-3. `reveal` — each peer sends `entropy`; both compose the identical dealerless deck
-   (see [MENTAL_POKER.md](MENTAL_POKER.md)).
-4. `act` — betting actions drive the shared `HoldemEngine` state.
+1. `hello` — peers announce their public keys; once `N` are present, **seats are assigned
+   deterministically** by sorting the public keys, so everyone agrees on the seating without negotiation.
+2. `shuf` / `rem` — the two-pass commutative-encryption deal: in seat order each player shuffle-masks the
+   deck, then in seat order each re-masks it (see [MENTAL_POKER.md](MENTAL_POKER.md) for the privacy
+   property). Each stage is broadcast once it is produced.
+3. `holeD` — each player reveals its per-card masks at the *other* seats' hole positions, so each player
+   can unmask only its own hole cards.
+4. `act` — betting actions drive the shared multiway `HoldemState`.
+5. `boardD` — at each street, all players reveal their masks at the board positions so the board is
+   unmasked just-in-time (no peeking ahead).
+6. `showD` — at showdown, each player reveals the masks at its own hole positions so opponents' hands can
+   be unmasked and the pot settled.
 
-A test plays a full networked hand and asserts both peers reach the same result with chips conserved.
+Tests play full networked hands with **2 and 3 players** and assert each peer sees only its own holes, the
+board agrees across all peers, showdown reveals every hand, and chips are conserved. (Messages are not yet
+signed — see [SECURITY.md](SECURITY.md) for the authentication limitation.)
 
 ## Encrypted chat (`ChatService`)
 
