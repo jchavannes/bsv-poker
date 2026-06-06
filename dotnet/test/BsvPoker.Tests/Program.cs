@@ -16,6 +16,7 @@ ChainTests.All();
 EscrowTests.All();
 WalletKeysTests.All();
 WalletExtrasTests.All();
+OnChainWalletTests.All();
 CardNftTests.All();
 NetTests.All();
 NetGameTests.All();
