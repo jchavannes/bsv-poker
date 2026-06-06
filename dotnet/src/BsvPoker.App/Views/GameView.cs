@@ -161,7 +161,7 @@ public sealed class GameView : UserControl
             _fold.IsEnabled = _check.IsEnabled = _call.IsEnabled = _betBtn.IsEnabled = false;
             return;
         }
-        int me = ng.MySeat < 0 ? 0 : ng.MySeat, opp = 1 - me;
+        int me = ng.MySeat < 0 ? 0 : ng.MySeat;
         // Cards are NFTs: mint MY hole cards into my wallet vault (sealed to me) once per dealt hand.
         if (!_cardsMinted && ng.MySeat >= 0)
         {
@@ -170,13 +170,22 @@ public sealed class GameView : UserControl
             _onCardsChanged();
         }
         foreach (var c in hand.Seats[me].Hole) { var cv = new CardView(); cv.ShowCard(c); _botCards.Children.Add(cv); }
-        // opponent holes are face-down sentinels of the variant's hole count until showdown reveals them
-        foreach (var c in hand.Seats[opp].Hole) { var cv = new CardView(); if (c.IsFaceDown) cv.ShowBack(); else cv.ShowCard(c); _topCards.Children.Add(cv); }
+        // one group per opponent seat (holes are face-down sentinels of the variant's count until showdown)
+        _topInfo.Text = hand.Seats.Count > 2 ? "Opponents" : "";
+        foreach (var s in hand.Seats.Where(s => s.Seat != me))
+        {
+            bool theirTurn = !hand.Complete && hand.ToAct == s.Seat;
+            var grp = new StackPanel { Orientation = Orientation.Vertical, Margin = new Thickness(12, 0, 12, 0), HorizontalAlignment = HorizontalAlignment.Center };
+            grp.Children.Add(new TextBlock { Text = $"Seat {s.Seat} — {s.Stack}{(s.Folded ? " (folded)" : "")}{(theirTurn ? "  ◀" : "")}", Foreground = Brushes.White, FontWeight = FontWeights.SemiBold, HorizontalAlignment = HorizontalAlignment.Center });
+            var cards = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
+            foreach (var c in s.Hole) { var cv = new CardView(); if (c.IsFaceDown) cv.ShowBack(); else cv.ShowCard(c); cards.Children.Add(cv); }
+            grp.Children.Add(cards);
+            _topCards.Children.Add(grp);
+        }
         for (int i = 0; i < 5; i++) { var cv = new CardView(); if (i < hand.Board.Count) cv.ShowCard(hand.Board[i]); else cv.ShowEmpty(); _board.Children.Add(cv); }
         _pot.Text = $"Pot: {hand.Pot}";
         bool myTurn = !hand.Complete && hand.ToAct == me;
         _botInfo.Text = $"You (seat {me}) — stack {hand.Seats[me].Stack}{(myTurn ? "  ◀ your turn" : "")}";
-        _topInfo.Text = $"Opponent (seat {opp}) — stack {hand.Seats[opp].Stack}";
         _msg.Text = ng.Status;
         var la = myTurn ? hand.Legal() : null;
         _fold.IsEnabled = la?.CanFold ?? false;

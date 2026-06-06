@@ -22,6 +22,7 @@ public sealed class LobbyView : UserControl
     private readonly ListView _list = new() { Background = new SolidColorBrush(Color.FromRgb(0x0F, 0x0F, 0x0F)), Foreground = Brushes.White, BorderThickness = new Thickness(0), Height = 320 };
     private readonly TextBox _name = new() { Text = "Friday night", Width = 180 };
     private readonly ComboBox _variant = new();
+    private readonly ComboBox _seats = new();
     private readonly TextBox _peer = new() { Width = 200, ToolTip = "e.g. 192.168.1.50:9700" };
     private readonly TextBlock _nodeInfo = new() { Foreground = Brushes.LightGreen };
     private readonly TextBlock _status = new() { Foreground = Brushes.Gray, Margin = new Thickness(0, 8, 0, 0), TextWrapping = TextWrapping.Wrap };
@@ -43,6 +44,10 @@ public sealed class LobbyView : UserControl
         foreach (var v in Variants.All) _variant.Items.Add(Variants.Name(v));
         _variant.SelectedIndex = 0; _variant.Width = 170; _variant.Margin = new Thickness(0, 0, 4, 0);
         create.Children.Add(_variant);
+        create.Children.Add(new TextBlock { Text = "  players ", Foreground = Brushes.Gray, VerticalAlignment = VerticalAlignment.Center });
+        for (int p = 2; p <= 6; p++) _seats.Items.Add(p);
+        _seats.SelectedIndex = 0; _seats.Width = 56; _seats.Margin = new Thickness(0, 0, 4, 0);
+        create.Children.Add(_seats);
         var createBtn = Btn("Create", "#2E7D32"); createBtn.Click += (_, _) => Create();
         create.Children.Add(createBtn);
         create.Children.Add(new TextBlock { Text = "    Connect to player ", Foreground = Brushes.Gray, VerticalAlignment = VerticalAlignment.Center });
@@ -78,10 +83,11 @@ public sealed class LobbyView : UserControl
     private void Create()
     {
         var v = Variants.All[Math.Max(0, _variant.SelectedIndex)];
-        // encode the variant in the id so both peers agree on the game without extra messages
-        var id = "t-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(6)).ToLowerInvariant() + "~" + v;
+        int seats = _seats.SelectedIndex >= 0 ? (int)_seats.Items[_seats.SelectedIndex]! : 2;
+        // encode the variant AND seat count in the id so peers agree on the game without extra messages
+        var id = "t-" + Convert.ToHexString(RandomNumberGenerator.GetBytes(6)).ToLowerInvariant() + "~" + v + "~p" + seats;
         _ = _node.CreateTableAsync(id, _name.Text.Trim());
-        _status.Text = $"Hosting '{_name.Text.Trim()}' ({Variants.Name(v)}). Join it (or wait for a peer) to play.";
+        _status.Text = $"Hosting '{_name.Text.Trim()}' ({Variants.Name(v)}, {seats} players). Join it (or wait for players) to play.";
         Refresh();
     }
 
@@ -101,10 +107,11 @@ public sealed class LobbyView : UserControl
     private void Refresh()
     {
         var sel = (_list.SelectedItem as TableRow)?.Id;
-        var rows = _node.ListTables().Select(t => new TableRow { Id = t.id, Name = $"{t.name}  ·  {Variants.Name(VariantOf(t.id))}", Players = t.members }).ToList();
+        var rows = _node.ListTables().Select(t => new TableRow { Id = t.id, Name = $"{t.name}  ·  {Variants.Name(VariantOf(t.id))}  ·  {SeatsOf(t.id)}-max", Players = t.members }).ToList();
         _list.ItemsSource = rows;
         if (sel != null) _list.SelectedItem = rows.FirstOrDefault(x => x.Id == sel);
     }
 
     private static Variant VariantOf(string id) { var p = id.Split('~'); return p.Length > 1 ? Variants.Parse(p[1]) : Variant.TexasHoldem; }
+    private static int SeatsOf(string id) { foreach (var p in id.Split('~')) if (p.StartsWith("p") && int.TryParse(p[1..], out var n)) return n; return 2; }
 }
