@@ -123,8 +123,11 @@ The lobby presents **six** clearly-distinct games, each visibly different and fu
 5. **Razz** — seven-card lowball.
 6. **Five-Card Draw** — draw poker.
 
-(Exact six to be confirmed with the user; each must be a real, distinct, selectable, playable game with
-correct rules, hand evaluation, betting structure, and showdown — not a single engine with a hidden flag.)
+Plus **Blackjack** (explicitly required): a peer-dealt, on-chain mental-poker blackjack — hit/stand/
+double/split, dealer rules, real-BSV wagering — distinct from the poker games.
+
+(Each game must be a real, distinct, selectable, playable game with correct rules, hand evaluation,
+betting/wagering structure, and showdown/settlement — not a single engine with a hidden flag.)
 
 Each game: dealerless **mental poker** with TRUE per-card privacy (commutative-encryption on secp256k1),
 real-BSV buy-in via threshold escrow, cooperative settlement to the winner, and the always-on nLockTime
@@ -144,6 +147,24 @@ Nothing is off-chain. Each of the following is a **real BSV transaction** broadc
   state; peers verify it by SPV proof rather than trusting each other.
 - **Maximize** transactions — a deal is ~100 txs, a game ~1,000, a night 100,000,000+. No batching to
   "save" transactions; volume is the point. This is BSV.
+
+### 3.1.1 On-chain smart contracts, auctions, and roles (the real scope)
+
+This is not "poker with some transactions." It is a **smart-contract platform on BSV**. Anything that
+exists on Ethereum or any blockchain, we build here in Bitcoin Script:
+
+- **Every role is auctioned on-chain.** Want to be the banker? Bid for it. The dealer? Bid for it. The
+  right to draw a card? Bid for it. Players can pay other players for roles. All of it on-chain.
+- **Every bid — not just the winning one — is a full *conditional smart contract*, not a bare transaction.**
+  Auctions, escrows, role assignments, deals, payouts, refunds: each is a Script contract with conditions
+  (time locks, hash locks, multi-party thresholds, oracle/state conditions), enforced by the chain.
+- **A Bitcoin Script smart-contract engine** is a core layer: build, fund, satisfy, and verify arbitrary
+  conditional contracts (auction settlement, sealed/open bids, Dutch/English auctions, payment channels,
+  threshold release, refunds) — everything programmable, on-chain, secp256k1-only, no `OP_RETURN`.
+- **Maximize transactions and contracts.** Volume is the goal.
+
+This is **stage one of hundreds.** The architecture must be built to scale to every blockchain capability
+ever discussed — think a billion times bigger than a single poker table.
 
 ### 3.2 Lobby network selector
 
