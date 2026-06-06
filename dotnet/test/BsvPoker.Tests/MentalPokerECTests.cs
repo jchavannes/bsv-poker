@@ -81,6 +81,40 @@ public static class MentalPokerECTests
             T.Eq(MentalPokerEC.Identify(deck[k], n), -1, "the masked card matches no base point");
         });
 
+        T.Run("MULTIWAY (3 players): privacy and correctness hold for N>2", () =>
+        {
+            const int n = 52, players = 3;
+            var c = new byte[players][]; var d = new byte[players][][];
+            for (int pl = 0; pl < players; pl++) { c[pl] = MentalPokerEC.NewScalar(); d[pl] = MentalPokerEC.NewPerCardScalars(n); }
+
+            // shuffle phase: each player masks+shuffles in turn; then remask phase: each swaps global→per-card
+            var deck = MentalPokerEC.BaseDeck(n);
+            for (int pl = 0; pl < players; pl++) deck = MentalPokerEC.ShuffleMask(deck, c[pl], Perm(n, (byte)(10 + pl)));
+            for (int pl = 0; pl < players; pl++) deck = MentalPokerEC.Remask(deck, c[pl], d[pl]);
+            // now deck[k] = (∏_pl d[pl][k]) · M_{σ(k)}
+
+            // deal position 0 to player 0: the OTHER players reveal their masks at position 0
+            int k = 0;
+            var othersMasks = Enumerable.Range(1, players - 1).Select(pl => d[pl][k]).Append(d[0][k]); // all masks incl recipient's own
+            var p0view = MentalPokerEC.Unmask(deck[k], othersMasks);
+            T.True(MentalPokerEC.Identify(p0view, n) >= 0, "recipient (player 0) reads the card");
+
+            // a NON-recipient (player 1) has every mask EXCEPT player 0's → cannot identify the card
+            var nonRecip = Enumerable.Range(1, players - 1).Select(pl => d[pl][k]); // players 1..2 only (no d[0])
+            var p1view = MentalPokerEC.Unmask(deck[k], nonRecip);
+            T.Eq(MentalPokerEC.Identify(p1view, n), -1, "a non-recipient cannot identify another player's hole card");
+
+            // dealing all positions with ALL masks revealed yields a valid 52-card permutation
+            var seen = new HashSet<int>();
+            for (int pos = 0; pos < n; pos++)
+            {
+                var all = Enumerable.Range(0, players).Select(pl => d[pl][pos]);
+                var m = MentalPokerEC.Unmask(deck[pos], all);
+                T.True(seen.Add(MentalPokerEC.Identify(m, n)), $"position {pos} is a distinct card");
+            }
+            T.Eq(seen.Count, n, "all 52 distinct cards present for the 3-player deal");
+        });
+
         T.Run("BOARD card: when ALL players reveal their per-card scalar, everyone reads the same card", () =>
         {
             const int n = 52;
