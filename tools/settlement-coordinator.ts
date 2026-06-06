@@ -1,21 +1,22 @@
 /**
  * Reusable live multi-party settlement coordinator (core §6.6, §8). Each peer holds ONLY its own
  * key, signs the deterministic N-of-N settlement transaction, and gossips its signature over the
- * relay socket; once all N signatures are collected, the designated submitter assembles + submits
- * the transaction. No party can move the pot alone. Used by the on-chain E2Es and the bot daemon.
+ * PEER-TO-PEER channel; once all N signatures are collected, the designated submitter assembles +
+ * submits the transaction. No party can move the pot alone. Used by the on-chain E2Es and the bot
+ * daemon. The channel is any `RelayChannel` (subscribe/publish) — over P2P this is a `P2PTransport`,
+ * so settlement is fully serverless: there is no relay/coordinator server, just peers gossiping sigs.
  */
 
-import { RelayClient } from '@bsv-poker/app-services';
+import type { RelayChannel } from '@bsv-poker/app-services';
 import { signPreimage, fundingUnlocking, type Script, type KeyPair } from '@bsv-poker/script-templates-ts';
 import { bytesToHex } from '@bsv-poker/protocol-types';
 import { type Tx, serializeTxWire, txidWire, sighashMessage } from '@bsv-poker/tx-builder';
 
 const sigT = (msg: Uint8Array, k: KeyPair): Uint8Array => signPreimage(msg, k.priv);
 
-/** Gossip a per-peer value over the relay (e.g. each player's on-chain pubkey) and collect all N,
- *  ordered by index. Re-announces until everyone has converged (covers subscribe races). */
-export async function gatherByIndex(relayUrl: string, tableId: string, kind: string, idx: number, mine: string, n: number, timeoutMs = 30000): Promise<string[]> {
-  const relay = new RelayClient(relayUrl);
+/** Gossip a per-peer value over the P2P channel (e.g. each player's on-chain pubkey) and collect all
+ *  N, ordered by index. Re-announces until everyone has converged (covers subscribe races). */
+export async function gatherByIndex(relay: RelayChannel, tableId: string, kind: string, idx: number, mine: string, n: number, timeoutMs = 30000): Promise<string[]> {
   const vals = new Map<number, string>([[idx, mine]]);
   const deadline = Date.now() + timeoutMs;
   await new Promise<void>((resolve, reject) => {
@@ -41,15 +42,13 @@ export async function gatherByIndex(relayUrl: string, tableId: string, kind: str
 }
 
 /** The funder broadcasts a single value (e.g. the escrow outpoint) repeatedly; peers await it. */
-export function broadcastValue(relayUrl: string, tableId: string, kind: string, v: string): () => void {
-  const relay = new RelayClient(relayUrl);
+export function broadcastValue(relay: RelayChannel, tableId: string, kind: string, v: string): () => void {
   const id = setInterval(() => void relay.publish(tableId, new TextEncoder().encode(JSON.stringify({ t: kind, v }))), 300);
   void relay.publish(tableId, new TextEncoder().encode(JSON.stringify({ t: kind, v })));
   return () => clearInterval(id);
 }
 
-export async function awaitValue(relayUrl: string, tableId: string, kind: string, timeoutMs = 30000): Promise<string> {
-  const relay = new RelayClient(relayUrl);
+export async function awaitValue(relay: RelayChannel, tableId: string, kind: string, timeoutMs = 30000): Promise<string> {
   const deadline = Date.now() + timeoutMs;
   return new Promise<string>((resolve, reject) => {
     const unsub = relay.subscribe(tableId, (text) => {
@@ -63,7 +62,7 @@ export async function awaitValue(relayUrl: string, tableId: string, kind: string
 }
 
 export interface CoSignOpts {
-  readonly relayUrl: string;
+  readonly relay: RelayChannel;
   readonly tableId: string;
   /** This peer's seat index in the N-of-N (the signature order CHECKMULTISIG verifies). */
   readonly idx: number;
@@ -79,9 +78,9 @@ export interface CoSignOpts {
   readonly timeoutMs?: number;
 }
 
-/** Gossip this peer's settlement signature over the relay, collect all N, and (if submitter) submit. */
+/** Gossip this peer's settlement signature over the channel, collect all N, and (if submitter) submit. */
 export async function coSignSettlement(opts: CoSignOpts): Promise<{ collected: number; txid: string | undefined }> {
-  const relay = new RelayClient(opts.relayUrl);
+  const relay = opts.relay;
   const msg = sighashMessage(opts.settleTx, 0, opts.fundingScript, opts.potValue);
   const sigs = new Map<number, Uint8Array>();
   sigs.set(opts.idx, sigT(msg, opts.myKey));

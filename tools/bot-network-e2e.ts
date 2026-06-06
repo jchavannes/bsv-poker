@@ -1,25 +1,24 @@
 /**
- * Bot-over-the-wire E2E: proves bots are SEPARATE PROCESSES that connect like remote players. We
- * start a relay, create a table, then spawn TWO independent bot-daemon processes that join the same
- * table over the relay socket and play hands. The test asserts both daemons seat, act over the wire,
- * and the session runs — exactly as if two remote humans (each in their own window) were playing. No
- * bot is in the main app's process.
+ * Bot-over-the-wire E2E: proves bots are SEPARATE PROCESSES that connect like remote players, fully
+ * PEER-TO-PEER. We stand up ONE host peer node (the table host), create a table on it, then spawn TWO
+ * independent bot-daemon processes that dial that peer, discover the table via gossip, and play hands.
+ * The test asserts both daemons seat, act over the wire, and the session runs — exactly as if two
+ * remote humans (each in their own window) were playing. No bot is in the main app's process, and
+ * there is NO relay server — the host peer just relays gossip between the two bots.
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
-import { RelayClient, LobbyClient, type TableMeta } from '@bsv-poker/app-services';
+import { LobbyClient, type TableMeta } from '@bsv-poker/app-services';
+import { P2PTransport } from '@bsv-poker/adapters/p2p-transport';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-const RELAY_BIN = join(ROOT, 'apps', 'relay-go', 'relay-go.exe');
-const PORT = Number(process.env.BOT_E2E_PORT ?? 8097);
-const RELAY_URL = `http://127.0.0.1:${PORT}`;
 
 const procs: ChildProcess[] = [];
-function spawnBot(table: string, name: string): { proc: ChildProcess; out: () => string } {
-  const p = spawn('node', [join(ROOT, 'tools', 'bot-daemon.ts'), '--relay', RELAY_URL, '--table', table, '--name', name, '--hands', '2'], { cwd: ROOT });
+function spawnBot(peer: string, table: string, name: string): { proc: ChildProcess; out: () => string } {
+  const p = spawn('node', [join(ROOT, 'tools', 'bot-daemon.ts'), '--peer', peer, '--table', table, '--name', name, '--hands', '2'], { cwd: ROOT });
   procs.push(p);
   let buf = '';
   p.stdout.on('data', (d) => { buf += d.toString(); });
@@ -28,22 +27,17 @@ function spawnBot(table: string, name: string): { proc: ChildProcess; out: () =>
 }
 
 async function main(): Promise<void> {
-  const relay = spawn(RELAY_BIN, ['-addr', `127.0.0.1:${PORT}`], { stdio: 'ignore' });
-  procs.push(relay);
+  // The host's own P2P node — the rendezvous peer both bots dial (no relay server).
+  const host = new P2PTransport(0);
+  await host.start([]);
+  const peerAddr = `127.0.0.1:${host.boundPort()}`;
   try {
-    const client = new RelayClient(RELAY_URL);
-    const dl = Date.now() + 15000;
-    while (!(await client.health().catch(() => false))) {
-      if (Date.now() > dl) throw new Error('relay did not start');
-      await new Promise((r) => setTimeout(r, 300));
-    }
-
     const meta: TableMeta = { name: 'bot-test', variant: 'holdem', smallBlind: 1, bigBlind: 2, startingStack: 100, maxSeats: 2 };
-    const tableId = await new LobbyClient(client).createTable(meta);
-    console.log(`[bot-net] created table ${tableId}; spawning two SEPARATE bot processes…`);
+    const tableId = await new LobbyClient(host).createTable(meta);
+    console.log(`[bot-net] host peer ${peerAddr} created table ${tableId}; spawning two SEPARATE bot processes…`);
 
-    const alice = spawnBot(tableId, 'alice');
-    const bob = spawnBot(tableId, 'bob');
+    const alice = spawnBot(peerAddr, tableId, 'alice');
+    const bob = spawnBot(peerAddr, tableId, 'bob');
 
     // Wait for the session to play out across the two processes.
     const finished = Date.now() + 40000;
@@ -63,10 +57,11 @@ async function main(): Promise<void> {
     assert.match(b, /SEATED at seat/, `bob never seated:\n${b}`);
     assert.match(a, /my turn →/, `alice never acted over the wire:\n${a}`);
     assert.match(b, /my turn →/, `bob never acted over the wire:\n${b}`);
-    console.log('[bot-net] alice + bob (separate processes) seated and played over the relay socket.');
-    console.log('\n[bot-net] PASS — bots are remote players over the socket, not in the app process.');
+    console.log('[bot-net] alice + bob (separate processes) seated and played peer-to-peer via the host peer.');
+    console.log('\n[bot-net] PASS — bots are remote players over the P2P mesh, not in the app process, no relay server.');
   } finally {
     for (const p of procs) p.kill();
+    host.close();
   }
 }
 

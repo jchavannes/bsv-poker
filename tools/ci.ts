@@ -106,43 +106,17 @@ const stages: Stage[] = [
     cwd: join(ROOT, 'apps/client-desktop'),
     skipIf: () => process.env.BSV_CI_SKIP_RENDER === '1',
   },
-  {
-    name: 'go vet+test relay-go',
-    cmd: 'go',
-    args: ['test', './...'],
-    cwd: join(ROOT, 'apps/relay-go'),
-    skipIf: () => !hasGo(),
-  },
-  {
-    name: 'go vet+test indexer-go',
-    cmd: 'go',
-    args: ['test', './...'],
-    cwd: join(ROOT, 'apps/indexer-go'),
-    skipIf: () => !hasGo(),
-  },
-  // Short ACTIVE fuzzing of the two security-critical Go boundaries (capability-token verify and
-  // validated-envelope ingest). `go test` already replays each fuzz seed corpus; this stage adds a
-  // brief live fuzz so new crashers surface in CI. Kept short to bound CI time.
-  {
-    name: 'go fuzz: relay capability verify (8s)',
-    cmd: 'go',
-    args: ['test', './relay/', '-run=^$', '-fuzz=FuzzCapabilityVerify', '-fuzztime=8s'],
-    cwd: join(ROOT, 'apps/relay-go'),
-    skipIf: () => !hasGo(),
-  },
-  {
-    name: 'go fuzz: indexer validate (8s)',
-    cmd: 'go',
-    args: ['test', './indexer/', '-run=^$', '-fuzz=FuzzValidateEnvelopeRecord', '-fuzztime=8s'],
-    cwd: join(ROOT, 'apps/indexer-go'),
-    skipIf: () => !hasGo(),
-  },
+  // NOTE: the Go relay-go / indexer-go servers have been DELETED — bsv-poker is fully peer-to-peer
+  // (no relay, no indexer, no central server). The serverless transport + lobby + multi-hand + recovery
+  // paths are exercised by the P2P e2es below instead of the old Go server vet/test/fuzz stages.
+  { name: 'p2p transport + serverless lobby e2e', cmd: 'node', args: ['tools/p2p-lobby-e2e.ts'] },
+  { name: 'multiplayer e2e (peer-to-peer)', cmd: 'node', args: ['tools/multiplayer-e2e.ts'] },
+  { name: 'multi-variant e2e (peer-to-peer)', cmd: 'node', args: ['tools/multi-e2e.ts'] },
+  { name: 'lobby + seating e2e (peer-to-peer)', cmd: 'node', args: ['tools/lobby-e2e.ts'] },
+  { name: 'continuous session e2e (peer-to-peer)', cmd: 'node', args: ['tools/session-e2e.ts'] },
+  { name: 'reconnect-from-peer-transcript e2e (peer-to-peer)', cmd: 'node', args: ['tools/reconnect-e2e.ts'] },
+  { name: 'on-chain nLockTime fund recovery e2e (in-tree node)', cmd: 'node', args: ['tools/onchain-nlocktime-recovery-e2e.ts'] },
 ];
-
-function hasGo(): boolean {
-  const r = spawnSync('go', ['version'], { stdio: 'ignore' });
-  return r.status === 0;
-}
 
 /** True when the MSVC C++ Build Tools are discoverable (Windows + vswhere present). The native
  *  desktop build needs cl.exe; on other hosts the desktop stages skip. */

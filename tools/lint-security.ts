@@ -46,8 +46,9 @@ const REFERENCE_DOC_TARGETS: string[] = [
   'packages/game-razz',
   'packages/game-draw',
   'packages/game-blackjack',
-  'apps/indexer-go',
-  'apps/relay-go',
+  // NOTE: apps/indexer-go and apps/relay-go REMOVED — bsv-poker is fully peer-to-peer (no relay/
+  // indexer server). The transport + serverless directory now live in packages/adapters
+  // (p2p-transport.ts), which is already a reference-standard target above.
 ];
 
 /** Doc files required for a reference-standard target. */

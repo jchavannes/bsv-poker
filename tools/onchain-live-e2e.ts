@@ -1,16 +1,16 @@
 /**
- * LIVE multi-party on-chain settlement over the relay (core §6.6, §8). The contested money move is
- * not done by any single party: N peers, each holding ONLY their own key, independently sign the
- * N-of-N settlement transaction and broadcast their signature OVER THE RELAY SOCKET. When a peer has
- * collected all N signatures it assembles + submits the tx to the real node. This is the live
- * hand-end settlement protocol — no party can move the pot alone, and the exchange is over the wire.
+ * LIVE multi-party on-chain settlement, fully PEER-TO-PEER (core §6.6, §8). The contested money move
+ * is not done by any single party: N peers, each holding ONLY their own key, independently sign the
+ * N-of-N settlement transaction and broadcast their signature OVER THE P2P GOSSIP CHANNEL. When a peer
+ * has collected all N signatures it assembles + submits the tx to the BSV node. This is the live
+ * hand-end settlement protocol — no party can move the pot alone, and the exchange is over the mesh.
+ * The only infrastructure is the BSV node (the decentralized chain); there is NO relay server.
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { RealBsvNode } from '@bsv-poker/adapters/real-node';
-import { RelayClient } from '@bsv-poker/app-services';
 import {
   OP,
   genKeyPair,
@@ -23,32 +23,27 @@ import {
 import { bytesToHex, type BranchBinding } from '@bsv-poker/protocol-types';
 import { type Tx, type TxOutput, serializeTxWire, txidWire, sighashMessage } from '@bsv-poker/tx-builder';
 import { coSignSettlement } from './settlement-coordinator.ts';
+import { p2pMesh } from './p2p-mesh.ts';
 
 const NODE_PORT = Number(process.env.BSV_NODE_PORT ?? 8745);
-const RELAY_PORT = Number(process.env.BSV_RELAY_PORT ?? 8099);
 const SUBSIDY = 5_000_000_000;
 const FEE = 1000;
 const BIND: BranchBinding = { gid: 'a1'.repeat(8), rulesetHash: 'b2'.repeat(32), round: 0, stateHash: 'c3'.repeat(32), actingSeat: -1, successorCommitment: '00'.repeat(32) };
 const p2pkh = (pub: Uint8Array): Script => [OP.OP_DUP, OP.OP_HASH160, fairPlayCommitment(pub), OP.OP_EQUALVERIFY, OP.OP_CHECKSIG];
 const sigT = (msg: Uint8Array, k: KeyPair): Uint8Array => signPreimage(msg, k.priv);
-const ROOT = process.cwd();
 
 let nodeProc: ChildProcess | null = null;
-let relayProc: ChildProcess | null = null;
 
 async function main(): Promise<void> {
   nodeProc = spawn(process.execPath, [join(process.cwd(), 'tools/regtest-node-daemon.ts'), '--port', String(NODE_PORT)], { stdio: 'ignore' });
-  relayProc = spawn(`${ROOT}\\apps\\relay-go\\relay-go.exe`, ['-addr', `127.0.0.1:${RELAY_PORT}`], { stdio: 'ignore' });
   const node = new RealBsvNode('127.0.0.1', NODE_PORT);
-  const relayUrl = `http://127.0.0.1:${RELAY_PORT}`;
   const tableId = 'live-settle';
+  const N = 3;
+  const mesh = await p2pMesh(N); // N peer nodes — no relay server
   try {
     const dl = Date.now() + 30000;
     while (!(await node.ping().catch(() => false))) { if (Date.now() > dl) throw new Error('node down'); await new Promise((r) => setTimeout(r, 400)); }
-    while (!(await new RelayClient(relayUrl).health().catch(() => false))) { if (Date.now() > dl) throw new Error('relay down'); await new Promise((r) => setTimeout(r, 300)); }
-    await new RelayClient(relayUrl).createTable(tableId, 'live-settle'); // the relay channel must exist
 
-    const N = 3;
     const players = Array.from({ length: N }, () => genKeyPair());
     const funder = genKeyPair();
     const cb = await node.generateBlock(bytesToHex(funder.pubCompressed));
@@ -69,13 +64,13 @@ async function main(): Promise<void> {
     ];
     const settleTx: Tx = { version: 1, inputs: [{ prevTxid: fundingTxid, vout: 0, sequence: 0xffffffff }], outputs, nLockTime: 0 };
 
-    console.log('[onchain-live] 3 peers co-signing the settlement over the relay (each holds only its own key)…');
+    console.log('[onchain-live] 3 peers co-signing the settlement over the P2P mesh (each holds only its own key)…');
     const results = await Promise.all(
       players.map((k, i) =>
-        coSignSettlement({ relayUrl, tableId, idx: i, myKey: k, settleTx, fundingScript, potValue: pot, n: N, submit: i === 0, submitTx: (raw) => node.submitTx(raw) }),
+        coSignSettlement({ relay: mesh.transports[i]!, tableId, idx: i, myKey: k, settleTx, fundingScript, potValue: pot, n: N, submit: i === 0, submitTx: (raw) => node.submitTx(raw) }),
       ),
     );
-    for (let i = 0; i < N; i++) assert.equal(results[i]!.collected, N, `peer ${i} did not collect all ${N} sigs over the relay`);
+    for (let i = 0; i < N; i++) assert.equal(results[i]!.collected, N, `peer ${i} did not collect all ${N} sigs over the mesh`);
 
     await node.generateBlock(bytesToHex(funder.pubCompressed));
     assert.equal((await node.outpointStatus(fundingTxid, 0)).unspent, false, 'pot consumed by the co-signed settlement');
@@ -84,14 +79,14 @@ async function main(): Promise<void> {
     assert.equal(o0.unspent, true, 'seat 0 payout confirmed');
     assert.equal(o1.unspent, true, 'seat 1 payout confirmed');
     assert.equal(o0.value + o1.value, pot - FEE, 'split pot conserved on-chain');
-    console.log(`[onchain-live] settled on-chain: seat0=${o0.value} seat1=${o1.value} (sigs exchanged over the relay, N-of-N)`);
+    console.log(`[onchain-live] settled on-chain: seat0=${o0.value} seat1=${o1.value} (sigs exchanged peer-to-peer, N-of-N)`);
 
-    console.log('\n[onchain-live] PASS — live multi-party on-chain settlement: N peers co-signed over the socket; no party moved the pot alone.');
+    console.log('\n[onchain-live] PASS — live multi-party on-chain settlement: N peers co-signed over the P2P mesh; no party moved the pot alone, no relay server.');
   } finally {
     await node.shutdown();
     nodeProc?.kill();
-    relayProc?.kill();
+    mesh.close();
   }
 }
 
-main().then(() => process.exit(0), (e) => { console.error('[onchain-live] FAIL:', (e as Error).message); nodeProc?.kill(); relayProc?.kill(); process.exit(1); });
+main().then(() => process.exit(0), (e) => { console.error('[onchain-live] FAIL:', (e as Error).message); nodeProc?.kill(); process.exit(1); });

@@ -1,29 +1,30 @@
 /**
- * Bot daemon — a SIMULATED REMOTE PLAYER, run as its own process, that connects to a table over the
- * relay socket exactly like a human's client (core §8, D4). The bot is NOT in the main app and has
- * no in-process access to anyone else's state (that would be a cheat): it has its own identity +
- * entropy, joins the waiting room over the relay, and plays its seat by submitting actions over the
- * same networked protocol a human uses. Run two windows (app + bot, or two bots) to really test
- * multiplayer over the wire.
+ * Bot daemon — a SIMULATED REMOTE PLAYER, run as its own process, that joins a table PEER-TO-PEER
+ * exactly like a human's client (core §8, D4). The bot is NOT in the main app and has no in-process
+ * access to anyone else's state (that would be a cheat): it is its OWN P2P node with its own identity
+ * + entropy, dials a peer into the mesh, joins the waiting room over the gossip channel, and plays its
+ * seat by submitting actions over the same networked protocol a human uses. There is NO relay server.
+ * Run two windows (app + bot, or two bots) to really test multiplayer over the wire.
  *
- *   node tools/bot-daemon.ts --relay http://127.0.0.1:8091 [--table <id>] [--name alice] [--strategy passive|aggressive]
+ *   node tools/bot-daemon.ts --peer 127.0.0.1:9700 [--table <id>] [--name alice] [--strategy passive|aggressive]
  */
 
 import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import { createPublicKey, createPrivateKey } from 'node:crypto';
 import {
-  RelayClient,
   LobbyClient,
   InteractiveNetworkedTableClient,
   sessionAuthFromSeed,
   deriveSeatSeed,
   assertRealValueReady,
   perHandEntropy,
+  type RelayChannel,
   type ClientUpdate,
   type OpenTable,
   type SeatDrop,
 } from '@bsv-poker/app-services';
+import { P2PTransport } from '@bsv-poker/adapters/p2p-transport';
 import { OP, genKeyPair, signPreimage, compressedPub, fairPlayCommitment, fundingLocking, bondRevealOrForfeitLocking, type Script, type KeyPair } from '@bsv-poker/script-templates-ts';
 import { bytesToHex, sha256, hexToBytes, cardToString, type Action, type BranchBinding, type GameState, type LegalActions } from '@bsv-poker/protocol-types';
 import { RealBsvNode } from '@bsv-poker/adapters/real-node';
@@ -49,7 +50,8 @@ function arg(name: string, fallback?: string): string | undefined {
   return i >= 0 && i + 1 < process.argv.length ? process.argv[i + 1] : fallback;
 }
 
-const RELAY = arg('--relay', 'http://127.0.0.1:8091')!;
+const PEER = arg('--peer'); // host:port of a peer already in the mesh to dial (serverless rendezvous)
+const LISTEN_PORT = arg('--listen') ? Number(arg('--listen')) : 0; // this node's own listen port (0 = ephemeral)
 const NAME = arg('--name', `bot-${Math.random().toString(36).slice(2, 6)}`)!;
 const WANT_TABLE = arg('--table');
 const STRATEGY = arg('--strategy', 'passive')!;
@@ -151,12 +153,22 @@ async function findTable(lobby: LobbyClient): Promise<OpenTable> {
 }
 
 async function main(): Promise<void> {
-  const baseRelay = new RelayClient(RELAY);
+  // This bot IS its own P2P node: listen, then dial a peer already in the mesh (serverless rendezvous).
+  const baseRelay = new P2PTransport(LISTEN_PORT);
+  const peers = PEER ? [{ host: PEER.split(':')[0]!, port: Number(PEER.split(':')[1]) }] : [];
+  await baseRelay.start(peers);
+  if (PEER) {
+    const dl = Date.now() + 30000;
+    while (baseRelay.peerCount() < 1) {
+      if (Date.now() > dl) throw new Error(`could not connect to peer ${PEER}`);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
   // TEST-ONLY stall: swallow this bot's own deck-handshake REVEAL frames (t==='reveal'), so it commits
   // but never reveals — the survivors drop it and FORFEIT its bond (audit #19 forfeit demonstration).
   // Seating (t==='seat-reveal') is untouched, so the stalling bot still takes its seat.
-  const relay = STALL_REVEAL
-    ? ({
+  const relay: RelayChannel = STALL_REVEAL
+    ? {
         subscribe: (t: string, cb: (x: string) => void) => baseRelay.subscribe(t, cb),
         publish: async (t: string, bytes: Uint8Array) => {
           try {
@@ -164,7 +176,7 @@ async function main(): Promise<void> {
           } catch { /* not JSON — forward */ }
           return baseRelay.publish(t, bytes);
         },
-      } as unknown as RelayClient)
+      }
     : baseRelay;
   const lobby = new LobbyClient(baseRelay);
   const id = `${NAME}-${Math.random().toString(36).slice(2, 8)}`;
@@ -175,7 +187,7 @@ async function main(): Promise<void> {
   const walletKey = keyPairFromScalar(deriveSeatSeed(root, 'bsv-poker/wallet')); // same root → wallet key
   const pub = auth.pub; // seat identity = the key it signs envelopes with (rooted in the wallet)
 
-  log(`connecting to relay ${RELAY} as a remote player…`);
+  log(`joining the mesh${PEER ? ` via peer ${PEER}` : ""} as a remote player…`);
   const table = await findTable(lobby);
   log(`joining table ${table.id} (${table.meta.variant}, ${table.meta.maxSeats} seats) over the socket`);
 
@@ -253,7 +265,7 @@ async function main(): Promise<void> {
     const n = s.seats.length;
     const ocKey = walletKey; // the on-chain key IS the wallet key derived from this player's root
     log('on-chain mode: exchanging on-chain keys over the relay…');
-    const pubHexes = await gatherByIndex(RELAY, table.id, 'oc-pub', s.mySeat, bytesToHex(ocKey.pubCompressed), n);
+    const pubHexes = await gatherByIndex(baseRelay, table.id, 'oc-pub', s.mySeat, bytesToHex(ocKey.pubCompressed), n);
     const pubs = pubHexes.map((h) => Uint8Array.from(Buffer.from(h, 'hex')));
     const fundingScript = fundingLocking(BIND, pubs);
     const escrow = n * s.seats[0]!.stack * SCALE;
@@ -270,9 +282,9 @@ async function main(): Promise<void> {
       await node.generateBlock(bytesToHex(funder.pubCompressed));
       fundingTxid = txidWire(fundingTx, [fs]);
       log(`funded escrow ${escrow} sats (${fundingTxid.slice(0, 12)}…), broadcasting outpoint`);
-      broadcastValue(RELAY, table.id, 'escrow', fundingTxid);
+      broadcastValue(baseRelay, table.id, 'escrow', fundingTxid);
     } else {
-      fundingTxid = await awaitValue(RELAY, table.id, 'escrow');
+      fundingTxid = await awaitValue(baseRelay, table.id, 'escrow');
       log(`received escrow outpoint ${fundingTxid.slice(0, 12)}…`);
     }
 
@@ -292,7 +304,7 @@ async function main(): Promise<void> {
     await node.generateBlock(bytesToHex(bondFunder.pubCompressed));
     const myBondTxid = txidWire(bondTx, [bfs]);
     log(`posted reveal bond ${BOND} sats (${myBondTxid.slice(0, 12)}…)`);
-    const bondInfos = await gatherByIndex(RELAY, table.id, 'bond', s.mySeat, `${myBondTxid}:0:${bytesToHex(c0)}`, n);
+    const bondInfos = await gatherByIndex(baseRelay, table.id, 'bond', s.mySeat, `${myBondTxid}:0:${bytesToHex(c0)}`, n);
     if (s.mySeat === 0) {
       const bonds = new Map<number, SeatBond>();
       bondInfos.forEach((info, seat) => {
@@ -333,7 +345,7 @@ async function main(): Promise<void> {
     const settleTx: Tx = { version: 1, inputs: [{ prevTxid: fundingTxid, vout: 0, sequence: 0xffffffff }], outputs, nLockTime: 0 };
 
     log('co-signing the on-chain settlement over the relay…');
-    const res = await coSignSettlement({ relayUrl: RELAY, tableId: table.id, idx: s.mySeat, myKey: ocKey, settleTx, fundingScript, potValue: escrow, n, submit: s.mySeat === 0, submitTx: (raw) => node.submitTx(raw) });
+    const res = await coSignSettlement({ relay: baseRelay, tableId: table.id, idx: s.mySeat, myKey: ocKey, settleTx, fundingScript, potValue: escrow, n, submit: s.mySeat === 0, submitTx: (raw) => node.submitTx(raw) });
     if (s.mySeat === 0 && res.txid) {
       await node.generateBlock(bytesToHex(genKeyPair().pubCompressed));
       const o0 = await node.outpointStatus(res.txid, 0);
