@@ -37,6 +37,30 @@ keys and randomness are scoped to a session/game and a hand — never reused acr
    table/hand/seat/state it was produced for — a key cannot be replayed onto another game, hand, or
    state (and a peer action is additionally bound to the agreed prior state, audit #12).
 
+## The signed one-game manifest (binds seat keys to ONE gameId)
+
+The scoping above is enforced per value; the **cryptographic** one-game binding is the signed
+manifest in `packages/app-services/src/game-manifest.ts` (tested in
+`packages/app-services/test/game-manifest.test.ts`, and enforced by
+`CanonicalIndexer.registerGame`):
+
+- **Content-addressed `gameId`.** `gameId = SHA-256(canonical body)`, where the body fixes the
+  ruleset, stakes, tableId, the exact `seat → seatPub` set, and a fresh 32-byte nonce. The gameId
+  therefore COMMITS to the precise set of seat keys — a seat key cannot be moved into a different
+  game (different seat set / rules / nonce) without changing the gameId. **A key is valid for one
+  game only, by construction.**
+- **Every seat consents.** Each seat signs the gameId with its own Ed25519 session key
+  (`buildManifest`), so the manifest is a co-signed attestation "this is my seat key, for this one
+  game". `verifyManifest` is TOTAL/fail-closed: any structural defect, gameId mismatch, duplicate
+  key, or missing/invalid signature ⇒ rejected, never thrown.
+- **Cross-game reuse is rejected.** `verifyNoCrossGameReuse(manifest, priorSeatPubs)` rejects any
+  manifest whose seat keys appeared in a prior game; `assertFreshGameId` rejects a replayed gameId.
+  The `CanonicalIndexer` accumulates both across every game it serves, so a key that already served
+  a game can never register a second one.
+- **Envelopes bind the gameId.** `gameBoundEnvelopeMessage(gameId, tableId, e)` folds the gameId
+  into the per-envelope signed message, so an action/commit/reveal signed for game A cannot be
+  replayed in game B — even at the same table id.
+
 ## What is NOT here (by design)
 
 - **No long-lived identity key in the browser path.** The browser play-money client uses only the

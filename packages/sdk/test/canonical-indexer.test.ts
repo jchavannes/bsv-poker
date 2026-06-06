@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
 import { CanonicalIndexer } from '../src/canonical-indexer.ts';
 import { createGameModule, universalBot, offlineRuleset, deckFromEntropies, type TxRecord } from '@bsv-poker/app-services';
+import { sessionAuthFromSeed, deriveSeatSeed, buildManifest, MANIFEST_VERSION, type GameManifest, type GameManifestBody } from '@bsv-poker/app-services';
 import { p2pkhScript } from '@bsv-poker/adapters/regtest-node';
 import { sha256, bytesToHex } from '@bsv-poker/protocol-types';
 import { genKeyPair, signPreimage, type Script } from '@bsv-poker/script-templates-ts';
@@ -102,6 +103,41 @@ test('ingestOnChain performs FULL production validation via the node — bad sig
   const r = await ci.ingestOnChain(bytesToHex(serializeTxWire(bad, [bss])), node);
   assert.equal(r.validated, false, 'a bad signature must be rejected by full node validation');
   assert.equal(ci.isUnspent(fundTxid, 0), true, 'the rejected spend did not consume the funding output');
+});
+
+test('registerGame enforces the ONE-GAME key lifecycle: a manifest registers once, keys never reused (audit #27)', async () => {
+  const ci = new CanonicalIndexer();
+  async function game(nonce: string, seeds: number[]): Promise<GameManifest> {
+    const auths = await Promise.all(seeds.map((n) => sessionAuthFromSeed(deriveSeatSeed(new Uint8Array(32).fill(n)))));
+    const body: GameManifestBody = {
+      v: MANIFEST_VERSION, ruleset: 'holdem', stakes: { sb: 1, bb: 2 }, tableId: 't',
+      seats: auths.map((a, i) => ({ seat: i, seatPub: a.pub })), nonce,
+    };
+    return buildManifest(body, auths);
+  }
+  // game 1: fresh keys → registers
+  const g1 = await game('ab'.repeat(32), [1, 2]);
+  const r1 = await ci.registerGame(g1);
+  assert.equal(r1.ok, true, r1.reason);
+  assert.equal(r1.gameId, g1.gameId);
+  assert.equal(ci.isSeatKeyUsed(g1.seats[0]!.seatPub), true);
+
+  // re-registering the SAME manifest is rejected (replayed gameId)
+  assert.equal((await ci.registerGame(g1)).ok, false);
+
+  // game 2 that REUSES seat 1's key (seed 1) is rejected — a key serves at most one game
+  const g2 = await game('cd'.repeat(32), [1, 3]);
+  const r2 = await ci.registerGame(g2);
+  assert.equal(r2.ok, false);
+  assert.match(r2.reason, /prior game|ONE game/);
+
+  // game 3 with entirely fresh keys registers cleanly
+  const g3 = await game('ef'.repeat(32), [5, 6]);
+  assert.equal((await ci.registerGame(g3)).ok, true);
+
+  // a structurally invalid manifest (tampered gameId) is rejected
+  const forged = { ...g3, stakes: { sb: 9, bb: 9 } } as GameManifest;
+  assert.equal((await ci.registerGame(forged)).ok, false);
 });
 
 test('canonicalView returns BOTH the legality verdict and the validated UTXO set (audit #24+#25)', () => {

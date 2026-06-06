@@ -15,12 +15,45 @@
  * independently from the same inputs (P2) and matches what the node accepted.
  */
 import { validateHandLegality, rebuildHand, type LegalityVerdict, type TxRecord } from '@bsv-poker/app-services';
+import { verifyManifest, verifyNoCrossGameReuse, assertFreshGameId, manifestSeatPubs, type GameManifest } from '@bsv-poker/app-services';
 import { TransactionGraph, type AddResult, type GraphOutput } from '@bsv-poker/adapters/transaction-graph';
 import type { Ruleset, GameState } from '@bsv-poker/protocol-types';
 import type { TablePlayer } from '@bsv-poker/app-services';
 
+export interface GameRegistration { readonly ok: boolean; readonly reason: string; readonly gameId?: string }
+
 export class CanonicalIndexer {
   private readonly graph = new TransactionGraph();
+  // one-game key lifecycle (audit #27): the seat keys + gameIds this indexer has ever
+  // admitted, so a key may serve at most ONE game and a gameId is never replayed.
+  private readonly usedSeatPubs = new Set<string>();
+  private readonly seenGameIds = new Set<string>();
+
+  // ---- one-game key lifecycle manifest (#27) ----
+
+  /**
+   * Register a game from its SIGNED one-game manifest. The seats for a game are admitted
+   * ONLY via a manifest that (a) verifies (content-addressed gameId + every seat's
+   * signature), (b) reuses NO seat key from a prior game, and (c) has a fresh, non-replayed
+   * gameId. On success the seat keys + gameId are recorded so the one-game lifecycle is
+   * enforced across every game this indexer serves — a seat key is bound to exactly one game.
+   */
+  async registerGame(manifest: GameManifest): Promise<GameRegistration> {
+    const v = await verifyManifest(manifest);
+    if (!v.ok) return { ok: false, reason: `manifest invalid: ${v.reason}` };
+    const reuse = verifyNoCrossGameReuse(manifest, this.usedSeatPubs);
+    if (!reuse.ok) return { ok: false, reason: reuse.reason };
+    const fresh = assertFreshGameId(manifest, this.seenGameIds);
+    if (!fresh.ok) return { ok: false, reason: fresh.reason };
+    for (const pub of manifestSeatPubs(manifest)) this.usedSeatPubs.add(pub);
+    this.seenGameIds.add(manifest.gameId);
+    return { ok: true, reason: v.reason, gameId: manifest.gameId };
+  }
+
+  /** True iff a seat key has already served a game (so it must never be reused). */
+  isSeatKeyUsed(seatPub: string): boolean {
+    return this.usedSeatPubs.has(seatPub);
+  }
 
   // ---- canonical transaction graph (#25) ----
 
