@@ -118,6 +118,7 @@ const stages: Stage[] = [
   { name: 'validating-peer e2e (authenticate + legality, no server)', cmd: 'node', args: ['tools/validating-indexer-e2e.ts'] },
   { name: 'browser transport over own local node e2e (no server)', cmd: 'node', args: ['tools/browser-transport-e2e.ts'] },
   { name: 'on-chain nLockTime fund recovery e2e (in-tree node)', cmd: 'node', args: ['tools/onchain-nlocktime-recovery-e2e.ts'] },
+  { name: 'ONE model for regtest+testnet+mainnet e2e (byte-identical, in-tree node)', cmd: 'node', args: ['tools/network-uniform-e2e.ts'] },
   { name: 'on-chain settlement e2e (peer-to-peer co-sign, in-tree node)', cmd: 'node', args: ['tools/bot-onchain-e2e.ts'] },
 ];
 

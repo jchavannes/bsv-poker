@@ -12,7 +12,10 @@
  * Amounts are integer satoshis (or play-money chips at 1:1) — never fractional (INV-BS-1).
  */
 
-export type WalletNetwork = 'play-regtest' | 'regtest' | 'mainnet-research';
+// Same model on every network (see network-gate `Network`): regtest/testnet move TEST coins via the
+// real on-chain backend (no real value); mainnet-research moves real funds behind the research flag.
+// Only `mainnet-research` is gated; the code path is otherwise identical for all networks.
+export type WalletNetwork = 'play-regtest' | 'regtest' | 'testnet' | 'mainnet-research';
 
 export type FundsEventKind = 'deposit' | 'withdraw' | 'buy-in' | 'cash-out';
 

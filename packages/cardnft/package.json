@@ -1,0 +1,17 @@
+{
+  "name": "@bsv-poker/cardnft",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@bsv-poker/script-templates-ts": "workspace:*",
+    "@bsv-poker/tx-builder": "workspace:*",
+    "@bsv-poker/crypto-mentalpoker": "workspace:*"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.ts\""
+  }
+}

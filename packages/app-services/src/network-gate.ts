@@ -1,11 +1,17 @@
 /**
- * Network-selection gate (core REQ-PROD-012; RT-02 F3). The platform is research/regtest by default;
- * mainnet is reachable ONLY behind an explicit, typed acknowledgement, and every selection surfaces
- * a banner the UI MUST display. This makes "mainnet behind an explicit flag" a tested code path, not
- * a convention.
+ * Network-selection gate (core REQ-PROD-012; RT-02 F3). The platform runs the SAME model on regtest,
+ * testnet, and real (mainnet) BSV — ONE code path; the network is only a configuration tag + which
+ * node you connect to, never a branch in the protocol/funding/recovery/settlement (BSV consensus —
+ * BIP-143/FORKID sighash, nLockTime finality, script rules — is identical across all three). The
+ * platform is research/regtest by default; mainnet (and ONLY mainnet) is reachable behind an explicit,
+ * typed acknowledgement because it is the one network with real funds at risk. Every selection
+ * surfaces a banner the UI MUST display. This makes the network selection a tested code path, not a
+ * convention.
  */
 
-export type Network = 'play-regtest' | 'regtest' | 'mainnet';
+/** Every supported BSV network. `play-regtest`/`regtest`/`testnet` carry no real value; `mainnet`
+ *  does. The MODEL is identical for all — only this tag + the node endpoint differ. */
+export type Network = 'play-regtest' | 'regtest' | 'testnet' | 'mainnet';
 
 export interface NetworkSelection {
   readonly network: Network;
@@ -48,10 +54,11 @@ export function selectNetwork(opts?: { network?: Network; mainnetAck?: string })
     }
     return { network: 'mainnet', banner: '⚠ MAINNET — REAL FUNDS AT RISK (research use only)', mainnetEnabled: true, realFunds: true };
   }
-  return {
-    network: requested,
-    banner: requested === 'regtest' ? '● REGTEST — test coins only, no real value' : '● PLAY-MONEY (regtest) — no real value',
-    mainnetEnabled: false,
-    realFunds: false,
-  };
+  const banner =
+    requested === 'testnet'
+      ? '● TESTNET — test coins only, no real value'
+      : requested === 'regtest'
+        ? '● REGTEST — test coins only, no real value'
+        : '● PLAY-MONEY (regtest) — no real value';
+  return { network: requested, banner, mainnetEnabled: false, realFunds: false };
 }

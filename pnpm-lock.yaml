@@ -78,6 +78,18 @@ importers:
         specifier: workspace:*
         version: link:../ui-core
 
+  packages/cardnft:
+    dependencies:
+      '@bsv-poker/crypto-mentalpoker':
+        specifier: workspace:*
+        version: link:../crypto-mentalpoker
+      '@bsv-poker/script-templates-ts':
+        specifier: workspace:*
+        version: link:../script-templates-ts
+      '@bsv-poker/tx-builder':
+        specifier: workspace:*
+        version: link:../tx-builder
+
   packages/crypto-mentalpoker:
     dependencies:
       '@bsv-poker/adapters':

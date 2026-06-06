@@ -60,6 +60,30 @@ test('a play/regtest config is ready without real-value invariants (no real fund
   assert.doesNotThrow(() => assertRealValueReady(play));
 });
 
+test('SAME model on testnet: ready without real-value hardening (test coins), no real funds', () => {
+  // testnet is a real public network but carries TEST coins — like regtest, only the network selection
+  // is required to be ready; the heavy mainnet invariants are not (no real value at risk).
+  const testnet: RealValueConfig = { network: 'testnet', signingRequired: false, sighash: 'simplified', custody: 'fake', relaySecretConfigured: false };
+  const r = evaluateRealValueReadiness(testnet);
+  assert.equal(r.realFunds, false, 'testnet puts no real funds at risk');
+  assert.equal(r.ready, true, 'a valid testnet selection is ready (no real-value invariants required)');
+  assert.doesNotThrow(() => assertRealValueReady(testnet));
+});
+
+test('ONE model, three networks: regtest + testnet ready (test coins); mainnet ready ONLY fully hardened + acked', () => {
+  // regtest and testnet: the same lightweight readiness (just a valid network selection).
+  for (const network of ['regtest', 'testnet'] as const) {
+    const cfg: RealValueConfig = { network, signingRequired: false, sighash: 'simplified', custody: 'fake', relaySecretConfigured: false };
+    const r = evaluateRealValueReadiness(cfg);
+    assert.equal(r.realFunds, false, `${network} is test coins`);
+    assert.equal(r.ready, true, `${network} ready without real-value hardening`);
+  }
+  // mainnet: the SAME config knobs, but now EVERY invariant is required (and the ack).
+  assert.equal(evaluateRealValueReadiness(READY).ready, true, 'fully-hardened+acked mainnet is ready');
+  const weakMainnet: RealValueConfig = { network: 'mainnet', mainnetAck: MAINNET_ACK_TOKEN, signingRequired: false, sighash: 'simplified', custody: 'fake', relaySecretConfigured: false };
+  assert.equal(evaluateRealValueReadiness(weakMainnet).ready, false, 'mainnet with real funds demands full hardening — the only network that does');
+});
+
 test('requesting mainnet without the ack is never real-funds and never ready', () => {
   // Built WITHOUT mainnetAck (omitted, not undefined — exactOptionalPropertyTypes).
   const noAck: RealValueConfig = { network: 'mainnet', signingRequired: true, sighash: 'bip143-forkid', custody: 'software', relaySecretConfigured: true, bindHost: '127.0.0.1' };

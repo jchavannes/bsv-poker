@@ -33,6 +33,7 @@
     "onchain-poker-e2e": "node tools/onchain-poker-e2e.ts",
     "onchain-recovery-e2e": "node tools/onchain-recovery-e2e.ts",
     "onchain-nlocktime-recovery-e2e": "node tools/onchain-nlocktime-recovery-e2e.ts",
+    "network-uniform-e2e": "node tools/network-uniform-e2e.ts",
     "onchain-forfeit-e2e": "node tools/onchain-forfeit-e2e.ts",
     "onchain-live-forfeit-e2e": "node tools/onchain-live-forfeit-e2e.ts",
     "txgraph-e2e": "node tools/txgraph-e2e.ts",

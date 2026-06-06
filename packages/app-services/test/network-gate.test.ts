@@ -16,6 +16,25 @@ test('regtest surfaces a test-coins banner and never enables real funds', () => 
   assert.match(s.banner, /regtest/i);
 });
 
+test('testnet is a first-class network: test-coins banner, no real funds, NO ack required', () => {
+  const s = selectNetwork({ network: 'testnet' });
+  assert.equal(s.network, 'testnet');
+  assert.equal(s.mainnetEnabled, false);
+  assert.equal(s.realFunds, false);
+  assert.match(s.banner, /testnet/i);
+});
+
+test('SAME model across networks: regtest + testnet behave identically (test coins, no ack, no real funds)', () => {
+  for (const network of ['regtest', 'testnet'] as const) {
+    const s = selectNetwork({ network });
+    assert.equal(s.realFunds, false, `${network} must not risk real funds`);
+    assert.equal(s.mainnetEnabled, false, `${network} must not enable mainnet`);
+    assert.match(s.banner, /test coins only/i, `${network} surfaces a test-coins banner`);
+  }
+  // Only mainnet differs — and only by the gate (ack), never by the model.
+  assert.equal(selectNetwork({ network: 'mainnet', mainnetAck: MAINNET_ACK_TOKEN }).realFunds, true);
+});
+
 test('mainnet is REFUSED without the explicit acknowledgement token', () => {
   assert.throws(() => selectNetwork({ network: 'mainnet' }), /research\/regtest only/);
   assert.throws(() => selectNetwork({ network: 'mainnet', mainnetAck: 'yes please' }), /acknowledgement token/);
