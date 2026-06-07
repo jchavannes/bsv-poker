@@ -43,6 +43,61 @@ public static class Chain
     /// <summary>Display txid (big-endian hex of sha256d of the serialized tx).</summary>
     public static string Txid(Tx tx) { var h = Hashes.Sha256d(Serialize(tx)); Array.Reverse(h); return Convert.ToHexString(h).ToLowerInvariant(); }
 
+    // ---- decoding helpers (strict, bounds-checked: hostile wire data must never produce a bogus tx) ----
+    private static uint RdU32(byte[] b, ref int o) { Need(b, o, 4); uint v = (uint)(b[o] | b[o + 1] << 8 | b[o + 2] << 16 | b[o + 3] << 24); o += 4; return v; }
+    private static long RdU64(byte[] b, ref int o) { Need(b, o, 8); long v = 0; for (int i = 0; i < 8; i++) v |= (long)b[o + i] << (8 * i); o += 8; return v; }
+    private static ulong RdVarInt(byte[] b, ref int o)
+    {
+        Need(b, o, 1); byte p = b[o++];
+        if (p < 0xfd) return p;
+        if (p == 0xfd) { Need(b, o, 2); ulong v = (ulong)(b[o] | b[o + 1] << 8); o += 2; return v; }
+        if (p == 0xfe) { return RdU32(b, ref o); }
+        Need(b, o, 8); ulong w = 0; for (int i = 0; i < 8; i++) w |= (ulong)b[o + i] << (8 * i); o += 8; return w;
+    }
+    private static void Need(byte[] b, int o, int n) { if (o < 0 || (long)o + n > b.Length) throw new ArgumentException("truncated transaction data"); }
+    private static byte[] RdBytes(byte[] b, ref int o, ulong n)
+    {
+        if (n > (ulong)int.MaxValue) throw new ArgumentException("script too large");
+        Need(b, o, (int)n); var r = b.AsSpan(o, (int)n).ToArray(); o += (int)n; return r;
+    }
+    private static string RdTxidLE(byte[] b, ref int o) { Need(b, o, 32); var a = b.AsSpan(o, 32).ToArray(); o += 32; Array.Reverse(a); return Convert.ToHexString(a).ToLowerInvariant(); } // internal→display
+
+    /// <summary>Parse one transaction from <paramref name="b"/> starting at <paramref name="o"/>, advancing it past the tx.</summary>
+    public static Tx Deserialize(byte[] b, ref int o)
+    {
+        uint version = RdU32(b, ref o);
+        ulong nIn = RdVarInt(b, ref o);
+        if (nIn > (ulong)int.MaxValue) throw new ArgumentException("absurd input count");
+        var ins = new List<TxIn>((int)Math.Min(nIn, 1024));
+        for (ulong i = 0; i < nIn; i++)
+        {
+            var prev = RdTxidLE(b, ref o);
+            uint vout = RdU32(b, ref o);
+            var script = RdBytes(b, ref o, RdVarInt(b, ref o));
+            uint seq = RdU32(b, ref o);
+            ins.Add(new TxIn(prev, vout, script, seq));
+        }
+        ulong nOut = RdVarInt(b, ref o);
+        if (nOut > (ulong)int.MaxValue) throw new ArgumentException("absurd output count");
+        var outs = new List<TxOut>((int)Math.Min(nOut, 1024));
+        for (ulong i = 0; i < nOut; i++)
+        {
+            long value = RdU64(b, ref o);
+            var script = RdBytes(b, ref o, RdVarInt(b, ref o));
+            outs.Add(new TxOut(value, script));
+        }
+        uint lockTime = RdU32(b, ref o);
+        return new Tx(version, ins, outs, lockTime);
+    }
+
+    /// <summary>Parse a single transaction that must consume the whole buffer (no trailing bytes).</summary>
+    public static Tx Deserialize(byte[] b)
+    {
+        int o = 0; var tx = Deserialize(b, ref o);
+        if (o != b.Length) throw new ArgumentException("trailing bytes after transaction");
+        return tx;
+    }
+
     /// <summary>P2PKH locking script: OP_DUP OP_HASH160 &lt;20&gt; OP_EQUALVERIFY OP_CHECKSIG.</summary>
     public static byte[] P2pkhLock(byte[] hash160) { var b = new List<byte> { 0x76, 0xa9, 0x14 }; b.AddRange(hash160); b.Add(0x88); b.Add(0xac); return b.ToArray(); }
     public static byte[] P2pkhLockForPub(byte[] pub33) => P2pkhLock(Hashes.Hash160(pub33));
