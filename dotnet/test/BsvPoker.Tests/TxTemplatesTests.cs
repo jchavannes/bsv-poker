@@ -47,6 +47,26 @@ public static class TxTemplatesTests
             }
         });
 
+        T.Run("typed outputs use MINIMAL pushes (consensus MINIMALDATA) and still round-trip", () =>
+        {
+            // single bytes 1..16 must encode as OP_1..OP_16, empty as OP_0, 0x81 as OP_1NEGATE — else the
+            // network rejects the spend with "Data push larger than necessary" (proven on the regtest node).
+            var fields = new byte[][] { new byte[] { 2 }, Array.Empty<byte>(), new byte[] { 0x81 }, new byte[] { 16 } };
+            var script = TxTemplates.BuildOutput(TxKind.TableGenesis, fields, owner);
+            T.True(Array.IndexOf(script, (byte)0x52) >= 0, "single byte 2 → OP_2 (0x52), not a length-prefixed push");
+            T.True(Array.IndexOf(script, (byte)0x60) >= 0, "single byte 16 → OP_16 (0x60)");
+            T.True(Array.IndexOf(script, (byte)0x4f) >= 0, "0x81 → OP_1NEGATE (0x4f)");
+            // no length-prefixed 1-byte push of a small value (0x01 0x02) appears
+            for (int i = 0; i + 1 < script.Length; i++)
+                T.False(script[i] == 0x01 && script[i + 1] >= 1 && script[i + 1] <= 16, "no non-minimal 1-byte push of 1..16");
+            var parsed = TxTemplates.Parse(script);
+            T.True(parsed != null && parsed.Fields.Length == 4, "still parses");
+            T.Eq(T.Hex(parsed!.Fields[0]), "02", "OP_2 decodes to [0x02]");
+            T.Eq(parsed.Fields[1].Length, 0, "OP_0 decodes to empty");
+            T.Eq(T.Hex(parsed.Fields[2]), "81", "OP_1NEGATE decodes to [0x81]");
+            T.Eq(T.Hex(parsed.Fields[3]), "10", "OP_16 decodes to [0x10]");
+        });
+
         T.Run("wrong field count is rejected (the schema is enforced, no assumptions)", () =>
         {
             T.Throws(() => TxTemplates.BuildOutput(TxKind.ChatDirect, new[] { new byte[] { 1 } }, owner), "DM needs 3 fields");
