@@ -75,6 +75,8 @@ public partial class MainWindow : Window
     }
 
     private BsvPoker.Net.Bsv.BsvNode? _bsvNode;
+    private BsvPoker.Net.Bsv.HeaderStore? _headerStore;
+    private int _storedHeight;
 
     private void StartBsvNetwork()
     {
@@ -86,14 +88,38 @@ public partial class MainWindow : Window
         };
         try { _bsvNode?.Dispose(); } catch { }
         _bsvNode = new BsvPoker.Net.Bsv.BsvNode(BsvPoker.Net.Bsv.NetworkParams.For(net));
-        _ = _bsvNode.StartAsync();   // resolve DNS seeds and connect to live BSV peers
+        // persistent, per-profile, per-network header store: validated headers survive a restart and sync resumes
+        var storePath = System.IO.Path.Combine(_profile.Dir, $"headers-{net}.dat");
+        _headerStore = new BsvPoker.Net.Bsv.HeaderStore(storePath);
+        _storedHeight = _headerStore.Count;
+        var store = _headerStore;
+        _ = System.Threading.Tasks.Task.Run(async () =>
+        {
+            var node = _bsvNode;
+            await node.StartAsync();   // resolve DNS seeds and connect to live BSV peers
+            while (ReferenceEquals(_headerStore, store)) // run only while this store is the current network's store
+            {
+                try
+                {
+                    if (node.PeerCount > 0)
+                    {
+                        var (_, height) = await node.SyncHeadersToStoreAsync(store, maxBatches: 4);
+                        await Dispatcher.InvokeAsync(() => { if (ReferenceEquals(_headerStore, store)) { _storedHeight = height; UpdateNetInfo(); } });
+                    }
+                }
+                catch { }
+                await System.Threading.Tasks.Task.Delay(2000);
+            }
+        });
         UpdateNetInfo();
     }
 
     private void UpdateNetInfo()
     {
         var name = (NetworkBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "Mainnet";
-        var live = _bsvNode != null ? $" · {_bsvNode.PeerCount} BSV peers · height {_bsvNode.BestHeight}" : "";
+        var live = _bsvNode != null
+            ? $" · {_bsvNode.PeerCount} BSV peers · tip {_bsvNode.BestHeight} · validated {_storedHeight}"
+            : "";
         NetInfo.Text = $"   {name}{live} · peer-to-peer";
         Title = $"BSV Poker — {_profile.Name} — {name}";
     }
