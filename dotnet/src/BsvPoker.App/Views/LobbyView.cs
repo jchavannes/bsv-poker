@@ -11,20 +11,24 @@ namespace BsvPoker.App.Views;
 /// </summary>
 public sealed class LobbyView : UserControl
 {
-    public LobbyView(Action onPlay)
+    public LobbyView(Action onPlay, Action onPlayBot)
     {
         Background = new SolidColorBrush(Color.FromRgb(0x0D, 0x0D, 0x0D)); Foreground = Brushes.White;
         var root = new StackPanel { Margin = new Thickness(24) };
-        root.Children.Add(new TextBlock { Text = "Lobby — on-chain only", FontSize = 22, FontWeight = FontWeights.Bold, Foreground = Brushes.White });
+        root.Children.Add(new TextBlock { Text = "Lobby — on-chain, peer-to-peer", FontSize = 22, FontWeight = FontWeights.Bold, Foreground = Brushes.White });
         root.Children.Add(new TextBlock
         {
-            Text = "Every table, hand, and message is a Bitcoin transaction. There is no off-chain lobby gossip. " +
-                   "Fund your wallet with real BSV (Wallet tab), then start an on-chain hand.",
+            Text = "Every table, hand, and message is a Bitcoin transaction; players are found on the poker gossip " +
+                   "overlay. Fund your wallet with real BSV (Wallet tab), then play a discovered peer — or open a " +
+                   "bot (a separate automated player you fund and play against).",
             Foreground = Brushes.Gray, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 10, 0, 14), MaxWidth = 640, HorizontalAlignment = HorizontalAlignment.Left
         });
-        var play = new Button { Content = "Play an on-chain hand", Padding = new Thickness(14, 10, 14, 10), Background = new SolidColorBrush(Color.FromRgb(0x3A, 0x6E, 0x2E)), Foreground = Brushes.White, BorderThickness = new Thickness(0), HorizontalAlignment = HorizontalAlignment.Left };
+        var play = new Button { Content = "Play an on-chain hand", Padding = new Thickness(14, 10, 14, 10), Margin = new Thickness(0, 0, 0, 10), Background = new SolidColorBrush(Color.FromRgb(0x3A, 0x6E, 0x2E)), Foreground = Brushes.White, BorderThickness = new Thickness(0), HorizontalAlignment = HorizontalAlignment.Left };
         play.Click += (_, _) => onPlay();
         root.Children.Add(play);
+        var bot = new Button { Content = "Open a bot (separate automated player)", Padding = new Thickness(14, 10, 14, 10), Background = new SolidColorBrush(Color.FromRgb(0x6E, 0x2E, 0x3A)), Foreground = Brushes.White, BorderThickness = new Thickness(0), HorizontalAlignment = HorizontalAlignment.Left };
+        bot.Click += (_, _) => onPlayBot();
+        root.Children.Add(bot);
         Content = new ScrollViewer { Content = root };
     }
 }
