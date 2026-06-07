@@ -22,6 +22,16 @@ public static class OnChainHand
         return Chain.ApplyMultisigScriptSig(tx, 0, sigA, sigB);
     }
 
+    /// <summary>Cooperative settlement paying MULTIPLE shares (e.g. a hi-lo split): both players sign.</summary>
+    public static Chain.Tx SettleMany(string escrowTxid, uint vout, long escrowValue,
+        IReadOnlyList<(byte[] Pub, long Amount)> payouts, byte[] privA, byte[] pubA, byte[] privB, byte[] pubB)
+    {
+        var tx = Chain.BuildSplitSettlement(escrowTxid, vout, payouts);
+        var sigA = Chain.SignMultisig(tx, 0, pubA, pubB, escrowValue, privA);
+        var sigB = Chain.SignMultisig(tx, 0, pubA, pubB, escrowValue, privB);
+        return Chain.ApplyMultisigScriptSig(tx, 0, sigA, sigB);
+    }
+
     /// <summary>The pre-signed unilateral recovery: refunds each player's stake after lockHeight (both co-sign).</summary>
     public static Chain.Tx Recover(string escrowTxid, uint vout, byte[] pubA, long stakeA, byte[] pubB, long stakeB,
         long fee, uint lockHeight, byte[] privA, byte[] privB)

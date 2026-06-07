@@ -261,6 +261,19 @@ public static class Chain
     }
 
     /// <summary>
+    /// A cooperative settlement that pays MULTIPLE outputs from the escrow (e.g. a hi-lo split pot pays the
+    /// high winner and the low winner). Zero-value shares are dropped. The fee is the difference between the
+    /// escrow value and the sum of the outputs. Both peers sign it (2-of-2), exactly like the single-winner case.
+    /// </summary>
+    public static Tx BuildSplitSettlement(string escrowTxid, uint vout, IReadOnlyList<(byte[] Pub, long Amount)> payouts)
+    {
+        var outs = payouts.Where(p => p.Amount > 0).Select(p => new TxOut(p.Amount, P2pkhLockForPub(p.Pub))).ToList();
+        if (outs.Count == 0) throw new ArgumentException("no positive payouts");
+        var ins = new List<TxIn> { new(escrowTxid, vout, Array.Empty<byte>(), 0xffffffff) };
+        return new Tx(2, ins, outs, 0);
+    }
+
+    /// <summary>
     /// The pre-signed unilateral RECOVERY for a 2-of-2 escrow: refunds each funder their stake after
     /// <paramref name="lockHeight"/> (non-final sequence so the locktime binds). Both peers co-sign it
     /// BEFORE funding, so neither can strand the other's money.
