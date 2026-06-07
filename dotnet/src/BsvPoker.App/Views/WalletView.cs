@@ -488,9 +488,11 @@ public sealed class WalletView : UserControl
     private void Load()
     {
         try { if (File.Exists(_path)) _w = JsonSerializer.Deserialize<File_>(File.ReadAllText(_path)) ?? new File_(); } catch { _w = new File_(); }
-        // NO FAKE COINS: on load, keep ONLY real SPV-confirmed unspent coins. Anything not confirmed on-chain
-        // (old/optimistic/local state) is dropped — the balance is rebuilt from the chain, never invented.
+        // NO FAKE COINS / NO FAKE HISTORY: keep ONLY real SPV-confirmed unspent coins, and discard any stale
+        // free-form history (history is now DERIVED from real coins, never a stored log). Balance + history
+        // are rebuilt from real on-chain state only — nothing is ever invented or carried over fabricated.
         _w.Utxos = _w.Utxos.Where(u => u.Confirmed && !u.Spent).ToList();
+        _w.History.Clear();
         if (WalletExtras.IsEncryptedSeed(_w.Seed))
         {
             _locked = true;            // encrypted on disk — must be unlocked with the password before use
@@ -574,8 +576,21 @@ public sealed class WalletView : UserControl
         win.ShowDialog();
     }
 
-    private void AppendTx(string type, long amount, string memo)
-        => _w.History.Add(new Tx { Time = DateTime.UtcNow.ToString("u"), Type = type, Amount = amount, Balance = Balance, Memo = memo });
+    // History is DERIVED from real SPV-confirmed coins (see DerivedHistory) — there is NO free-form log that
+    // could record amounts/events that never happened. This is intentionally a no-op: nothing fake is stored.
+    private void AppendTx(string type, long amount, string memo) { }
+
+    /// <summary>The wallet history, derived ONLY from real SPV-confirmed coins held — never invented.</summary>
+    private List<Tx> DerivedHistory()
+    {
+        long run = 0; var rows = new List<Tx>();
+        foreach (var u in _w.Utxos.Where(u => u.Confirmed && !u.Spent).OrderBy(u => u.Txid))
+        {
+            run += u.Value;
+            rows.Add(new Tx { Time = "on-chain", Type = "received", Amount = u.Value, Balance = run, Memo = $"{u.Txid[..Math.Min(12, u.Txid.Length)]}…:{u.Vout} (SPV-verified)" });
+        }
+        return rows;
+    }
 
     private void Save()
     {
@@ -597,12 +612,12 @@ public sealed class WalletView : UserControl
         {
             _bal.Text = "🔒 locked";
             _recv.Text = "Wallet is encrypted — press “Unlock…” to enter your password.";
-            _history.ItemsSource = _w.History.AsEnumerable().Reverse().ToList();
+            _history.ItemsSource = DerivedHistory();
             return;
         }
         _bal.Text = Balance.ToString("N0") + " sat" + (Pending > 0 ? $"   (+{Pending:N0} pending)" : "");
         _recv.Text = ReceiveAddress() + $"   (#{_w.RecvIndex})";
-        _history.ItemsSource = _w.History.AsEnumerable().Reverse().ToList();
+        _history.ItemsSource = DerivedHistory();
         RefreshCards();
     }
 
