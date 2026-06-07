@@ -30,6 +30,7 @@ ShuffleProofTests.All();
 HandTranscriptTests.All();
 SeatOrderTests.All();
 VerifiedHandTests.All();
+LiveDealTests.All();
 BsvProtocolTests.All();
 BsvHeadersTests.All();
 HeaderStoreTests.All();

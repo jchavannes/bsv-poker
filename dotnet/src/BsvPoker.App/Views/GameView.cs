@@ -1,108 +1,60 @@
-using System.Security.Cryptography;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
-using BsvPoker.App.Controls;
 using BsvPoker.Core;
 
 namespace BsvPoker.App.Views;
 
 /// <summary>
-/// The poker table. Play is ONLY a real on-chain hand. With no funds there is NOTHING here — no cards, no
-/// felt, no table — because there is no game until you fund a real pot. Pressing "Play on-chain hand" funds
-/// a real 2-of-2 pot escrow from your wallet and emits the whole hand as Bitcoin transactions; the dealt
-/// board (recorded on-chain by the hand's transactions) is then shown. No play money, no off-chain game,
-/// no free cards.
+/// The poker table. There is NO local/bot deck and NO play money: a fair deal requires a real opponent's
+/// entropy, so a hand is only ever a genuine two-party on-chain mental-poker deal against a discovered peer
+/// (every message a Bitcoin transaction). With no funds or no opponent there is nothing here.
 /// </summary>
 public sealed class GameView : UserControl
 {
-    private readonly Func<IReadOnlyList<Card>, long, string>? _onChainSettle;
-    private readonly Func<long, bool>? _canFund;
-    private const long OnChainStake = 20_000; // real-sat stake for one on-chain hand
-
-    private readonly StackPanel _content = new() { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(24) };
-    private readonly Button _play = Mk("Play on-chain hand", "#3A6E2E");
-    private readonly Button _leave = Mk("Leave table", "#555555");
+    private readonly Func<string>? _playHand;
+    private readonly TextBlock _msg = new() { Foreground = Brushes.White, FontSize = 16, TextWrapping = TextWrapping.Wrap, MaxWidth = 720, TextAlignment = TextAlignment.Center };
 
     public event Action? OnLeaveTable;
 
-    public GameView(byte[] priv, byte[] pub, CardVault vault, Action onCardsChanged,
-        Func<IReadOnlyList<Card>, long, string>? onChainSettle = null, Func<long, bool>? canFund = null)
+    public GameView(byte[] priv, byte[] pub, CardVault vault, Action onCardsChanged, Func<string>? playHand = null)
     {
-        _onChainSettle = onChainSettle; _canFund = canFund;
+        _playHand = playHand;
         Background = new SolidColorBrush(Color.FromRgb(0x0D, 0x0D, 0x0D)); Foreground = Brushes.White;
 
-        var bar = new WrapPanel { HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(10) };
-        _play.Click += (_, _) => PlayOnChain();
-        _leave.Click += (_, _) => { OnLeaveTable?.Invoke(); ShowMessage("You left the table. Your funds are yours."); };
-        bar.Children.Add(_play); bar.Children.Add(_leave);
+        var felt = new Border { Margin = new Thickness(16), CornerRadius = new CornerRadius(160) };
+        felt.Background = new RadialGradientBrush(Color.FromRgb(0x1F, 0x7A, 0x43), Color.FromRgb(0x0B, 0x4A, 0x28));
+        var inner = new Border { CornerRadius = new CornerRadius(150), BorderBrush = new SolidColorBrush(Color.FromRgb(0xA9, 0x81, 0x2B)), BorderThickness = new Thickness(6), Margin = new Thickness(10) };
+        var col = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(24) };
+        col.Children.Add(new TextBlock { Text = "On-chain table — real BSV, real opponent only", FontWeight = FontWeights.Bold, FontSize = 18, Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 0, 0, 10) });
+        col.Children.Add(_msg);
+        inner.Child = col; felt.Child = inner;
+
+        var play = Mk("Play on-chain hand", "#3A6E2E"); play.Click += (_, _) => ShowMessage(_playHand?.Invoke() ?? "On-chain play is unavailable.");
+        var leave = Mk("Leave table", "#555555"); leave.Click += (_, _) => { OnLeaveTable?.Invoke(); ShowMessage("You left the table. Your funds are yours."); };
+        var bar = new WrapPanel { HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(10), Children = { play, leave } };
 
         var root = new Grid();
         root.RowDefinitions.Add(new RowDefinition());
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        var host = new ScrollViewer { Content = _content };
-        Grid.SetRow(host, 0); root.Children.Add(host);
+        Grid.SetRow(felt, 0); root.Children.Add(felt);
         var barHost = new Border { Background = new SolidColorBrush(Color.FromRgb(0x16, 0x16, 0x16)), Padding = new Thickness(8) };
         barHost.Child = bar; Grid.SetRow(barHost, 1); root.Children.Add(barHost);
         Content = root;
-
-        ShowIdle();
+        ShowMessage("Press “Play on-chain hand”. A fair deal requires a real opponent (discovered automatically) and real BSV funds — there is no local or bot deck.");
     }
 
-    /// <summary>Lobby entry point: a hand is ONLY ever a real on-chain hand.</summary>
-    public void StartBot(Variant variant) => PlayOnChain();
+    /// <summary>Lobby entry point.</summary>
+    public void StartBot(Variant variant) => ShowMessage(_playHand?.Invoke() ?? "On-chain play is unavailable.");
 
-    private void PlayOnChain()
+    /// <summary>Update the table message from any thread (e.g. when a live deal completes).</summary>
+    public void ShowStatus(string s)
     {
-        if (_onChainSettle == null) { ShowMessage("On-chain play is unavailable (wallet/node not wired)."); return; }
-        if (_canFund != null && !_canFund(OnChainStake))
-        {
-            ShowMessage($"You have no funds. There is no game until you fund a real pot.\n\n" +
-                        $"Fund your wallet with at least {OnChainStake:N0} sat of real BSV (Wallet tab) and connect to the network. " +
-                        "Poker is ONLY played as on-chain Bitcoin transactions — there is no play-money mode and no cards until you fund.");
-            return;
-        }
-        var deck = ShuffledDeck(9);
-        var result = _onChainSettle(deck, OnChainStake);     // funds escrow + emits the whole on-chain hand tape
-        ShowHand(result, deck.Skip(4).Take(5).ToList());     // the board is recorded on-chain by the hand's txs
+        if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(new Action(() => ShowStatus(s))); return; }
+        ShowMessage(s);
     }
 
-    private void ShowIdle()
-    {
-        bool funded = _canFund == null || _canFund(OnChainStake);
-        _content.Children.Clear();
-        _content.Children.Add(new TextBlock
-        {
-            Text = funded
-                ? "Press “Play on-chain hand” to fund a real pot escrow and play a hand entirely as Bitcoin transactions."
-                : "No funds — no game. There are no cards and no table until you fund a real pot.\nFund your wallet with real BSV (Wallet tab), then play. Play that is not on-chain does not exist here.",
-            Foreground = funded ? Brushes.White : new SolidColorBrush(Color.FromRgb(0xFF, 0xC1, 0x07)),
-            FontSize = 16, TextWrapping = TextWrapping.Wrap, MaxWidth = 640, TextAlignment = TextAlignment.Center
-        });
-    }
-
-    private void ShowMessage(string msg)
-    {
-        _content.Children.Clear();
-        _content.Children.Add(new TextBlock { Text = msg, Foreground = Brushes.White, FontSize = 16, TextWrapping = TextWrapping.Wrap, MaxWidth = 640, TextAlignment = TextAlignment.Center });
-    }
-
-    private void ShowHand(string status, IReadOnlyList<Card> board)
-    {
-        _content.Children.Clear();
-        _content.Children.Add(new TextBlock { Text = "On-chain hand — every card and bet is a Bitcoin transaction", Foreground = Brushes.White, FontWeight = FontWeights.Bold, FontSize = 16, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 0, 0, 10) });
-        var row = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
-        foreach (var c in board) { var cv = new CardView(); cv.ShowCard(c); row.Children.Add(cv); }
-        _content.Children.Add(row);
-        _content.Children.Add(new TextBlock { Text = status, Foreground = new SolidColorBrush(Color.FromRgb(0xE8, 0xF5, 0xE9)), FontSize = 14, TextWrapping = TextWrapping.Wrap, MaxWidth = 700, TextAlignment = TextAlignment.Center, Margin = new Thickness(0, 12, 0, 0) });
-    }
-
-    private static IReadOnlyList<Card> ShuffledDeck(int n)
-    {
-        var a = Enumerable.Range(0, 52).ToArray();
-        for (int i = 51; i > 0; i--) { int j = RandomNumberGenerator.GetInt32(i + 1); (a[i], a[j]) = (a[j], a[i]); }
-        return a.Take(n).Select(Card.FromIndex).ToList();
-    }
+    private void ShowMessage(string s) => _msg.Text = s;
 
     private static Button Mk(string text, string hex)
     {

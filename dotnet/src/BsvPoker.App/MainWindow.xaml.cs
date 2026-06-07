@@ -1,6 +1,7 @@
 using System.Windows;
 using BsvPoker.App.Views;
 using BsvPoker.Core;
+using BsvPoker.Net;
 using BsvPoker.Net.Bsv;
 
 namespace BsvPoker.App;
@@ -25,8 +26,7 @@ public partial class MainWindow : Window
         _wallet = wallet;
 
         _game = new GameView(_profile.IdentityPriv, _profile.IdentityPub, vault, wallet.RefreshCards,
-            onChainSettle: (deck, pot) => wallet.PlayOnChainHand(deck, pot), // a hand is real BSV transactions only
-            canFund: stake => wallet.CanPlayOnChain(stake));                 // refuse to start without real sats
+            playHand: RunLiveHand);   // a hand is a genuine two-party on-chain mental-poker deal vs a real peer
         GameHost.Content = _game;
 
         // Chat: every message is a Bitcoin transaction; peers are auto-discovered from on-chain Announce txs
@@ -83,7 +83,69 @@ public partial class MainWindow : Window
             return;
         }
         var msg = OnChainChat.TryReadTx(tx, _profile.IdentityPriv, _profile.IdentityPub);
-        if (msg != null) _chatView?.AddIncoming(Convert.ToHexString(msg.SenderPub).ToLowerInvariant(), msg.Text);
+        if (msg == null) return;
+        // a live mental-poker deal message from our current opponent is routed to the deal protocol; else it's chat
+        if (msg.Text.StartsWith("DEAL:", StringComparison.Ordinal) && _activeDeal != null
+            && _activeDeal.PeerPub.AsSpan().SequenceEqual(msg.SenderPub))
+            _activeDeal.Deliver(msg.Text["DEAL:".Length..]);
+        else
+            _chatView?.AddIncoming(Convert.ToHexString(msg.SenderPub).ToLowerInvariant(), msg.Text);
+    }
+
+    private TxDealChannel? _activeDeal;
+
+    /// <summary>
+    /// Play a hand as a GENUINE two-party on-chain mental-poker deal against a discovered peer — no local or
+    /// bot deck, no shared RNG. Both players run <see cref="LiveDeal"/>; every protocol message is an encrypted
+    /// Bitcoin transaction pushed IP-to-IP to the peer and to the miners. Returns an immediate status; the
+    /// dealt result is shown on the table when the exchange completes.
+    /// </summary>
+    private string RunLiveHand()
+    {
+        if (!_wallet.CanPlayOnChain(20_000)) return "Fund your wallet with real BSV and connect to the network first — poker is on-chain only.";
+        var peer = _peers.FirstOrDefault();
+        if (peer.Key == null) return "No opponent discovered yet. A fair deal needs a real peer's entropy (peers appear automatically once they announce). There is NO local or bot deck.";
+        if (_activeDeal != null) return "A hand is already in progress.";
+        byte[] peerPub; try { peerPub = Convert.FromHexString(peer.Key); } catch { return "discovered peer has a bad key."; }
+        var endpoint = peer.Value;
+        var ch = new TxDealChannel(peerPub, plaintext => SendEncrypted(peer.Key, endpoint, "DEAL:" + plaintext));
+        _activeDeal = ch;
+        bool initiator = string.CompareOrdinal(Convert.ToHexString(_profile.IdentityPub).ToLowerInvariant(), peer.Key) < 0;
+        System.Threading.Tasks.Task.Run(() =>
+        {
+            try
+            {
+                var r = initiator ? LiveDeal.RunInitiator(ch) : LiveDeal.RunResponder(ch);
+                string holes = string.Join(" ", r.MyHoles.Select(CardStr));
+                string board = string.Join(" ", r.Board.Select(CardStr));
+                _game?.ShowStatus($"On-chain deal complete — every message was a Bitcoin transaction.\nYour hole cards: {holes}\nBoard: {board}\nShuffle/remask proofs verified: {r.ProofsVerified}");
+            }
+            catch (Exception ex) { _game?.ShowStatus("Deal did not complete: " + ex.Message); }
+            finally { _activeDeal = null; }
+        });
+        return $"Opponent {peer.Key[..12]}… found — dealing a real two-party on-chain hand ({(initiator ? "you deal first" : "opponent deals first")}). Every message is a Bitcoin transaction.";
+    }
+
+    private static string CardStr(Card c)
+    {
+        string r = c.Rank switch { 14 => "A", 13 => "K", 12 => "Q", 11 => "J", 10 => "T", _ => c.Rank.ToString() };
+        string s = c.Suit switch { Suit.Spades => "♠", Suit.Hearts => "♥", Suit.Diamonds => "♦", _ => "♣" };
+        return r + s;
+    }
+
+    /// <summary>Encrypt <paramref name="text"/> to the recipient, fund a ChatDirect tx, push it IP-to-IP + to miners. "" on success.</summary>
+    private string SendEncrypted(string recipientPubHex, string endpoint, string text)
+    {
+        byte[] rpub;
+        try { rpub = Convert.FromHexString(recipientPubHex); } catch { return "Recipient public key must be 66 hex chars."; }
+        if (rpub.Length != 33) return "Recipient public key must be a 33-byte compressed key.";
+        var script = OnChainChat.BuildScript(rpub, _profile.IdentityPub, text);
+        var (raw, status) = _wallet.FundTx(script, 1000, 500);
+        if (raw == null) return status;
+        var (host, port) = ParseHostPort(endpoint);
+        if (host != null) _ = TxLink.SendTxAsync(_currentNet, host, port, raw);
+        _bsvNode?.Broadcast(raw);
+        return "";
     }
 
     /// <summary>Broadcast our Announce transaction (key + endpoint) so peers discover us automatically.</summary>
@@ -120,16 +182,8 @@ public partial class MainWindow : Window
     private string SendChatTx(string recipientPubHex, string peerHostPort, string text)
     {
         if (string.IsNullOrWhiteSpace(text)) return "Type a message.";
-        byte[] rpub;
-        try { rpub = Convert.FromHexString(recipientPubHex); } catch { return "Recipient public key must be 66 hex chars."; }
-        if (rpub.Length != 33) return "Recipient public key must be a 33-byte compressed key (66 hex).";
-        var script = OnChainChat.BuildScript(rpub, _profile.IdentityPub, text);
-        var (raw, status) = _wallet.FundTx(script, 1000, 500);
-        if (raw == null) return status;
-        var (host, port) = ParseHostPort(peerHostPort);
-        if (host != null) _ = TxLink.SendTxAsync(_currentNet, host, port, raw);   // IP-to-IP straight to the player
-        _bsvNode?.Broadcast(raw);                                                 // and to the mining nodes → on-chain
-        return $"Sent as a Bitcoin tx — pushed to {peerHostPort} and broadcast to miners.";
+        var err = SendEncrypted(recipientPubHex, peerHostPort, text);
+        return err == "" ? $"Sent as a Bitcoin tx — pushed to {peerHostPort} and to miners." : err;
     }
 
     private static (string? Host, int Port) ParseHostPort(string s)
