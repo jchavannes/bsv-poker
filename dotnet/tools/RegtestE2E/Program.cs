@@ -284,16 +284,43 @@ try { Cli($"sendrawtransaction {Convert.ToHexString(Chain.Serialize(refund)).ToL
 await Task.Delay(800); Cli($"generatetoaddress 1 {nodeAddr}");
 bool ok14 = refundEarlyRejected && ConfirmMined(refundTxid, "bidder reclaims after timeout");
 
-node.Dispose();
-if (ok1 && ok2 && ok3 && ok4 && prematureRejected && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11 && ok12 && ok13 && ok14)
+Console.WriteLine("\n-- Phase 8: CHAT as a Bitcoin transaction — encrypted, on-chain, read back from a block --");
+var (uc, _) = await FundAndVerify(15, "1.0");
+var wc = new OnChainWallet(seed); wc.Add(uc);
+var alice = WalletKeys.Account(seed, 4, 0);   // sender
+var bob = WalletKeys.Account(seed, 4, 1);     // recipient
+var chatText = "all-in — good luck (on-chain)";
+var chatScript = OnChainChat.BuildScript(bob.Pub, alice.Pub, chatText);
+var chatSpend = wc.SpendAction(chatScript, 1000, 1000);
+node.Broadcast(Chain.Serialize(chatSpend.Tx));
+var chatTxid = Chain.Txid(chatSpend.Tx);
+var chatBlock = Regex.Match(Cli($"generatetoaddress 1 {nodeAddr}"), "[0-9a-f]{64}").Value;
+await node.SyncHeadersToStoreAsync(store, maxBatches: 2, waitMs: 6000);
+var chatRaw = await node.GetBlockAsync(chatBlock, waitMs: 15000);
+bool ok15 = false;
+if (chatRaw != null)
 {
-    Console.WriteLine("\nSUCCESS ✓✓✓✓✓✓✓ END-TO-END PROVEN on real BSV consensus:");
+    var blk = BsvBlock.Parse(chatRaw);
+    var tx = blk.Txs.FirstOrDefault(t => Chain.Txid(t) == chatTxid);
+    var msg = tx == null ? null : OnChainChat.TryReadTx(tx, bob.Priv, bob.Pub);
+    ok15 = msg != null && msg.Text == chatText && msg.SenderPub.AsSpan().SequenceEqual(alice.Pub);
+    Console.WriteLine(ok15 ? $"  ✓ chat tx mined; recipient read it back from the block: \"{msg!.Text}\" (sender verified)"
+                           : "  ✗ chat message not recovered from the on-chain transaction");
+}
+else Console.WriteLine("  ✗ node did not serve the chat block");
+
+node.Dispose();
+if (ok1 && ok2 && ok3 && ok4 && prematureRejected && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11 && ok12 && ok13 && ok14 && ok15)
+{
+    Console.WriteLine("\nSUCCESS ✓✓✓✓✓✓✓✓ END-TO-END PROVEN on real BSV consensus:");
     Console.WriteLine("  • fund → SPV-verify → signed spend (mined)");
     Console.WriteLine("  • poker pot: 2-of-2 escrow (mined) → cooperative settlement to winner (mined)");
     Console.WriteLine("  • always-recoverable: pre-signed nLockTime recovery REJECTED before lock, ACCEPTED after (mined)");
     Console.WriteLine("  • full Omaha Hi-Lo hand: escrow → SPLIT settlement paying high + low halves (mined)");
     Console.WriteLine("  • TYPED transaction template: built, mined, and SPENT on-chain (not OP_RETURN)");
     Console.WriteLine($"  • WHOLE HAND as {tape.Steps.Count} on-chain transactions (table/game/hand/escrow/shuffle/deal/board/bet/showdown/settlement) — all mined");
+    Console.WriteLine("  • AUCTION: a bid is a conditional contract — seller claims via preimage (mined), loser refunds after timeout (mined)");
+    Console.WriteLine("  • CHAT is a Bitcoin transaction: encrypted, broadcast, mined, read back from the block by the recipient");
     return 0;
 }
 Console.WriteLine("\nFAIL: one or more phases not confirmed");
