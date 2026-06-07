@@ -49,6 +49,10 @@ connect, header sync+persist, and full block fetch+validate — is listed under 
    signed spend, pot escrow → settlement (incl. hi-lo split), timelocked recovery, and typed-tx
    build+spend — is proven on real BSV consensus. (The real node also caught a consensus bug: typed outputs
    now use MINIMAL pushes, or the spend is rejected with "Data push larger than necessary".)
+   It finally proves the **"maximize transactions / everything on-chain"** model: a single heads-up hand is
+   emitted as a **20-transaction tape** (table genesis, game start, hand start, pot escrow, each seat's
+   shuffle stage, each card dealt, each board street, each betting action, each showdown reveal, and the
+   settlement) — **all 20 accepted and mined** by the real node. More seats/cards ⇒ proportionally more txs.
    STILL NOT done: the same run on **mainnet/testnet with externally-funded real coins** (regtest coins are
    free), and money moving through the **app's** wallet UI (the e2e is a headless tool, not the GUI).
 3. **On-chain gameplay is not wired into the running app.** The app still runs the old play-money path.

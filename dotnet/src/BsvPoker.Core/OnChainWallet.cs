@@ -87,6 +87,30 @@ public sealed class OnChainWallet
         return new Spend(tx, chosen, fee, change);
     }
 
+    /// <summary>
+    /// Build a typed/contract-output spend AND advance the wallet's own state: remove the spent inputs and
+    /// re-absorb the change output as a fresh UTXO, so the NEXT call spends the change. This is what lets a
+    /// single hand emit MANY on-chain transactions in sequence (every action its own tx) from one starting
+    /// coin. Returns the signed spend to broadcast.
+    /// </summary>
+    public Spend SpendAction(byte[] outputScript, long outputValue, long fee)
+    {
+        uint changeIndexBefore = _nextChange;
+        var s = BuildAction(outputScript, outputValue, fee);
+        foreach (var inp in s.Inputs) _utxos.RemoveAll(u => u.Txid == inp.Txid && u.Vout == inp.Vout);
+        if (s.Change > 0)
+        {
+            // BuildAction appends change as the LAST output, paying change key (chain 1, changeIndexBefore)
+            int vout = s.Tx.Outs.Count - 1;
+            _utxos.Add(new Utxo(Chain.Txid(s.Tx), (uint)vout, s.Change, 1, changeIndexBefore));
+        }
+        return s;
+    }
+
+    /// <summary>Like <see cref="SpendAction"/> but pays a recipient pubkey (a plain payment), advancing wallet state.</summary>
+    public Spend SpendPayment(byte[] recipientPub33, long amount, long fee)
+        => SpendAction(Chain.P2pkhLockForPub(recipientPub33), amount, fee);
+
     /// <summary>Verify every input of a spend this wallet built (consensus check); also confirms value conservation.</summary>
     public bool VerifySpend(Spend s)
     {

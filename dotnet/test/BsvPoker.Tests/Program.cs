@@ -11,6 +11,7 @@ GameShowdownTests.All();
 GameOnChainTests.All();
 OnChainHandTests.All();
 OnChainSessionTests.All();
+OnChainHandTapeTests.All();
 BlackjackTests.All();
 TxTemplatesTests.All();
 MentalPokerECTests.All();

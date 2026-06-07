@@ -203,15 +203,45 @@ catch (Exception ex) { Console.WriteLine($"  typed spend REJECTED: {ex.Message}"
 await Task.Delay(800); Cli($"generatetoaddress 1 {nodeAddr}");
 bool ok9 = parseOk && ConfirmMined(typedSpendTxid, "spend of the typed output");
 
-node.Dispose();
-if (ok1 && ok2 && ok3 && ok4 && prematureRejected && ok5 && ok6 && ok7 && ok8 && ok9)
+Console.WriteLine("\n-- Phase 6: a WHOLE HAND as a tape of on-chain transactions (maximize transactions) --");
+var (u5, _) = await FundAndVerify(11, "1.0");
+var w6 = new OnChainWallet(seed); w6.Add(u5);
+var ta = WalletKeys.Account(seed, 0, 40); var tb = WalletKeys.Account(seed, 0, 41);
+var handDeck = new[] { C("As"), C("Ah"), C("2c"), C("3d"), C("Ad"), C("Kh"), C("Qs"), C("Jc"), C("9h") };
+var tape = OnChainHandTape.BuildHoldem(w6, (ta.Priv, ta.Pub), (tb.Priv, tb.Pub), handDeck, 40000,
+    System.Security.Cryptography.RandomNumberGenerator.GetBytes(16), stepValue: 1000, fee: 500);
+Console.WriteLine($"  built a {tape.Steps.Count}-transaction hand tape; submitting each step in order…");
+int accepted = 0;
+foreach (var step in tape.Steps)
 {
-    Console.WriteLine("\nSUCCESS ✓✓✓✓✓ END-TO-END PROVEN on real BSV consensus:");
+    var hex = Convert.ToHexString(Chain.Serialize(step.Tx)).ToLowerInvariant();
+    try { Cli($"sendrawtransaction {hex}"); accepted++; node.Broadcast(Chain.Serialize(step.Tx)); }
+    catch (Exception ex) { Console.WriteLine($"    ✗ {step.Kind} REJECTED: {ex.Message.Replace("\n", " ")}"); }
+}
+await Task.Delay(1500); Cli($"generatetoaddress 2 {nodeAddr}"); // 2 blocks to sweep any just-submitted straggler
+int minedCount = 0;
+for (int i = 0; i < tape.Steps.Count; i++)
+{
+    var step = tape.Steps[i];
+    bool mined = false;
+    try { mined = Regex.IsMatch(Cli($"getrawtransaction {Chain.Txid(step.Tx)} true"), "\"confirmations\"\\s*:\\s*[1-9]"); } catch { }
+    if (mined) minedCount++; else Console.WriteLine($"    ✗ step {i} {step.Kind} ({Chain.Txid(step.Tx)[..12]}…) not mined");
+}
+bool ok10 = minedCount == tape.Steps.Count;
+Console.WriteLine($"  accepted to mempool: {accepted}/{tape.Steps.Count}");
+Console.WriteLine(ok10 ? $"  ✓ all {minedCount} hand-tape transactions mined into the chain"
+                       : $"  ✗ only {minedCount}/{tape.Steps.Count} tape transactions mined");
+
+node.Dispose();
+if (ok1 && ok2 && ok3 && ok4 && prematureRejected && ok5 && ok6 && ok7 && ok8 && ok9 && ok10)
+{
+    Console.WriteLine("\nSUCCESS ✓✓✓✓✓✓ END-TO-END PROVEN on real BSV consensus:");
     Console.WriteLine("  • fund → SPV-verify → signed spend (mined)");
     Console.WriteLine("  • poker pot: 2-of-2 escrow (mined) → cooperative settlement to winner (mined)");
     Console.WriteLine("  • always-recoverable: pre-signed nLockTime recovery REJECTED before lock, ACCEPTED after (mined)");
     Console.WriteLine("  • full Omaha Hi-Lo hand: escrow → SPLIT settlement paying high + low halves (mined)");
     Console.WriteLine("  • TYPED transaction template: built, mined, and SPENT on-chain (not OP_RETURN)");
+    Console.WriteLine($"  • WHOLE HAND as {tape.Steps.Count} on-chain transactions (table/game/hand/escrow/shuffle/deal/board/bet/showdown/settlement) — all mined");
     return 0;
 }
 Console.WriteLine("\nFAIL: one or more phases not confirmed");
