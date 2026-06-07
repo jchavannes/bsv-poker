@@ -22,9 +22,57 @@ public static class LiveHandTests
         public string Receive() => _in.Take();
     }
 
+    // a channel that carries the hand over REAL TxLink sockets: each message is a Bitcoin tx (an encrypted
+    // ChatDirect output) pushed IP-to-IP to the peer's listener; received txs are decrypted into the inbox.
+    private sealed class TxLinkChannel : LiveDeal.IDealChannel, IDisposable
+    {
+        private readonly BsvPoker.Net.Bsv.NetworkParams _net;
+        private readonly BsvPoker.Net.Bsv.TxLink _link;
+        private int _peerPort;
+        private readonly byte[] _myPriv, _myPub, _peerPub;
+        private readonly System.Collections.Concurrent.BlockingCollection<string> _inbox = new();
+        public int Port => _link.Port;
+        public TxLinkChannel(BsvPoker.Net.Bsv.NetworkParams net, byte[] myPriv, byte[] myPub, byte[] peerPub)
+        {
+            _net = net; _myPriv = myPriv; _myPub = myPub; _peerPub = peerPub;
+            _link = new BsvPoker.Net.Bsv.TxLink(net, 0);
+            _link.OnTransaction += tx => { var m = OnChainChat.TryReadTx(tx, _myPriv, _myPub); if (m != null) _inbox.Add(m.Text); };
+            _link.Start();
+        }
+        public void Connect(int peerPort) => _peerPort = peerPort;
+        public void Send(string msg)
+        {
+            var script = OnChainChat.BuildScript(_peerPub, _myPub, msg);
+            var tx = new Chain.Tx(2, new() { new("00".PadRight(64, '0'), 0, Array.Empty<byte>(), 0xffffffff) }, new() { new(1, script) }, 0);
+            BsvPoker.Net.Bsv.TxLink.SendTxAsync(_net, "127.0.0.1", _peerPort, Chain.Serialize(tx)).GetAwaiter().GetResult();
+        }
+        public string Receive() => _inbox.Take();
+        public void Dispose() => _link.Dispose();
+    }
+
     public static void All()
     {
         Console.WriteLine("live two-party ON-CHAIN hand (escrow + proven deal + co-signed settlement):");
+
+        T.Run("a full hand runs over REAL TxLink sockets (IP-to-IP), both agree, settlement valid", () =>
+        {
+            var net = BsvPoker.Net.Bsv.NetworkParams.For(BsvPoker.Net.Bsv.BsvNetwork.Regtest);
+            var a = Secp256k1.GenerateKeyPair(); var b = Secp256k1.GenerateKeyPair();
+            using var chA = new TxLinkChannel(net, a.Priv, a.Pub, b.Pub);
+            using var chB = new TxLinkChannel(net, b.Priv, b.Pub, a.Pub);
+            chA.Connect(chB.Port); chB.Connect(chA.Port);
+            var aUtxo = new OnChainWallet.Utxo("aa".PadRight(64, '1'), 0, 1_000_000, 0, 0);
+            var bUtxo = new OnChainWallet.Utxo("bb".PadRight(64, '2'), 1, 1_000_000, 0, 1);
+            long stake = 300_000, fee = 2000;
+            LiveHand.Result? rA = null, rB = null;
+            var tA = System.Threading.Tasks.Task.Run(() => rA = LiveHand.RunInitiator(chA, aUtxo, a.Pub, (a.Priv, a.Pub), stake, fee));
+            var tB = System.Threading.Tasks.Task.Run(() => rB = LiveHand.RunResponder(chB, bUtxo, b.Pub, (b.Priv, b.Pub), stake, fee));
+            T.True(System.Threading.Tasks.Task.WaitAll(new[] { tA, tB }, TimeSpan.FromSeconds(60)), "hand completed over real sockets");
+            T.Eq(Chain.Txid(rA!.EscrowTx), Chain.Txid(rB!.EscrowTx), "same escrow over the wire");
+            T.Eq(rA.WinnerSeat, rB.WinnerSeat, "agree on winner over the wire");
+            T.True(rA.ProofsVerified && rB.ProofsVerified, "shuffle proofs verified over the wire");
+            T.True(Chain.VerifyMultisig2of2(rA.Settlement, 0, a.Pub, b.Pub, rA.Pot), "settlement valid over the wire");
+        });
 
         T.Run("two peers fund, deal fairly, and settle the pot — chips conserved, proofs verified", () =>
         {
