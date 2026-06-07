@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Media;
 using BsvPoker.App.Controls;
 using BsvPoker.Core;
+using BsvPoker.Core.Games;
 using BsvPoker.Crypto;
 using BsvPoker.Net.Bsv;
 
@@ -121,6 +122,42 @@ public sealed class WalletView : UserControl
     // ---- real on-chain funding & spending ----
 
     private long Balance => _w.Utxos.Where(u => !u.Spent).Sum(u => u.Value);
+
+    /// <summary>True when the wallet can fund an on-chain hand of the given pot right now.</summary>
+    public bool CanPlayOnChain(long pot) => !_locked && _node()?.PeerCount > 0 && Balance >= pot + OnChainHandReserve;
+    private const long OnChainHandReserve = 30_000; // headroom for the ~20 per-step values + fees of one hand
+
+    /// <summary>
+    /// Settle a COMPLETED hand on-chain through the real product: emit the full transaction tape (table/game/
+    /// hand genesis, the 2-of-2 pot escrow, every shuffle/deal/board/bet/showdown step, and the cooperative
+    /// settlement) funded from this wallet and broadcast over our own BSV node. The two seats' keys are derived
+    /// from this wallet's seed (the local bot opponent is controlled by the same human, so funds stay
+    /// recoverable). Returns a human-readable status. This is the same tape proven on a real node by RegtestE2E.
+    /// </summary>
+    public string PlayOnChainHand(IReadOnlyList<Card> deck, long pot)
+    {
+        if (_locked) return "🔒 Unlock the wallet first.";
+        var node = _node();
+        if (node == null || node.PeerCount == 0) return "Not connected to any BSV peers yet — cannot broadcast on-chain.";
+        var w = new OnChainWallet(_seed);
+        foreach (var u in _w.Utxos.Where(u => !u.Spent)) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
+        if (w.Balance < pot + OnChainHandReserve) return $"Insufficient on-chain balance: have {w.Balance:N0} sat, need ~{pot + OnChainHandReserve:N0}.";
+        try
+        {
+            var a = WalletKeys.Account(_seed, 2, 0);
+            var b = WalletKeys.Account(_seed, 2, 1);
+            long before = w.Balance;
+            var tape = OnChainHandTape.BuildHoldem(w, (a.Priv, a.Pub), (b.Priv, b.Pub), deck, pot,
+                System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+            foreach (var step in tape.Steps) node.Broadcast(Chain.Serialize(step.Tx));
+            // reconcile our spendable set with the wallet's post-hand state (the parked typed outputs leave the wallet)
+            _w.Utxos = w.Coins.Select(u => new UtxoRec { Txid = u.Txid, Vout = u.Vout, Value = u.Value, KeyChain = u.KeyChain, KeyIndex = u.KeyIndex }).ToList();
+            AppendTx("on-chain hand", w.Balance - before, $"{tape.Steps.Count} txs · pot {pot} · winner seat {tape.WinnerSeat}");
+            Save(); Render();
+            return $"Broadcast {tape.Steps.Count} on-chain transactions for the hand (pot {pot:N0} sat → seat {tape.WinnerSeat}). Fees/values deducted.";
+        }
+        catch (Exception ex) { return "On-chain settle failed: " + ex.Message; }
+    }
 
     /// <summary>The receive key for the given receive index (chain 0).</summary>
     private WalletKeys RecvKey(uint index) => WalletKeys.Account(_seed, 0, index);

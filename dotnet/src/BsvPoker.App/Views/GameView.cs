@@ -21,6 +21,8 @@ public sealed class GameView : UserControl
     private readonly byte[] _pub;
     private readonly CardVault _vault;
     private readonly Action _onCardsChanged;
+    private readonly Func<IReadOnlyList<Card>, long, string>? _onChainSettle; // settle a completed hand on-chain via the wallet/node
+    private const long OnChainPot = 20_000;                                    // demo stake in satoshis for an on-chain hand
 
     private long[] _stacks = { 100, 100 };
     private int _button;
@@ -45,13 +47,15 @@ public sealed class GameView : UserControl
     private readonly Button _call = Mk("Call", "#333333");
     private readonly Button _betBtn = Mk("Bet / Raise", "#2E5A7A");
     private readonly Button _leave = Mk("Leave table", "#555555");
+    private readonly Button _onchain = Mk("On-chain settle", "#3A6E2E");
 
     /// <summary>Raised when the player leaves the table (so the host can stop any bot, etc.).</summary>
     public event Action? OnLeaveTable;
 
-    public GameView(P2PNode node, byte[] priv, byte[] pub, CardVault vault, Action onCardsChanged)
+    public GameView(P2PNode node, byte[] priv, byte[] pub, CardVault vault, Action onCardsChanged,
+        Func<IReadOnlyList<Card>, long, string>? onChainSettle = null)
     {
-        _node = node; _priv = priv; _pub = pub; _vault = vault; _onCardsChanged = onCardsChanged;
+        _node = node; _priv = priv; _pub = pub; _vault = vault; _onCardsChanged = onCardsChanged; _onChainSettle = onChainSettle;
         Background = new SolidColorBrush(Color.FromRgb(0x0D, 0x0D, 0x0D)); Foreground = Brushes.White;
 
         var felt = new Border { Margin = new Thickness(16), CornerRadius = new CornerRadius(160) };
@@ -76,7 +80,10 @@ public sealed class GameView : UserControl
         _call.Click += (_, _) => Do(ActionKind.Call, 0);
         _betBtn.Click += (_, _) => { if (long.TryParse(_bet.Text.Trim(), out var to)) Do(ActionKind.Raise, to); };
         _leave.Click += (_, _) => LeaveTable();
-        bar.Children.Add(_deal); bar.Children.Add(_fold); bar.Children.Add(_check); bar.Children.Add(_call); bar.Children.Add(_bet); bar.Children.Add(_betBtn); bar.Children.Add(_leave);
+        _onchain.Click += (_, _) => SettleOnChain();
+        bar.Children.Add(_deal); bar.Children.Add(_fold); bar.Children.Add(_check); bar.Children.Add(_call); bar.Children.Add(_bet); bar.Children.Add(_betBtn);
+        if (_onChainSettle != null) bar.Children.Add(_onchain);   // only when the wallet/node are available
+        bar.Children.Add(_leave);
 
         var root = new Grid();
         root.RowDefinitions.Add(new RowDefinition());
@@ -161,6 +168,29 @@ public sealed class GameView : UserControl
         OnLeaveTable?.Invoke();
         Render();
         _msg.Text = "You left the table. Your funds are safe and yours — you can always walk away.";
+    }
+
+    /// <summary>
+    /// Settle the just-completed hand ON-CHAIN: reconstruct the 9-card heads-up deck from the finished hand
+    /// and hand it to the wallet, which emits + broadcasts the full transaction tape (pot escrow → ... →
+    /// settlement) on the real BSV network. Only available once the hand reached a 5-card-board showdown.
+    /// </summary>
+    private void SettleOnChain()
+    {
+        if (_onChainSettle == null) { _msg.Text = "On-chain settle is unavailable (no wallet/node)."; return; }
+        var deck = CompletedHandDeck();
+        if (deck == null) { _msg.Text = "Play a hand to showdown (a full 5-card board) first, then press On-chain settle."; return; }
+        _msg.Text = _onChainSettle(deck, OnChainPot);
+    }
+
+    /// <summary>The 9-card heads-up deck (seat0 holes, seat1 holes, 5 board cards) of a completed practice hand, or null.</summary>
+    private IReadOnlyList<Card>? CompletedHandDeck()
+    {
+        var st = _practice;
+        if (st is not { Complete: true } || st.Seats.Count < 2 || st.Board.Count < 5) return null;
+        var s0 = st.Seats[0].Hole.ToList(); var s1 = st.Seats[1].Hole.ToList();
+        if (s0.Count < 2 || s1.Count < 2 || s0.Concat(s1).Any(c => c.IsFaceDown)) return null;
+        return new List<Card> { s0[0], s0[1], s1[0], s1[1], st.Board[0], st.Board[1], st.Board[2], st.Board[3], st.Board[4] };
     }
 
     private void Render()
