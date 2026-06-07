@@ -66,10 +66,11 @@ public sealed class WalletView : UserControl
 
         root.Children.Add(new TextBlock { Text = "Receive address (give this to your funder)", Foreground = Brushes.Gray, Margin = new Thickness(0, 10, 0, 2) });
         root.Children.Add(_recv);
+        var copyAddr = Btn("Copy address"); copyAddr.Click += (_, _) => { if (Guard()) CopyToClipboard(ReceiveAddress(), "Address copied."); };
         var newAddr = Btn("New address"); newAddr.Click += (_, _) => { if (Guard()) { _w.RecvIndex++; Save(); Render(); } };
         var importBtn = Btn("Import funding (SPV envelope)…"); importBtn.Click += (_, _) => { if (Guard()) ImportFunding(); };
         var makeEnv = Btn("Create funding envelope…"); makeEnv.Click += async (_, _) => { if (Guard()) await CreateEnvelope(); };
-        root.Children.Add(new WrapPanel { Children = { newAddr, importBtn, makeEnv } });
+        root.Children.Add(new WrapPanel { Children = { copyAddr, newAddr, importBtn, makeEnv } });
 
         var send = new WrapPanel { Margin = new Thickness(0, 14, 0, 0) };
         send.Children.Add(new TextBlock { Text = "Send  amount ", Foreground = Brushes.Gray, VerticalAlignment = VerticalAlignment.Center });
@@ -470,6 +471,17 @@ public sealed class WalletView : UserControl
     }
 
     private static Button Btn(string t) => new() { Content = t, Margin = new Thickness(0, 0, 8, 0), Padding = new Thickness(10, 6, 10, 6) };
+
+    /// <summary>Copy text to the clipboard (with a short retry — the Windows clipboard can be briefly locked).</summary>
+    private void CopyToClipboard(string text, string ok)
+    {
+        for (int i = 0; i < 5; i++)
+        {
+            try { Clipboard.SetText(text); _status.Text = ok; return; }
+            catch { System.Threading.Thread.Sleep(40); }
+        }
+        _status.Text = "Could not access the clipboard — select the text and copy manually.";
+    }
 
     // ---- persistence / seed lifecycle ----
 

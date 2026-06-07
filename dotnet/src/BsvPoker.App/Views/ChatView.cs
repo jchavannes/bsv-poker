@@ -29,7 +29,16 @@ public sealed class ChatView : UserControl
         var root = new StackPanel { Margin = new Thickness(20) };
         root.Children.Add(new TextBlock { Text = "Chat — every message is a Bitcoin transaction; peers auto-discovered (no manual key exchange)", FontSize = 18, FontWeight = FontWeights.Bold, Foreground = Brushes.White, TextWrapping = TextWrapping.Wrap });
 
-        root.Children.Add(new TextBlock { Text = "Players discovered automatically (from their on-chain Announce transactions):", Foreground = Brushes.Gray, Margin = new Thickness(0, 12, 0, 2) });
+        var myHex = Convert.ToHexString(myPub).ToLowerInvariant();
+        var idLine = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
+        idLine.Children.Add(new TextBlock { Text = "Your identity: ", Foreground = Brushes.Gray, VerticalAlignment = VerticalAlignment.Center });
+        idLine.Children.Add(new TextBox { Text = myHex, IsReadOnly = true, Width = 460, FontFamily = new FontFamily("Consolas"), Foreground = Brushes.LightGreen, VerticalAlignment = VerticalAlignment.Center });
+        var copyKey = new Button { Content = "Copy", Margin = new Thickness(8, 0, 0, 0), Padding = new Thickness(10, 4, 10, 4) };
+        copyKey.Click += (_, _) => { for (int i = 0; i < 5; i++) { try { Clipboard.SetText(myHex); _status.Text = "Identity key copied."; break; } catch { System.Threading.Thread.Sleep(40); } } };
+        idLine.Children.Add(copyKey);
+        root.Children.Add(idLine);
+
+        root.Children.Add(new TextBlock { Text = "Players discovered automatically (poker gossip overlay):", Foreground = Brushes.Gray, Margin = new Thickness(0, 12, 0, 2) });
         root.Children.Add(_peerList);
 
         root.Children.Add(new TextBlock { Text = "Messages received (transactions peers pushed to you):", Foreground = Brushes.Gray, Margin = new Thickness(0, 12, 0, 2) });
