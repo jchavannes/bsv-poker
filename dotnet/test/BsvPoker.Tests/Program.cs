@@ -29,6 +29,7 @@ TwoPartyEscrowTests.All();
 ShuffleProofTests.All();
 HandTranscriptTests.All();
 SeatOrderTests.All();
+VerifiedHandTests.All();
 BsvProtocolTests.All();
 BsvHeadersTests.All();
 HeaderStoreTests.All();
