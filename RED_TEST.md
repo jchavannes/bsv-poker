@@ -4,11 +4,12 @@
 end-to-end," "one gap away"). That was wrong. What exists is a set of **unit-tested libraries**, not a
 running, integrated, real-money, mainnet product. Below is the unvarnished truth.
 
-## What "145 tests passing" actually means — and does not
+## What "166 tests passing" actually means — and does not
 
-The 145 tests are **unit tests of individual functions**. They prove the math/logic of isolated modules.
-They do **NOT** prove that a real hand has ever been played, that the client has ever connected to live
-BSV mainnet, or that a single real satoshi has moved. No end-to-end, on-network, real-money run exists.
+The 166 tests are **unit tests of individual functions**. They prove the math/logic of isolated modules.
+They do **NOT** prove that a real hand has ever been played or that a single real satoshi has moved. No
+end-to-end, on-network, **real-money** run exists. (What *is* now verified against the live network — peer
+connect, header sync+persist, and full block fetch+validate — is listed under item 1 below.)
 
 ## Built and unit-tested (isolated libraries only)
 
@@ -21,14 +22,21 @@ BSV mainnet, or that a single real satoshi has moved. No end-to-end, on-network,
 
 ## NOT done / NEVER verified (the real work)
 
-1. **Real-network connection: NOW VERIFIED (one real thing that works).** A live probe (`tools/NetProbe`)
-   resolved the real DNS seeds and completed the version/verack handshake with live peers, reading the
-   real chain tip: **mainnet best height 952,430 (14 seed endpoints), testnet 1,739,770 (4 endpoints)**.
-   So the client genuinely reaches and talks to the real BSV network. STILL NOT verified beyond that:
-   full header *sync* (we read a peer's advertised height, we don't yet download/validate the whole header
-   chain from the network), and broadcasting a transaction that actually gets **mined**.
-2. **No real money has moved.** The wallet has never received real BSV; SPV funding is tested with
-   fabricated proofs. There is no real funding, balance, or spend on any network.
+1. **Real-network spine: NOW VERIFIED LIVE (the parts that work).** A live probe (`tools/NetProbe`)
+   resolved the real DNS seeds, completed the version/verack handshake with live peers, and:
+   - **Downloaded, validated, and PERSISTED real headers** from genesis (PoW + parent linkage), then
+     reopened the on-disk store, **re-validated the whole chain**, and **resumed** sync — verified
+     **testnet 30,000 / mainnet 22,000 headers** across a simulated restart.
+   - **Fetched a full block from a live peer** (`getdata`), **deserialized its transactions**, and
+     **validated the recomputed merkle root against the header** — verified on **testnet block #1 (190 B)
+     and mainnet block #1 (215 B)**.
+   So the no-server funding *spine* (connect → persist validated headers → fetch block → parse tx →
+   validate merkle root → verify a merkleblock funding proof) works on the real network. STILL NOT
+   verified: header sync all the way to the current tip (only the first tens of thousands), and
+   **broadcasting a transaction that actually gets mined**.
+2. **No real money has moved.** The wallet has never received real BSV. The SPV-funding *verifier* now
+   works on real-format data (a merkleblock built from a real/parsed block verifies), but no real funding
+   tx has been broadcast, confirmed, and turned into a spendable balance on any network. No real spend.
 3. **On-chain gameplay is not wired into the running app.** The app still runs the old play-money path.
    `OnChainGameSession` etc. are libraries called only by tests. No table/deal/bet/card has gone on-chain
    in the actual product.
