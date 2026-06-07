@@ -56,10 +56,10 @@ stored = "enc1." ‖ iterations ‖ "." ‖ base64(salt) ‖ "." ‖ base64(nonc
 - Exports a key as **WIF** and signs/verifies **Bitcoin signed messages**.
 - Holds your card NFTs (see [MENTAL_POKER.md](MENTAL_POKER.md)).
 
-The wallet is **fully standalone**: it generates the seed, derives keys, and builds/signs transactions
-entirely offline, with **no connection to any node, RPC, or server**. Getting coins onto the chain is
-external to the product (a separate testnet-funding node, for testing only) — see
-[ONCHAIN_MODEL.md](ONCHAIN_MODEL.md).
+The wallet generates the seed, derives keys, and builds/signs transactions itself, with **no central node,
+RPC, or server**. It is an always-online SPV wallet: it maintains block headers and verifies received coins
+by their SPV envelopes (merkle proof + header) handed peer-to-peer; payments are pushed IP-to-IP to the
+counterparty and to a miner. See [ONCHAIN_MODEL.md](ONCHAIN_MODEL.md).
 
 ## Per-instance identity
 

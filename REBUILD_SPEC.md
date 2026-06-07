@@ -107,7 +107,7 @@ Real BSV, starts empty. Feature inventory (all required):
 - **Send:** amount, fee control in sat/byte, **coin control** (a Coins/UTXO tab to view, label, freeze,
   and hand-pick UTXOs), preview, batch/multi-output sends, max/sweep, OP-safe scripts.
 - **UTXO management:** UTXO set, freeze/unfreeze, labels, dust handling, consolidation.
-- **Multisig:** create m-of-n wallets, co-sign workflows, an offline/air-gapped signing flow (a
+- **Multisig:** create m-of-n wallets, co-sign workflows, an air-gapped signing flow (a
   PSBT-equivalent partially-signed-tx exchange format).
 - **Watch-only:** import xpub-equivalent / address set; monitor without keys.
 - **History:** full transaction history with SPV proof status, confirmations, labels, fiat-optional,

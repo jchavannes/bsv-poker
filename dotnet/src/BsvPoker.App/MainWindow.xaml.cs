@@ -12,7 +12,7 @@ public partial class MainWindow : Window
     private GameView? _game;
     private ChatView? _chatView;
     private TxLink? _link;   // the ONLY player-to-player transport: it carries nothing but Bitcoin transactions
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> _peers = new(); // pubHex -> endpoint, auto-discovered
+    private PokerGossip? _gossip;   // the poker discovery overlay (announce/forward/query) on top of Bitcoin
 
     public MainWindow()
     {
@@ -33,7 +33,7 @@ public partial class MainWindow : Window
         // (no manual key/IP exchange). Send = fund an encrypted ChatDirect tx, push it IP-to-IP to the peer
         // AND broadcast it to miners.
         _chatView = new ChatView(_profile.IdentityPub,
-            () => _peers.Select(kv => (kv.Key, kv.Value)).ToList(),
+            () => (_gossip?.Peers ?? new List<PokerGossip.Peer>()).Select(p => (p.PubHex, p.Endpoint)).ToList(),
             SendChatTx);
         ChatHost.Content = _chatView;
 
@@ -65,6 +65,10 @@ public partial class MainWindow : Window
             _link = new TxLink(_currentNet, 0); // loopback by default; expose to LAN/Internet is an explicit opt-in
             _link.OnTransaction += Ingest;      // transactions peers push to us directly, IP-to-IP
             _link.Start();
+            var myHex = Convert.ToHexString(_profile.IdentityPub).ToLowerInvariant();
+            _gossip = new PokerGossip(myHex, MyEndpoint(),
+                (peerPub, endpoint, msg) => SendEncrypted(peerPub, endpoint, "GOSSIP:" + msg)); // gossip rides on Bitcoin txs
+            _gossip.OnPeersChanged += () => Dispatcher.BeginInvoke(new Action(UpdateNetInfo));
         }
         catch { }
     }
@@ -74,20 +78,24 @@ public partial class MainWindow : Window
     /// <summary>Every inbound transaction (pushed IP-to-IP or relayed by the network) is inspected here.</summary>
     private void Ingest(Chain.Tx tx)
     {
+        // an Announce tx (relayed) bootstraps the gossip overlay with a first peer
         var ann = OnChainAnnounce.TryReadTx(tx);
         if (ann != null)
         {
             var hex = Convert.ToHexString(ann.Pub).ToLowerInvariant();
             if (!hex.Equals(Convert.ToHexString(_profile.IdentityPub), StringComparison.OrdinalIgnoreCase))
-                _peers[hex] = ann.Endpoint;     // auto-discovered a peer: key + address, no manual exchange
+                _gossip?.AddSeed(hex, ann.Endpoint);
             return;
         }
+        // detect an incoming PAYMENT to one of our addresses (shows as pending until SPV-confirmed)
+        _wallet.ConsiderIncoming(tx);
         var msg = OnChainChat.TryReadTx(tx, _profile.IdentityPriv, _profile.IdentityPub);
         if (msg == null) return;
-        // a live mental-poker deal message from our current opponent is routed to the deal protocol; else it's chat
-        if (msg.Text.StartsWith("DEAL:", StringComparison.Ordinal) && _activeDeal != null
-            && _activeDeal.PeerPub.AsSpan().SequenceEqual(msg.SenderPub))
-            _activeDeal.Deliver(msg.Text["DEAL:".Length..]);
+        if (msg.Text.StartsWith("GOSSIP:", StringComparison.Ordinal))      // poker discovery overlay
+            _gossip?.Receive(msg.Text["GOSSIP:".Length..]);
+        else if (msg.Text.StartsWith("DEAL:", StringComparison.Ordinal) && _activeDeal != null
+                 && _activeDeal.PeerPub.AsSpan().SequenceEqual(msg.SenderPub))
+            _activeDeal.Deliver(msg.Text["DEAL:".Length..]);             // live hand protocol
         else
             _chatView?.AddIncoming(Convert.ToHexString(msg.SenderPub).ToLowerInvariant(), msg.Text);
     }
@@ -104,17 +112,19 @@ public partial class MainWindow : Window
 
     private string RunLiveHand()
     {
+        // STANDALONE SPV: there is NO "connect to the BSV network" requirement. A hand is peer-to-peer
+        // (transactions handed IP-to-IP to the opponent) and the same txs are sent to a miner to land on-chain.
         if (_activeDeal != null) return "A hand is already in progress.";
-        if (_bsvNode == null || _bsvNode.PeerCount == 0) return "Not connected to the BSV network yet.";
-        var peer = _peers.FirstOrDefault();
-        if (peer.Key == null) return "No opponent discovered yet. A fair deal needs a real peer's entropy (peers appear automatically once they announce). There is NO local or bot deck.";
-        byte[] peerPub; try { peerPub = Convert.FromHexString(peer.Key); } catch { return "discovered peer has a bad key."; }
+        var peer = _gossip?.Peers.FirstOrDefault();
+        if (peer == null) return "No opponent discovered yet — the gossip overlay is still finding poker peers. A fair deal needs a real peer's entropy; there is NO local or bot deck.";
+        byte[] peerPub; try { peerPub = Convert.FromHexString(peer.PubHex); } catch { return "discovered peer has a bad key."; }
         var seat = _wallet.ReserveSeat(LiveStake + 5000);
         if (seat == null) return $"No spendable coin ≥ {LiveStake + 5000:N0} sat to seat the hand — fund your wallet first (poker is real-money only).";
-        var endpoint = peer.Value;
-        var ch = new TxDealChannel(peerPub, plaintext => SendEncrypted(peer.Key, endpoint, "DEAL:" + plaintext));
+        var endpoint = peer.Endpoint;
+        var peerHex = peer.PubHex;
+        var ch = new TxDealChannel(peerPub, plaintext => SendEncrypted(peerHex, endpoint, "DEAL:" + plaintext));
         _activeDeal = ch;
-        bool initiator = string.CompareOrdinal(Convert.ToHexString(_profile.IdentityPub).ToLowerInvariant(), peer.Key) < 0;
+        bool initiator = string.CompareOrdinal(Convert.ToHexString(_profile.IdentityPub).ToLowerInvariant(), peerHex) < 0;
         var s = seat.Value;
         System.Threading.Tasks.Task.Run(() =>
         {
@@ -136,7 +146,7 @@ public partial class MainWindow : Window
             catch (Exception ex) { _game?.ShowStatus("Hand did not complete: " + ex.Message); }
             finally { _activeDeal = null; }
         });
-        return $"Opponent {peer.Key[..12]}… found — playing a real two-party on-chain hand for {LiveStake:N0} sat ({(initiator ? "you deal first" : "opponent deals first")}). Every message is a Bitcoin transaction.";
+        return $"Opponent {peerHex[..12]}… found — playing a real two-party on-chain hand for {LiveStake:N0} sat ({(initiator ? "you deal first" : "opponent deals first")}). Every message is a Bitcoin transaction.";
     }
 
     private static string CardStr(Card c)
@@ -161,22 +171,22 @@ public partial class MainWindow : Window
         return "";
     }
 
-    /// <summary>Broadcast our Announce transaction (key + endpoint) so peers discover us automatically.</summary>
+    /// <summary>
+    /// Announce ourselves so peers discover us: (1) a bootstrap Announce transaction relayed on the Bitcoin
+    /// network (seeds nodes that don't know us yet), and (2) the poker gossip overlay's announce/query, which
+    /// floods our presence across the overlay and pulls peers others know.
+    /// </summary>
     private void Announce()
     {
         try
         {
             var script = OnChainAnnounce.BuildScript(_profile.IdentityPub, MyEndpoint());
-            var (raw, _) = _wallet.FundTx(script, 1000, 500);   // an announcement is a real funded tx (needs sats)
-            if (raw != null) { _bsvNode?.Broadcast(raw); foreach (var ep in _peers.Values) Push(ep, raw); }
+            var (raw, _) = _wallet.FundTx(script, 1000, 500);   // a bootstrap announcement is a real funded tx
+            if (raw != null) _bsvNode?.Broadcast(raw);
         }
         catch { }
-    }
-
-    private void Push(string endpoint, byte[] raw)
-    {
-        var (host, port) = ParseHostPort(endpoint);
-        if (host != null) _ = TxLink.SendTxAsync(_currentNet, host, port, raw);
+        _gossip?.Announce();   // poker overlay: announce to known peers (they forward it onward)
+        _gossip?.Query();      // and pull the peers they know
     }
 
     private static string LocalIp()
@@ -266,11 +276,10 @@ public partial class MainWindow : Window
     private void UpdateNetInfo()
     {
         var name = (NetworkBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "Mainnet";
-        // These are BITCOIN NETWORK NODES (blockchain infrastructure) — NOT other players.
-        var chain = _bsvNode != null
-            ? $"blockchain: {_bsvNode.PeerCount} BSV node(s) · tip {_bsvNode.BestHeight} · validated {_storedHeight}"
-            : "blockchain: connecting…";
-        NetInfo.Text = $"   {name} · {chain} · transactions-only (no off-chain channel)";
+        // STANDALONE SPV: the client connects to no node network. Payments arrive as SPV envelopes (merkle
+        // proof + header) IP-to-IP; players are discovered peer-to-peer. There is no "connected" state.
+        int players = _gossip?.Peers.Count ?? 0;
+        NetInfo.Text = $"   {name} · SPV (online) · poker gossip overlay · players discovered: {players}";
         Title = $"BSV Poker — {_profile.Name} — {name}";
     }
 }

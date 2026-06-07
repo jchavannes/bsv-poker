@@ -24,7 +24,7 @@ namespace BsvPoker.App.Views;
 public sealed class WalletView : UserControl
 {
     private sealed class Tx { public string Time { get; set; } = ""; public string Type { get; set; } = ""; public long Amount { get; set; } public long Balance { get; set; } public string Memo { get; set; } = ""; }
-    private sealed class UtxoRec { public string Txid { get; set; } = ""; public uint Vout { get; set; } public long Value { get; set; } public uint KeyChain { get; set; } public uint KeyIndex { get; set; } public bool Spent { get; set; } }
+    private sealed class UtxoRec { public string Txid { get; set; } = ""; public uint Vout { get; set; } public long Value { get; set; } public uint KeyChain { get; set; } public uint KeyIndex { get; set; } public bool Spent { get; set; } public bool Confirmed { get; set; } }
     private sealed class File_ { public string Seed { get; set; } = ""; public int RecvIndex { get; set; } public List<UtxoRec> Utxos { get; set; } = new(); public List<Tx> History { get; set; } = new(); }
 
     private readonly string _path;
@@ -121,10 +121,64 @@ public sealed class WalletView : UserControl
 
     // ---- real on-chain funding & spending ----
 
-    private long Balance => _w.Utxos.Where(u => !u.Spent).Sum(u => u.Value);
+    // Balance counts ONLY real, SPV-confirmed, unspent coins. Unconfirmed coins (detected-but-not-yet-mined
+    // incoming, or our own in-flight change) are shown separately as PENDING and never counted as spendable.
+    private long Balance => _w.Utxos.Where(u => !u.Spent && u.Confirmed).Sum(u => u.Value);
+    private long Pending => _w.Utxos.Where(u => !u.Spent && !u.Confirmed).Sum(u => u.Value);
 
-    /// <summary>True when the wallet can fund an on-chain hand of the given pot right now.</summary>
-    public bool CanPlayOnChain(long pot) => !_locked && _node()?.PeerCount > 0 && Balance >= pot + OnChainHandReserve;
+    /// <summary>
+    /// Detect an INCOMING payment: scan a transaction's outputs for any that pay one of our receive keys and,
+    /// if new, record it as PENDING (not counted as balance until SPV-confirmed in a block). Returns true if
+    /// something new was added. This is how the balance reflects the chain — the node hands us relayed txs.
+    /// </summary>
+    public bool ConsiderIncoming(Core.Chain.Tx tx)
+    {
+        if (_locked) return false;
+        bool added = false;
+        var txid = Core.Chain.Txid(tx);
+        for (int v = 0; v < tx.Outs.Count; v++)
+        {
+            for (uint i = 0; i <= (uint)_w.RecvIndex + 50; i++)
+            {
+                if (tx.Outs[v].Script.AsSpan().SequenceEqual(Core.Chain.P2pkhLockForPub(WalletKeys.Account(_seed, 0, i).Pub)))
+                {
+                    if (!_w.Utxos.Any(u => u.Txid == txid && u.Vout == (uint)v))
+                    { _w.Utxos.Add(new UtxoRec { Txid = txid, Vout = (uint)v, Value = tx.Outs[v].Value, KeyChain = 0, KeyIndex = i, Confirmed = false }); added = true; }
+                    break;
+                }
+            }
+        }
+        if (added) { AppendTx("incoming (pending)", 0, "awaiting confirmation"); Save(); Render(); }
+        return added;
+    }
+
+    /// <summary>
+    /// Confirm pending coins by SPV: if a pending UTXO's transaction is in <paramref name="parsed"/> and that
+    /// block is in a header chain we validated ourselves, verify the merkle proof and mark the coin CONFIRMED
+    /// (now counted as real balance). Only confirmed-on-chain coins ever become spendable.
+    /// </summary>
+    public void ConfirmFromBlock(BsvBlock.Parsed parsed, HeadersChain chain)
+    {
+        if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(new Action(() => ConfirmFromBlock(parsed, chain))); return; }
+        if (chain.Get(parsed.Header.HashHex()) == null) return;                 // block not in OUR validated chain
+        if (!MerkleProof.Root(parsed.Txids).AsSpan().SequenceEqual(parsed.Header.MerkleRoot)) return; // block self-consistent
+        var index = new Dictionary<string, int>();
+        for (int i = 0; i < parsed.Txs.Count; i++) index[Core.Chain.Txid(parsed.Txs[i])] = i;
+        bool changed = false;
+        foreach (var u in _w.Utxos.Where(u => !u.Confirmed && !u.Spent))
+            if (index.TryGetValue(u.Txid, out int idx) && MerkleProof.Verify(parsed.Txids[idx], idx, MerkleProof.Branch(parsed.Txids, idx), parsed.Header.MerkleRoot))
+            { u.Confirmed = true; changed = true; AppendTx("confirmed", u.Value, $"{u.Txid[..12]}…:{u.Vout} mined"); }
+        if (changed) { Save(); Render(); }
+    }
+
+    /// <summary>Txids of coins still awaiting confirmation (so the node can fetch their blocks).</summary>
+    public IReadOnlyList<string> PendingTxids() => _w.Utxos.Where(u => !u.Confirmed && !u.Spent).Select(u => u.Txid).Distinct().ToList();
+
+    /// <summary>
+    /// True when the wallet holds enough REAL (SPV-confirmed) coin to seat a hand. STANDALONE SPV — there is
+    /// NO "connected to the network" requirement; the client never depends on a node connection.
+    /// </summary>
+    public bool CanPlayOnChain(long pot) => !_locked && Balance >= pot + OnChainHandReserve;
 
     /// <summary>
     /// Reserve a single spendable coin to seat a live two-party hand: returns the UTXO, the key that controls
@@ -251,7 +305,7 @@ public sealed class WalletView : UserControl
                 }
                 if (utxo == null) { MessageBox.Show("Proof did not verify against our validated headers, or the output does not pay any of our addresses.", "Import rejected"); return; }
                 if (_w.Utxos.Any(u => u.Txid == utxo.Txid && u.Vout == utxo.Vout)) { MessageBox.Show("That UTXO is already in the wallet.", "Already imported"); return; }
-                _w.Utxos.Add(new UtxoRec { Txid = utxo.Txid, Vout = utxo.Vout, Value = utxo.Value, KeyChain = utxo.KeyChain, KeyIndex = utxo.KeyIndex });
+                _w.Utxos.Add(new UtxoRec { Txid = utxo.Txid, Vout = utxo.Vout, Value = utxo.Value, KeyChain = utxo.KeyChain, KeyIndex = utxo.KeyIndex, Confirmed = true }); // SPV-verified against our headers
                 AppendTx("funded", utxo.Value, $"SPV funding {utxo.Txid[..12]}…:{utxo.Vout}");
                 Save(); Render();
                 _status.Text = $"Imported {utxo.Value:N0} sat (verified against our own headers).";
@@ -422,6 +476,9 @@ public sealed class WalletView : UserControl
     private void Load()
     {
         try { if (File.Exists(_path)) _w = JsonSerializer.Deserialize<File_>(File.ReadAllText(_path)) ?? new File_(); } catch { _w = new File_(); }
+        // NO FAKE COINS: on load, keep ONLY real SPV-confirmed unspent coins. Anything not confirmed on-chain
+        // (old/optimistic/local state) is dropped — the balance is rebuilt from the chain, never invented.
+        _w.Utxos = _w.Utxos.Where(u => u.Confirmed && !u.Spent).ToList();
         if (WalletExtras.IsEncryptedSeed(_w.Seed))
         {
             _locked = true;            // encrypted on disk — must be unlocked with the password before use
@@ -531,7 +588,7 @@ public sealed class WalletView : UserControl
             _history.ItemsSource = _w.History.AsEnumerable().Reverse().ToList();
             return;
         }
-        _bal.Text = Balance.ToString("N0") + " sat";
+        _bal.Text = Balance.ToString("N0") + " sat" + (Pending > 0 ? $"   (+{Pending:N0} pending)" : "");
         _recv.Text = ReceiveAddress() + $"   (#{_w.RecvIndex})";
         _history.ItemsSource = _w.History.AsEnumerable().Reverse().ToList();
         RefreshCards();

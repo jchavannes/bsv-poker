@@ -32,6 +32,8 @@ SeatOrderTests.All();
 VerifiedHandTests.All();
 LiveDealTests.All();
 LiveHandTests.All();
+SpvEnvelopeTests.All();
+PokerGossipTests.All();
 BsvProtocolTests.All();
 BsvHeadersTests.All();
 HeaderStoreTests.All();
