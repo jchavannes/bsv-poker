@@ -34,9 +34,14 @@ connect, header sync+persist, and full block fetch+validate — is listed under 
    validate merkle root → verify a merkleblock funding proof) works on the real network. STILL NOT
    verified: header sync all the way to the current tip (only the first tens of thousands), and
    **broadcasting a transaction that actually gets mined**.
-2. **No real money has moved.** The wallet has never received real BSV. The SPV-funding *verifier* now
-   works on real-format data (a merkleblock built from a real/parsed block verifies), but no real funding
-   tx has been broadcast, confirmed, and turned into a spendable balance on any network. No real spend.
+2. **Real money HAS moved end-to-end on regtest (consensus-proven).** `tools/RegtestE2E` runs against a
+   real `bitcoinsv/bitcoin-sv` node: it funds our own regtest address with 1.0 BSV, our client connects
+   over the P2P wire, syncs+validates the headers itself, fetches the funding block via `getdata`, builds a
+   merkleblock, **SPV-verifies the funding into a UTXO against our own headers**, then **builds, signs, and
+   broadcasts a real spend that the node ACCEPTS and MINES (1 confirmation)**. So the whole money spine —
+   fund → SPV-verify → signed spend → consensus acceptance — is proven against real BSV consensus rules.
+   STILL NOT done: the same run on **mainnet/testnet with externally-funded real coins** (regtest coins are
+   free), and money moving through the **app's** wallet UI (the e2e is a headless tool, not the GUI).
 3. **On-chain gameplay is not wired into the running app.** The app still runs the old play-money path.
    `OnChainGameSession` etc. are libraries called only by tests. No table/deal/bet/card has gone on-chain
    in the actual product.
