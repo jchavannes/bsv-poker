@@ -125,6 +125,28 @@ public sealed class WalletView : UserControl
 
     /// <summary>True when the wallet can fund an on-chain hand of the given pot right now.</summary>
     public bool CanPlayOnChain(long pot) => !_locked && _node()?.PeerCount > 0 && Balance >= pot + OnChainHandReserve;
+
+    /// <summary>
+    /// Fund an arbitrary output script (e.g. an encrypted chat message, or any on-chain action) from real
+    /// sats, advancing wallet state, and return the signed raw transaction to push IP-to-IP + to miners.
+    /// Everything the app sends between machines goes through a real funded Bitcoin transaction like this.
+    /// </summary>
+    public (byte[]? Raw, string Status) FundTx(byte[] outputScript, long value = 1000, long fee = 500)
+    {
+        if (_locked) return (null, "🔒 Unlock the wallet first.");
+        var w = new OnChainWallet(_seed);
+        foreach (var u in _w.Utxos.Where(u => !u.Spent)) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
+        if (w.Balance < value + fee) return (null, $"Insufficient sats: have {w.Balance:N0}, need {value + fee:N0}. Fund your wallet first.");
+        try
+        {
+            var spend = w.SpendAction(outputScript, value, fee);
+            _w.Utxos = w.Coins.Select(u => new UtxoRec { Txid = u.Txid, Vout = u.Vout, Value = u.Value, KeyChain = u.KeyChain, KeyIndex = u.KeyIndex }).ToList();
+            AppendTx("message", -(value + fee), $"on-chain tx {Chain.Txid(spend.Tx)[..12]}…");
+            Save(); Render();
+            return (Chain.Serialize(spend.Tx), "");
+        }
+        catch (Exception ex) { return (null, ex.Message); }
+    }
     private const long OnChainHandReserve = 60_000; // headroom for the ~20 per-step values + fees of one hand
 
     /// <summary>

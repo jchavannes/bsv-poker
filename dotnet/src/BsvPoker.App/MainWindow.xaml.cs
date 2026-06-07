@@ -1,59 +1,98 @@
 using System.Windows;
 using BsvPoker.App.Views;
-using BsvPoker.Net;
+using BsvPoker.Core;
+using BsvPoker.Net.Bsv;
 
 namespace BsvPoker.App;
 
 public partial class MainWindow : Window
 {
     private readonly Profile _profile = new();
-    private readonly P2PNode _node = new(0, "127.0.0.1"); // loopback by default; LAN is an explicit opt-in
     private GameView? _game;
+    private ChatView? _chatView;
+    private TxLink? _link;   // the ONLY player-to-player transport: it carries nothing but Bitcoin transactions
 
     public MainWindow()
     {
         InitializeComponent();
-        // PER-INSTANCE: each running copy gets its OWN profile (wallet + identity). A 2nd copy is a
-        // DIFFERENT player, not a clone.
+        // PER-INSTANCE: each running copy gets its OWN profile (wallet + identity). A 2nd copy is a different player.
         Title = $"BSV Poker — {_profile.Name}";
 
         var vault = new CardVault(_profile.Dir, _profile.IdentityPriv, _profile.IdentityPub);
-        // the wallet reads the CURRENT network's live node + validated header store at call time (these change
-        // when the network selector changes), so funding is verified and spends broadcast on the right network.
         var wallet = new WalletView(_profile.Dir, vault, () => _bsvNode, () => _headerStore, () => _currentNet);
         WalletHost.Content = wallet;
-        var chat = new ChatService(_node, _profile.IdentityPriv, _profile.IdentityPub, _profile.Dir);
-        ChatHost.Content = new ChatView(chat);
-        _game = new GameView(_node, _profile.IdentityPriv, _profile.IdentityPub, vault, wallet.RefreshCards,
+        _wallet = wallet;
+
+        _game = new GameView(_profile.IdentityPriv, _profile.IdentityPub, vault, wallet.RefreshCards,
             onChainSettle: (deck, pot) => wallet.PlayOnChainHand(deck, pot), // a hand is real BSV transactions only
             canFund: stake => wallet.CanPlayOnChain(stake));                 // refuse to start without real sats
-        _game.OnLeaveTable += () => { try { _botWindow?.Close(); _bot?.Dispose(); _bot = null; _botWindow = null; } catch { } };
         GameHost.Content = _game;
 
-        var lobby = new LobbyView(_node, _profile.IdentityPub, JoinTable, PlayBot);
-        LobbyHost.Content = lobby;
+        // Chat: every message is a Bitcoin transaction. Send = fund an encrypted ChatDirect tx, push it
+        // IP-to-IP to the peer AND broadcast it to miners. Receive = a tx the peer pushed to us, decrypted.
+        _chatView = new ChatView(_profile.IdentityPub, "starting…", SendChatTx);
+        ChatHost.Content = _chatView;
+
+        LobbyHost.Content = new LobbyView(() => { _game!.StartBot(default); Tabs.SelectedIndex = 2; });
         InitNetworkSelector();
 
         Loaded += (_, _) =>
         {
-            // RULE: the ONLY socket this app opens is the Bitcoin (BSV) P2P network. There is NO off-chain
-            // mesh, presence, discovery, or chat — every inter-machine message must be a Bitcoin transaction.
-            // The non-transaction P2P mesh (_node.StartAsync), HeartbeatAsync, and LocalDiscovery are therefore
-            // NOT started. (Lobby/chat/multiplayer are being rebuilt as on-chain transactions; see RED_TEST.)
-            StartBsvNetwork(); // connect to the live BSV network for the selected network — Bitcoin transactions only
+            StartBsvNetwork();   // the only Bitcoin-network connection (tx/headers/block) — nothing off-chain
+            StartTxLink();       // listen for transactions pushed to us IP-to-IP by other players
             var netRefresh = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
             netRefresh.Tick += (_, _) => UpdateNetInfo();
             netRefresh.Start();
         };
-        Closed += (_, _) => { try { _bsvNode?.Dispose(); } catch { } try { _node.Dispose(); } catch { } };
+        Closed += (_, _) => { try { _bsvNode?.Dispose(); } catch { } try { _link?.Dispose(); } catch { } };
     }
 
-    private readonly HashSet<int> _dialed = new();
+    private WalletView _wallet = null!;
+
+    private void StartTxLink()
+    {
+        try
+        {
+            _link = new TxLink(_currentNet, 0); // loopback by default; expose to LAN/Internet is an explicit opt-in
+            _link.OnTransaction += tx =>
+            {
+                // every inbound packet is a Bitcoin transaction; if it is a chat message addressed to us, show it
+                var msg = OnChainChat.TryReadTx(tx, _profile.IdentityPriv, _profile.IdentityPub);
+                if (msg != null) _chatView?.AddIncoming(Convert.ToHexString(msg.SenderPub).ToLowerInvariant(), msg.Text);
+            };
+            _link.Start();
+            _chatView?.SetListenEndpoint($"127.0.0.1:{_link.Port}");
+        }
+        catch { }
+    }
+
+    /// <summary>Send a chat message AS a Bitcoin transaction: fund it, push IP-to-IP to the peer, broadcast to miners.</summary>
+    private string SendChatTx(string recipientPubHex, string peerHostPort, string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return "Type a message.";
+        byte[] rpub;
+        try { rpub = Convert.FromHexString(recipientPubHex); } catch { return "Recipient public key must be 66 hex chars."; }
+        if (rpub.Length != 33) return "Recipient public key must be a 33-byte compressed key (66 hex).";
+        var script = OnChainChat.BuildScript(rpub, _profile.IdentityPub, text);
+        var (raw, status) = _wallet.FundTx(script, 1000, 500);
+        if (raw == null) return status;
+        var (host, port) = ParseHostPort(peerHostPort);
+        if (host != null) _ = TxLink.SendTxAsync(_currentNet, host, port, raw);   // IP-to-IP straight to the player
+        _bsvNode?.Broadcast(raw);                                                 // and to the mining nodes → on-chain
+        return $"Sent as a Bitcoin tx — pushed to {peerHostPort} and broadcast to miners.";
+    }
+
+    private static (string? Host, int Port) ParseHostPort(string s)
+    {
+        var i = s.LastIndexOf(':');
+        if (i <= 0 || !int.TryParse(s[(i + 1)..], out var p) || p <= 0) return (null, 0);
+        return (s[..i], p);
+    }
 
     private void InitNetworkSelector()
     {
         var file = System.IO.Path.Combine(_profile.Dir, "network.txt");
-        int sel = 0; // default MAINNET (Mainnet primary, Testnet backup, Regtest a distant 3rd never default)
+        int sel = 0; // default MAINNET (Mainnet primary, Testnet backup, Regtest a distant 3rd, never default)
         try { if (System.IO.File.Exists(file) && int.TryParse(System.IO.File.ReadAllText(file).Trim(), out var v) && v is >= 0 and <= 2) sel = v; } catch { }
         NetworkBox.SelectedIndex = sel;
         UpdateNetInfo();
@@ -65,32 +104,31 @@ public partial class MainWindow : Window
         };
     }
 
-    private BsvPoker.Net.Bsv.BsvNode? _bsvNode;
-    private BsvPoker.Net.Bsv.HeaderStore? _headerStore;
-    private BsvPoker.Net.Bsv.NetworkParams _currentNet = BsvPoker.Net.Bsv.NetworkParams.For(BsvPoker.Net.Bsv.BsvNetwork.Mainnet);
+    private BsvNode? _bsvNode;
+    private HeaderStore? _headerStore;
+    private NetworkParams _currentNet = NetworkParams.For(BsvNetwork.Mainnet);
     private int _storedHeight;
 
     private void StartBsvNetwork()
     {
         var net = NetworkBox.SelectedIndex switch
         {
-            1 => BsvPoker.Net.Bsv.BsvNetwork.Testnet,
-            2 => BsvPoker.Net.Bsv.BsvNetwork.Regtest,
-            _ => BsvPoker.Net.Bsv.BsvNetwork.Mainnet,
+            1 => BsvNetwork.Testnet,
+            2 => BsvNetwork.Regtest,
+            _ => BsvNetwork.Mainnet,
         };
         try { _bsvNode?.Dispose(); } catch { }
-        _currentNet = BsvPoker.Net.Bsv.NetworkParams.For(net);
-        _bsvNode = new BsvPoker.Net.Bsv.BsvNode(_currentNet);
-        // persistent, per-profile, per-network header store: validated headers survive a restart and sync resumes
+        _currentNet = NetworkParams.For(net);
+        _bsvNode = new BsvNode(_currentNet);
         var storePath = System.IO.Path.Combine(_profile.Dir, $"headers-{net}.dat");
-        _headerStore = new BsvPoker.Net.Bsv.HeaderStore(storePath);
+        _headerStore = new HeaderStore(storePath);
         _storedHeight = _headerStore.Count;
         var store = _headerStore;
         _ = System.Threading.Tasks.Task.Run(async () =>
         {
             var node = _bsvNode;
-            await node.StartAsync();   // resolve DNS seeds and connect to live BSV peers
-            while (ReferenceEquals(_headerStore, store)) // run only while this store is the current network's store
+            await node.StartAsync();
+            while (ReferenceEquals(_headerStore, store))
             {
                 try
                 {
@@ -110,37 +148,11 @@ public partial class MainWindow : Window
     private void UpdateNetInfo()
     {
         var name = (NetworkBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "Mainnet";
-        // These are BITCOIN NETWORK NODES (blockchain infrastructure) — NOT other players. Players are
-        // discovered only on-chain; with no off-chain mesh there are 0 other players visible here yet.
+        // These are BITCOIN NETWORK NODES (blockchain infrastructure) — NOT other players.
         var chain = _bsvNode != null
             ? $"blockchain: {_bsvNode.PeerCount} BSV node(s) · tip {_bsvNode.BestHeight} · validated {_storedHeight}"
             : "blockchain: connecting…";
-        NetInfo.Text = $"   {name} · {chain} · players: 0 (on-chain only)";
+        NetInfo.Text = $"   {name} · {chain} · transactions-only (no off-chain channel)";
         Title = $"BSV Poker — {_profile.Name} — {name}";
     }
-
-    private void JoinTable(string tableId, string tableName)
-    {
-        _game?.StartNetworked(tableId, tableName);
-        Tabs.SelectedIndex = 2; // switch to the Game tab
-    }
-
-    private BotPlayer? _bot;
-    private BotWindow? _botWindow;
-
-    private void PlayBot(BsvPoker.Core.Variant variant)
-    {
-        // A bot is a SEPARATE automated player on its OWN node + identity, NOT a hot-seat clone and NOT a
-        // second copy of the app. The human joins the table on the main node; the bot joins the same table
-        // on its own loopback node and plays itself in a small, distinct, offset window.
-        _botWindow?.Close(); _bot?.Dispose();
-        var tableId = "t-" + Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(6)).ToLowerInvariant() + "~" + variant + "~p2";
-        _game?.StartNetworked(tableId, "vs Bot");
-        Tabs.SelectedIndex = 2; // Game tab (the human)
-        _bot = new BotPlayer(_node.BoundPort, tableId);
-        _botWindow = new BotWindow(_bot) { Owner = this };
-        _botWindow.Show();
-    }
-
-    protected override void OnClosed(EventArgs e) { try { _botWindow?.Close(); _bot?.Dispose(); } catch { } base.OnClosed(e); }
 }
