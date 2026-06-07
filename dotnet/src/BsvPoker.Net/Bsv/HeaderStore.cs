@@ -45,6 +45,26 @@ public sealed class HeaderStore
         return hs.Count == 0 ? genesisInternal : hs[^1].Hash();
     }
 
+    /// <summary>
+    /// Load the persisted headers into an indexed, re-validated <see cref="HeadersChain"/> (each header must
+    /// link to its parent and meet PoW, exactly as when first received). This is what SPV funding verifies a
+    /// payment's merkle proof against — the wallet trusts a UTXO only if its block is in a chain the client
+    /// validated itself. Returns the chain and how many headers were accepted (a corrupt tail stops loading).
+    /// </summary>
+    public (HeadersChain Chain, int Loaded) BuildChain()
+    {
+        var chain = new HeadersChain();
+        var headers = Load();
+        int loaded = 0;
+        for (int i = 0; i < headers.Count; i++)
+        {
+            var r = i == 0 ? chain.AddGenesis(headers[i]) : chain.Add(headers[i]);
+            if (r is HeadersChain.AddResult.Accepted or HeadersChain.AddResult.Reorg) loaded++;
+            else break; // first header that does not validate/link → stop trusting the rest
+        }
+        return (chain, loaded);
+    }
+
     /// <summary>Count how many leading headers form a valid chain from <paramref name="genesisInternal"/> (PoW + linkage).</summary>
     public static int ValidatePrefix(IReadOnlyList<BlockHeader> headers, byte[] genesisInternal)
     {

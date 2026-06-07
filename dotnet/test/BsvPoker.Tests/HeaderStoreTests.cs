@@ -1,3 +1,5 @@
+using BsvPoker.Core;
+using BsvPoker.Crypto;
 using BsvPoker.Net.Bsv;
 
 namespace BsvPoker.Tests;
@@ -27,6 +29,18 @@ public static class HeaderStoreTests
         var prev = genesisInternal;
         for (uint i = 0; i < n; i++) { var h = Mk(prev, i + 1); hs.Add(h); prev = h.Hash(); }
         return hs;
+    }
+
+    private static byte[] RandomBytes() => System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+
+    // mine a header carrying a specific merkle root (so an SPV proof against it verifies)
+    private static BlockHeader MineHeaderWithRoot(byte[] prevInternal, byte[] merkleRoot)
+    {
+        for (uint nonce = 1; ; nonce++)
+        {
+            var h = new BlockHeader(1, prevInternal, merkleRoot, 1_700_000_000, EasyBits, nonce);
+            if (h.MeetsPow()) return h;
+        }
     }
 
     public static void All()
@@ -100,6 +114,75 @@ public static class HeaderStoreTests
             var bad = new BlockHeader(1, good[^1].Hash(), new byte[32], 1_700_000_000, 0x1d00ffff, 1);
             var chain = new List<BlockHeader> { good[0], good[1], bad };
             T.Eq(HeaderStore.ValidatePrefix(chain, genesis), 2, "bad-PoW header excluded");
+        });
+
+        T.Run("BuildChain re-validates the persisted headers into an indexed chain", () =>
+        {
+            var path = Path.Combine(Path.GetTempPath(), "bsvpoker-hs-" + Guid.NewGuid().ToString("N") + ".dat");
+            try
+            {
+                var store = new HeaderStore(path);
+                var chain = Chain(genesis, 4);
+                store.Append(chain);
+                var (built, loaded) = new HeaderStore(path).BuildChain();
+                T.Eq(loaded, 4, "all 4 re-validated");
+                T.Eq(built.Height, 3, "tip height (0-based) after genesis + 3");
+                T.True(built.Knows(chain[^1].HashHex()), "tip indexed by hash");
+            }
+            finally { if (File.Exists(path)) File.Delete(path); }
+        });
+
+        T.Run("BuildChain stops at a corrupt tail (never trusts unlinked headers)", () =>
+        {
+            var path = Path.Combine(Path.GetTempPath(), "bsvpoker-hs-" + Guid.NewGuid().ToString("N") + ".dat");
+            try
+            {
+                var store = new HeaderStore(path);
+                var good = Chain(genesis, 3);
+                store.Append(good);
+                store.Append(new[] { Mk(RandomBytes(), 77) }); // an orphan appended after the valid chain
+                var (_, loaded) = new HeaderStore(path).BuildChain();
+                T.Eq(loaded, 3, "only the linked prefix is trusted");
+            }
+            finally { if (File.Exists(path)) File.Delete(path); }
+        });
+
+        T.Run("SPV funding verifies against the PERSISTED, self-validated chain", () =>
+        {
+            var path = Path.Combine(Path.GetTempPath(), "bsvpoker-hs-" + Guid.NewGuid().ToString("N") + ".dat");
+            try
+            {
+                var me = Secp256k1.GenerateKeyPair();
+                var other = Secp256k1.GenerateKeyPair();
+                // a funding tx paying us 55000 at vout 1, placed in a block
+                var fundTx = new BsvPoker.Core.Chain.Tx(2,
+                    new() { new("ab".PadRight(64, '7'), 0, Array.Empty<byte>(), 0xffffffff) },
+                    new() { new(9000, BsvPoker.Core.Chain.P2pkhLockForPub(other.Pub)),
+                            new(55000, BsvPoker.Core.Chain.P2pkhLockForPub(me.Pub)) }, 0);
+                var leaf = Hashes.Sha256d(BsvPoker.Core.Chain.Serialize(fundTx));
+                var leaves = new List<byte[]>();
+                for (int i = 0; i < 4; i++) { var b = new byte[32]; b[0] = (byte)(i + 1); leaves.Add(b); }
+                int idx = 2; leaves.Insert(idx, leaf);
+                var root = MerkleProof.Root(leaves);
+                var branch = MerkleProof.Branch(leaves, idx);
+
+                // the block carrying that tx is the genesis of a persisted chain (validated on load)
+                var header = MineHeaderWithRoot(genesis, root);
+                var store = new HeaderStore(path);
+                store.Append(new[] { header });
+                var (chain, loaded) = new HeaderStore(path).BuildChain();
+                T.Eq(loaded, 1, "persisted block validated");
+
+                var proof = new SpvFunding.Proof(fundTx, 1, header.HashHex(), branch, idx);
+                var utxo = SpvFunding.Verify(proof, chain, me.Pub, 0, 0);
+                T.True(utxo != null, "UTXO learned from a persisted, self-validated block");
+                T.Eq(utxo!.Value, 55000L, "value picked up");
+
+                // a proof whose block is NOT in the persisted chain is rejected
+                var bogus = new SpvFunding.Proof(fundTx, 1, new string('0', 64), branch, idx);
+                T.True(SpvFunding.Verify(bogus, chain, me.Pub, 0, 0) == null, "unknown block rejected");
+            }
+            finally { if (File.Exists(path)) File.Delete(path); }
         });
 
         T.Run("a truncated (non-80-multiple) file loads only whole headers", () =>
