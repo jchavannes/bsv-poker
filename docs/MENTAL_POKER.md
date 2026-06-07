@@ -40,10 +40,12 @@ knows is left with `d_T·M`, which matches no base point. Tests prove this end t
 **multiway (3-player)** simulation and a live 3-node networked hand — showing each peer reads only its
 own hole cards, the board agrees across all peers, and showdown reveals every hand with chips conserved.
 
-> **Honest scope.** This gives cryptographic *card privacy* against an honest-but-curious opponent. The
-> network channel itself is **not yet authenticated** (messages are unsigned), so it is not secure
-> against an *active* hostile peer who forges or replays protocol messages. Authenticating the transport
-> is part of the (deferred) red-team hardening, not yet done — see [SECURITY.md](SECURITY.md).
+> **Honest scope.** This gives cryptographic *card privacy* by construction. The network channel is
+> authenticated: every game message is signed by the sender's identity key and bound to table/hand/seat,
+> and join is a proof-of-possession, so a peer cannot act, reveal, shuffle, or commit for a seat it does
+> not own and forged/replayed frames are rejected (see [SECURITY.md](SECURITY.md)). The one tracked
+> residual is seat-order grinding by mass key generation (stake-binding / post-admission joint randomness
+> is the next hardening for it).
 
 ## Cards as NFTs (`CardNft`)
 

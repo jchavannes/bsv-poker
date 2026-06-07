@@ -26,6 +26,7 @@ NetGameTests.All();
 NetChatTests.All();
 BsvProtocolTests.All();
 BsvHeadersTests.All();
+HeaderStoreTests.All();
 MerkleProofTests.All();
 SpvFundingTests.All();
 ScriptTests.All();

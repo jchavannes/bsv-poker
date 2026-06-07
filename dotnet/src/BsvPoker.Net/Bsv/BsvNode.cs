@@ -131,6 +131,43 @@ public sealed class BsvNode : IDisposable
         return (total, total);
     }
 
+    /// <summary>
+    /// Persistent header sync: resume from the store's last header (or genesis if empty), download forward in
+    /// getheaders batches, validate PoW + linkage across batch boundaries, and append each validated batch to
+    /// the store so progress survives a restart. Returns (appended this run, total height in the store). The
+    /// store is only ever extended with headers that link onto what it already holds — a peer cannot make us
+    /// persist an unlinked or bad-PoW header.
+    /// </summary>
+    public async Task<(int Appended, int StoreHeight)> SyncHeadersToStoreAsync(HeaderStore store, int maxBatches = 50, int waitMs = 8000)
+    {
+        var peer = _peers.Values.FirstOrDefault();
+        var genesis = InternalHash(_net.GenesisHashHex);
+        if (peer == null) return (0, store.Count);
+        var prev = store.TipOrGenesis(genesis); // resume locator
+        int appended = 0;
+        for (int batch = 0; batch < maxBatches; batch++)
+        {
+            var received = new List<BlockHeader>();
+            var tcs = new TaskCompletionSource<bool>();
+            void Handler(BsvMessage m) { if (m.Command == "headers") { try { ParseHeaders(m.Payload, received); } catch { } tcs.TrySetResult(true); } }
+            peer.OnMessage += Handler;
+            try { peer.Send("getheaders", BuildGetHeaders(new[] { prev })); await Task.WhenAny(tcs.Task, Task.Delay(waitMs)); }
+            finally { peer.OnMessage -= Handler; }
+            if (received.Count == 0) break;
+            var batchValid = new List<BlockHeader>();
+            foreach (var h in received)
+            {
+                if (!h.MeetsPow() || !h.PrevHash.AsSpan().SequenceEqual(prev)) break; // stop at first non-linking header
+                prev = h.Hash(); batchValid.Add(h);
+            }
+            if (batchValid.Count == 0) break;
+            store.Append(batchValid);
+            appended += batchValid.Count;
+            if (received.Count < 2000) break; // caught up to the tip
+        }
+        return (appended, store.Count);
+    }
+
     private static byte[] InternalHash(string displayHex) { var b = Convert.FromHexString(displayHex); Array.Reverse(b); return b; }
 
     private static byte[] BuildGetHeaders(byte[][] locator)
