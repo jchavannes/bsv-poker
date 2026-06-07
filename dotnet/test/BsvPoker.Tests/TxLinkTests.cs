@@ -1,4 +1,5 @@
 using BsvPoker.Core;
+using BsvPoker.Core.Games;
 using BsvPoker.Crypto;
 using BsvPoker.Net.Bsv;
 
@@ -11,6 +12,13 @@ namespace BsvPoker.Tests;
 /// </summary>
 public static class TxLinkTests
 {
+    private static Card C(string s)
+    {
+        int rank = s[0] switch { 'A' => 14, 'K' => 13, 'Q' => 12, 'J' => 11, 'T' => 10, _ => s[0] - '0' };
+        var suit = s[1] switch { 's' => Suit.Spades, 'h' => Suit.Hearts, 'd' => Suit.Diamonds, _ => Suit.Clubs };
+        return new Card(rank, suit);
+    }
+
     public static void All()
     {
         Console.WriteLine("IP-to-IP transport (every packet is a Bitcoin transaction):");
@@ -55,6 +63,36 @@ public static class TxLinkTests
 
             T.True(ev.Wait(TimeSpan.FromSeconds(5)), "Bob received the chat tx IP-to-IP");
             T.Eq(got!.Text, "nice hand", "and decrypted it");
+        });
+
+        T.Run("a WHOLE on-chain hand is delivered to the opponent IP-to-IP, every step a Bitcoin tx", () =>
+        {
+            // Alice drives the hand; she pushes EACH hand transaction straight to Bob's node (and would also
+            // send each to miners). Bob receives every step as a Bitcoin transaction and validates it.
+            var net = NetworkParams.For(BsvNetwork.Regtest);
+            using var bob = new TxLink(net, 0);
+            var received = new List<Chain.Tx>();
+            using var done = new ManualResetEventSlim();
+            var expected = 0;
+            bob.OnTransaction += tx => { lock (received) { received.Add(tx); if (received.Count >= expected && expected > 0) done.Set(); } };
+            bob.Start();
+
+            var seed = WalletKeys.NewSeed();
+            var w = new OnChainWallet(seed);
+            w.Add(new OnChainWallet.Utxo("ef".PadRight(64, '3'), 0, 100_000_000, 0, 0));
+            var a = WalletKeys.Account(seed, 2, 0); var bk = WalletKeys.Account(seed, 2, 1);
+            var deck = new[] { C("As"), C("Ah"), C("2c"), C("3d"), C("Ad"), C("Kh"), C("Qs"), C("Jc"), C("9h") };
+            var tape = OnChainHandTape.BuildHoldem(w, (a.Priv, a.Pub), (bk.Priv, bk.Pub), deck, 40000, new byte[16]);
+            expected = tape.Steps.Count;
+
+            foreach (var step in tape.Steps)
+                TxLink.SendTxAsync(net, "127.0.0.1", bob.Port, Chain.Serialize(step.Tx)).GetAwaiter().GetResult();
+
+            T.True(done.Wait(TimeSpan.FromSeconds(15)), $"Bob received all {expected} hand transactions IP-to-IP");
+            // Bob can read every typed step and verify the final settlement is a valid 2-of-2 spend
+            var settle = received.FirstOrDefault(t => Chain.Txid(t) == Chain.Txid(tape.Settlement));
+            T.True(settle != null, "the settlement arrived as a transaction");
+            T.True(Chain.VerifyMultisig2of2(settle!, 0, a.Pub, bk.Pub, 40000), "and is a valid co-signed settlement");
         });
     }
 }
