@@ -37,7 +37,8 @@ public sealed class WalletView : UserControl
     private readonly Func<NetworkParams> _net;      // current network parameters (address version, etc.)
 
     private readonly TextBlock _bal = new() { Foreground = Brushes.White, FontSize = 28, FontWeight = FontWeights.Bold };
-    private readonly TextBlock _recv = new() { Foreground = Brushes.LightGreen, FontFamily = new FontFamily("Consolas"), TextWrapping = TextWrapping.Wrap };
+    // a read-only, SELECTABLE text box (not a TextBlock) so the address can be clicked, selected, and Ctrl+C'd
+    private readonly TextBox _recv = new() { IsReadOnly = true, IsReadOnlyCaretVisible = true, Foreground = Brushes.LightGreen, Background = Brushes.Transparent, BorderThickness = new Thickness(0), FontFamily = new FontFamily("Consolas"), TextWrapping = TextWrapping.Wrap, HorizontalAlignment = HorizontalAlignment.Left, Width = 580 };
     private readonly ListView _history = new() { Background = new SolidColorBrush(Color.FromRgb(0x0F, 0x0F, 0x0F)), Foreground = Brushes.White, BorderThickness = new Thickness(0), Height = 200 };
     private readonly TextBox _amount = new() { Width = 110, Text = "10000" };
     private readonly TextBox _fee = new() { Width = 70, Text = "500" };
