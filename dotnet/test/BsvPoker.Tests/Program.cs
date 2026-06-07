@@ -25,6 +25,7 @@ CardNftTests.All();
 NetTests.All();
 NetGameTests.All();
 NetChatTests.All();
+OnChainChatTests.All();
 BsvProtocolTests.All();
 BsvHeadersTests.All();
 HeaderStoreTests.All();
