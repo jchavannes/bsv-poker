@@ -67,7 +67,8 @@ public sealed class WalletView : UserControl
         root.Children.Add(_recv);
         var newAddr = Btn("New address"); newAddr.Click += (_, _) => { if (Guard()) { _w.RecvIndex++; Save(); Render(); } };
         var importBtn = Btn("Import funding (SPV envelope)…"); importBtn.Click += (_, _) => { if (Guard()) ImportFunding(); };
-        root.Children.Add(new WrapPanel { Children = { newAddr, importBtn } });
+        var makeEnv = Btn("Create funding envelope…"); makeEnv.Click += async (_, _) => { if (Guard()) await CreateEnvelope(); };
+        root.Children.Add(new WrapPanel { Children = { newAddr, importBtn, makeEnv } });
 
         var send = new WrapPanel { Margin = new Thickness(0, 14, 0, 0) };
         send.Children.Add(new TextBlock { Text = "Send  amount ", Foreground = Brushes.Gray, VerticalAlignment = VerticalAlignment.Center });
@@ -177,6 +178,51 @@ public sealed class WalletView : UserControl
             catch (Exception ex) { MessageBox.Show("Could not import: " + ex.Message, "Import error"); }
         };
         win.ShowDialog();
+    }
+
+    /// <summary>
+    /// Payer side of the no-server funding handshake: given a funding transaction and the hash of the block
+    /// that confirmed it, fetch that block from our own BSV node, build a compact merkleblock proof, and emit
+    /// the envelope (funding-tx hex + merkleblock hex + output index) for the recipient to import and verify.
+    /// </summary>
+    private async System.Threading.Tasks.Task CreateEnvelope()
+    {
+        var txBox = new TextBox { Width = 520, Height = 70, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, FontFamily = new FontFamily("Consolas") };
+        var blkBox = new TextBox { Width = 520, FontFamily = new FontFamily("Consolas") };
+        var voutBox = new TextBox { Width = 80, Text = "0" };
+        var outBox = new TextBox { Width = 520, Height = 110, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, IsReadOnly = true, FontFamily = new FontFamily("Consolas") };
+        var go = new Button { Content = "Fetch block & build envelope", Margin = new Thickness(0, 10, 0, 0), Padding = new Thickness(12, 6, 12, 6) };
+        var sp = new StackPanel { Margin = new Thickness(12) };
+        sp.Children.Add(new TextBlock { Text = "Funding transaction (raw hex):", Foreground = Brushes.Gray }); sp.Children.Add(txBox);
+        sp.Children.Add(new TextBlock { Text = "Confirming block hash (the block that mined it):", Foreground = Brushes.Gray, Margin = new Thickness(0, 8, 0, 0) }); sp.Children.Add(blkBox);
+        sp.Children.Add(new WrapPanel { Margin = new Thickness(0, 8, 0, 0), Children = { new TextBlock { Text = "Output index paying the recipient: ", Foreground = Brushes.Gray, VerticalAlignment = VerticalAlignment.Center }, voutBox } });
+        sp.Children.Add(go);
+        sp.Children.Add(new TextBlock { Text = "Envelope to hand to the recipient (merkleblock hex):", Foreground = Brushes.Gray, Margin = new Thickness(0, 8, 0, 0) }); sp.Children.Add(outBox);
+        var win = new Window { Title = "Create funding envelope (SPV)", Width = 580, Height = 480, Owner = Window.GetWindow(this), Content = new ScrollViewer { Content = sp } };
+
+        go.Click += async (_, _) =>
+        {
+            try
+            {
+                var node = _node();
+                if (node == null || node.PeerCount == 0) { MessageBox.Show("Not connected to any BSV peers — cannot fetch the block.", "No peers"); return; }
+                var fundTx = Chain.Deserialize(Convert.FromHexString(txBox.Text.Trim()));
+                var wantTxid = Chain.Txid(fundTx);
+                go.IsEnabled = false; outBox.Text = "Fetching block…";
+                var raw = await node.GetBlockAsync(blkBox.Text.Trim());
+                go.IsEnabled = true;
+                if (raw == null) { outBox.Text = "(no block received — check the block hash, or the peer did not serve it)"; return; }
+                var parsed = BsvBlock.Parse(raw); // validates the merkle root vs the header
+                int idx = parsed.Txs.FindIndex(t => Chain.Txid(t) == wantTxid);
+                if (idx < 0) { outBox.Text = "(the funding tx is not in that block — wrong block hash?)"; return; }
+                var mb = PartialMerkleTree.BuildMerkleBlock(parsed.Header, parsed.Txids, new HashSet<int> { idx });
+                outBox.Text = Convert.ToHexString(mb).ToLowerInvariant();
+                _status.Text = $"Envelope built for {wantTxid[..12]}… (vout {voutBox.Text.Trim()}). Give the recipient: funding tx hex + this merkleblock hex + the output index.";
+            }
+            catch (Exception ex) { go.IsEnabled = true; outBox.Text = "Error: " + ex.Message; }
+        };
+        win.ShowDialog();
+        await System.Threading.Tasks.Task.CompletedTask;
     }
 
     private void DoSend()
