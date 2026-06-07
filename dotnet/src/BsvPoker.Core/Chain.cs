@@ -65,10 +65,10 @@ public static class Chain
     /// <summary>Parse one transaction from <paramref name="b"/> starting at <paramref name="o"/>, advancing it past the tx.</summary>
     // Hostile-input hard caps: a transaction cannot have more inputs/outputs or a larger script than these,
     // so a malformed huge VarInt count cannot drive an allocation/loop. (Generous vs any real poker tx.)
-    public const int MaxTxInputs = 100_000;
-    public const int MaxTxOutputs = 100_000;
-    public const int MaxScriptBytes = 10_000_000;   // 10 MB single script ceiling
-    public const int MaxTxBytes = 64 * 1024 * 1024; // 64 MB single tx ceiling
+    public const int MaxTxInputs = 10_000;
+    public const int MaxTxOutputs = 10_000;
+    public const int MaxScriptBytes = 200_000;      // 200 KB single script ceiling (poker-client realistic)
+    public const int MaxTxBytes = 2 * 1024 * 1024;  // 2 MB single tx ceiling
 
     public static Tx Deserialize(byte[] b, ref int o)
     {
