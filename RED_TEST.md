@@ -43,9 +43,12 @@ connect, header sync+persist, and full block fetch+validate — is listed under 
    pays the pot to the winner (mined) — both consensus-accepted. It also proves the **always-recoverable
    guarantee**: a pre-signed nLockTime escrow recovery is **rejected by the node before its lock height**
    (timelock enforced) and **accepted + mined after** it. Finally it plays a **full Omaha Hi-Lo hand
-   on-chain** (escrow → a SPLIT settlement paying the high and low halves, both outputs mined). So the whole
-   money spine — fund → SPV-verify → signed spend, pot escrow → settlement (incl. hi-lo split), and
-   unilateral timelocked recovery — is proven on real BSV consensus.
+   on-chain** (escrow → a SPLIT settlement paying the high and low halves, both outputs mined), and a
+   **typed transaction template** (TableGenesis) is **built, mined, and SPENT** on-chain (proving "every
+   action is its own on-chain frame type", not OP_RETURN). So the whole money spine — fund → SPV-verify →
+   signed spend, pot escrow → settlement (incl. hi-lo split), timelocked recovery, and typed-tx
+   build+spend — is proven on real BSV consensus. (The real node also caught a consensus bug: typed outputs
+   now use MINIMAL pushes, or the spend is rejected with "Data push larger than necessary".)
    STILL NOT done: the same run on **mainnet/testnet with externally-funded real coins** (regtest coins are
    free), and money moving through the **app's** wallet UI (the e2e is a headless tool, not the GUI).
 3. **On-chain gameplay is not wired into the running app.** The app still runs the old play-money path.

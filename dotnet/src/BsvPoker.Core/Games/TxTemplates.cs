@@ -26,7 +26,7 @@ public static class TxTemplates
     /// <param name="Fields">The named, ordered data fields this type carries (its documented structure).</param>
     public sealed record Template(TxKind Kind, string Tag, int Version, string Purpose, string[] Fields);
 
-    private const byte OP_DROP = 0x75, OP_PUSHDATA1 = 0x4c, OP_CHECKSIG = 0xac;
+    private const byte OP_0 = 0x00, OP_1NEGATE = 0x4f, OP_DROP = 0x75, OP_PUSHDATA1 = 0x4c, OP_PUSHDATA2 = 0x4d, OP_CHECKSIG = 0xac;
 
     private static readonly Dictionary<TxKind, Template> Registry = new[]
     {
@@ -101,19 +101,31 @@ public static class TxTemplates
         catch { return null; }
     }
 
+    // MINIMAL push encoding (BSV consensus MINIMALDATA): empty → OP_0; a single byte 1..16 → OP_1..OP_16; a
+    // single 0x81 → OP_1NEGATE; otherwise the shortest length-prefixed push. Non-minimal pushes are rejected
+    // by the network ("Data push larger than necessary"), so typed outputs MUST be encoded this way to spend.
     private static void Push(List<byte> b, byte[] d)
     {
+        if (d.Length == 0) { b.Add(OP_0); return; }
+        if (d.Length == 1 && d[0] >= 1 && d[0] <= 16) { b.Add((byte)(0x50 + d[0])); return; } // OP_1..OP_16
+        if (d.Length == 1 && d[0] == 0x81) { b.Add(OP_1NEGATE); return; }
         if (d.Length < OP_PUSHDATA1) b.Add((byte)d.Length);
-        else { b.Add(OP_PUSHDATA1); b.Add((byte)d.Length); }
+        else if (d.Length <= 0xff) { b.Add(OP_PUSHDATA1); b.Add((byte)d.Length); }
+        else { b.Add(OP_PUSHDATA2); b.Add((byte)(d.Length & 0xff)); b.Add((byte)(d.Length >> 8)); }
         b.AddRange(d);
     }
     private static void PushDrop(List<byte> b, byte[] d) { Push(b, d); b.Add(OP_DROP); }
     private static byte[]? ReadPush(byte[] s, ref int p)
     {
         if (p >= s.Length) return null;
-        int len; byte op = s[p++];
+        byte op = s[p++];
+        if (op == OP_0) return Array.Empty<byte>();
+        if (op == OP_1NEGATE) return new byte[] { 0x81 };
+        if (op >= 0x51 && op <= 0x60) return new byte[] { (byte)(op - 0x50) }; // OP_1..OP_16
+        int len;
         if (op < OP_PUSHDATA1) len = op;
         else if (op == OP_PUSHDATA1) { if (p >= s.Length) return null; len = s[p++]; }
+        else if (op == OP_PUSHDATA2) { if (p + 2 > s.Length) return null; len = s[p] | s[p + 1] << 8; p += 2; }
         else return null;
         if (len < 0 || p + len > s.Length) return null;
         var d = s[p..(p + len)]; p += len; return d;

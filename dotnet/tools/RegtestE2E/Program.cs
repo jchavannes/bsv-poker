@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.RegularExpressions;
 using BsvPoker.Core;
 using BsvPoker.Core.Games;
+using BsvPoker.Core.Script;
 using BsvPoker.Crypto;
 using BsvPoker.Net.Bsv;
 
@@ -166,14 +167,51 @@ Console.WriteLine($"broadcast hi-lo split settlement {handSettleTxid[..12]}… (
 await Task.Delay(1500); Cli($"generatetoaddress 1 {nodeAddr}");
 bool ok7 = hand.Split && hand.Settlement.Outs.Count == 2 && ConfirmMined(handSettleTxid, "hi-lo SPLIT settlement");
 
+Console.WriteLine("\n-- Phase 5: TYPED transaction (every action is its own on-chain frame type) — build → mine → SPEND --");
+var (u4, _) = await FundAndVerify(9, "1.0");
+var w5 = new OnChainWallet(seed); w5.Add(u4);
+var owner = WalletKeys.Account(seed, 0, 30);
+// a TableGenesis typed output (4 documented fields), spendable by the owner — proves typed txs are real, not OP_RETURN
+var fields = new byte[][] {
+    System.Security.Cryptography.RandomNumberGenerator.GetBytes(16),   // tableId
+    new byte[] { 0 },                                                  // variant = Hold'em
+    new byte[] { 2 },                                                  // seats
+    BitConverter.GetBytes(1000L) };                                    // stakes
+var typedScript = TxTemplates.BuildOutput(TxKind.TableGenesis, fields, owner.Pub);
+var parsedTyped = TxTemplates.Parse(typedScript);
+bool parseOk = parsedTyped is { Kind: TxKind.TableGenesis } && parsedTyped.Fields.Length == 4
+               && parsedTyped.OwnerPub.AsSpan().SequenceEqual(owner.Pub);
+Console.WriteLine($"  typed output parses back: kind={parsedTyped?.Kind}, fields={parsedTyped?.Fields.Length}, ownerOk={parseOk}");
+long typedVal = 10000;
+var typedFund = w5.BuildAction(typedScript, typedVal, 1000);
+node.Broadcast(Chain.Serialize(typedFund.Tx));
+var typedTxid = Chain.Txid(typedFund.Tx);
+await Task.Delay(1500); Cli($"generatetoaddress 1 {nodeAddr}");
+bool ok8 = ConfirmMined(typedTxid, "typed TableGenesis output");
+// now SPEND the typed output: scriptSig is just <sig> over the FORKID contract sighash (pubkey is in the script)
+var sink = Base58.CheckDecode(Cli("getnewaddress"));
+var spendTyped = new Chain.Tx(2,
+    new() { new(typedTxid, 0, Array.Empty<byte>(), 0xffffffff) },
+    new() { new(typedVal - 1000, Chain.P2pkhLock(sink[1..])) }, 0);
+var tsig = TxScriptChecker.Sign(spendTyped, 0, typedScript, typedVal, owner.Priv);
+var ss = new byte[1 + tsig.Length]; ss[0] = (byte)tsig.Length; Array.Copy(tsig, 0, ss, 1, tsig.Length);
+spendTyped = spendTyped with { Ins = new() { spendTyped.Ins[0] with { ScriptSig = ss } } };
+var typedSpendTxid = Chain.Txid(spendTyped);
+var rawHex = Convert.ToHexString(Chain.Serialize(spendTyped)).ToLowerInvariant();
+try { Console.WriteLine($"  sendrawtransaction → {Cli($"sendrawtransaction {rawHex}")}"); }
+catch (Exception ex) { Console.WriteLine($"  typed spend REJECTED: {ex.Message}"); }
+await Task.Delay(800); Cli($"generatetoaddress 1 {nodeAddr}");
+bool ok9 = parseOk && ConfirmMined(typedSpendTxid, "spend of the typed output");
+
 node.Dispose();
-if (ok1 && ok2 && ok3 && ok4 && prematureRejected && ok5 && ok6 && ok7)
+if (ok1 && ok2 && ok3 && ok4 && prematureRejected && ok5 && ok6 && ok7 && ok8 && ok9)
 {
-    Console.WriteLine("\nSUCCESS ✓✓✓✓ END-TO-END PROVEN on real BSV consensus:");
+    Console.WriteLine("\nSUCCESS ✓✓✓✓✓ END-TO-END PROVEN on real BSV consensus:");
     Console.WriteLine("  • fund → SPV-verify → signed spend (mined)");
     Console.WriteLine("  • poker pot: 2-of-2 escrow (mined) → cooperative settlement to winner (mined)");
     Console.WriteLine("  • always-recoverable: pre-signed nLockTime recovery REJECTED before lock, ACCEPTED after (mined)");
     Console.WriteLine("  • full Omaha Hi-Lo hand: escrow → SPLIT settlement paying high + low halves (mined)");
+    Console.WriteLine("  • TYPED transaction template: built, mined, and SPENT on-chain (not OP_RETURN)");
     return 0;
 }
 Console.WriteLine("\nFAIL: one or more phases not confirmed");
