@@ -113,11 +113,40 @@ Console.WriteLine($"broadcast settlement {settleTxid[..12]}… (pot → winner A
 await Task.Delay(1500); Cli($"generatetoaddress 1 {nodeAddr}");
 bool ok3 = ConfirmMined(settleTxid, "pot settlement");
 
+Console.WriteLine("\n-- Phase 3: always-recoverable — pre-signed nLockTime escrow recovery (rejected early, accepted after lock) --");
+var (u2, _) = await FundAndVerify(5, "1.0");
+var w3 = new OnChainWallet(seed); w3.Add(u2);
+var fund2 = OnChainHand.FundEscrow(w3, a.Pub, b.Pub, pot, 1000);
+node.Broadcast(Chain.Serialize(fund2.Tx));
+var escrow2Txid = Chain.Txid(fund2.Tx);
+await Task.Delay(1500); Cli($"generatetoaddress 1 {nodeAddr}");
+bool ok4 = ConfirmMined(escrow2Txid, "recovery-test escrow funding");
+
+int h0 = int.Parse(Cli("getblockcount"));
+uint lockHeight = (uint)(h0 + 4);   // recovery becomes valid only after this height
+var recovery = OnChainHand.Recover(escrow2Txid, 0, a.Pub, pot / 2, b.Pub, pot - pot / 2, 1000, lockHeight, a.Priv, b.Priv);
+var recTxid = Chain.Txid(recovery);
+
+// (a) premature: broadcast before the lock height; mining one block must NOT include it (timelock enforced)
+node.Broadcast(Chain.Serialize(recovery));
+await Task.Delay(1500); Cli($"generatetoaddress 1 {nodeAddr}");
+bool prematureRejected = !ConfirmMined(recTxid, "premature recovery (MUST be rejected)");
+Console.WriteLine(prematureRejected ? "  ✓ timelock enforced: recovery not mineable before lock height" : "  ✗ recovery was mined too early!");
+
+// (b) mine past the lock height, rebroadcast; now it must be accepted and mined
+int hNow = int.Parse(Cli("getblockcount"));
+if (hNow <= lockHeight) Cli($"generatetoaddress {lockHeight - hNow + 1} {nodeAddr}");
+node.Broadcast(Chain.Serialize(recovery));
+await Task.Delay(1500); Cli($"generatetoaddress 1 {nodeAddr}");
+bool ok5 = ConfirmMined(recTxid, "recovery after lock height");
+
 node.Dispose();
-if (ok1 && ok2 && ok3)
+if (ok1 && ok2 && ok3 && ok4 && prematureRejected && ok5)
 {
-    Console.WriteLine("\nSUCCESS ✓✓ END-TO-END PROVEN on real BSV consensus:");
-    Console.WriteLine("  fund → SPV-verify → signed spend (mined); and the poker pot: 2-of-2 escrow (mined) → cooperative settlement to the winner (mined).");
+    Console.WriteLine("\nSUCCESS ✓✓✓ END-TO-END PROVEN on real BSV consensus:");
+    Console.WriteLine("  • fund → SPV-verify → signed spend (mined)");
+    Console.WriteLine("  • poker pot: 2-of-2 escrow (mined) → cooperative settlement to winner (mined)");
+    Console.WriteLine("  • always-recoverable: pre-signed nLockTime recovery REJECTED before lock, ACCEPTED after (mined)");
     return 0;
 }
 Console.WriteLine("\nFAIL: one or more phases not confirmed");

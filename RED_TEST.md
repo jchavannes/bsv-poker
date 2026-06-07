@@ -40,8 +40,10 @@ connect, header sync+persist, and full block fetch+validate — is listed under 
    merkleblock, **SPV-verifies the funding into a UTXO against our own headers**, then **builds, signs, and
    broadcasts a real spend that the node ACCEPTS and MINES (1 confirmation)**. It also proves the **on-chain
    poker pot mechanic**: it funds a real **2-of-2 escrow** (mined) and then a **cooperative settlement** that
-   pays the pot to the winner (mined) — both consensus-accepted. So the whole money spine — fund →
-   SPV-verify → signed spend, and pot escrow → settlement — is proven against real BSV consensus rules.
+   pays the pot to the winner (mined) — both consensus-accepted. It also proves the **always-recoverable
+   guarantee**: a pre-signed nLockTime escrow recovery is **rejected by the node before its lock height**
+   (timelock enforced) and **accepted + mined after** it. So the whole money spine — fund → SPV-verify →
+   signed spend, pot escrow → settlement, and unilateral timelocked recovery — is proven on real consensus.
    STILL NOT done: the same run on **mainnet/testnet with externally-funded real coins** (regtest coins are
    free), and money moving through the **app's** wallet UI (the e2e is a headless tool, not the GUI).
 3. **On-chain gameplay is not wired into the running app.** The app still runs the old play-money path.
