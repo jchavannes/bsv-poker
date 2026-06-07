@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
@@ -74,6 +75,64 @@ public sealed class BsvNode : IDisposable
     public void Broadcast(byte[] rawTx)
     {
         foreach (var p in _peers.Values) { try { p.Send("tx", rawTx); } catch { } }
+    }
+
+    /// <summary>
+    /// Download the first batch of block headers from a connected peer starting at genesis, and validate
+    /// them (proof-of-work + parent linkage). Returns (validated, received). This is real header sync from
+    /// the live network — not a fixture.
+    /// </summary>
+    public async Task<(int Valid, int Received)> DownloadHeadersFromGenesisAsync(int waitMs = 8000)
+    {
+        var peer = _peers.Values.FirstOrDefault();
+        if (peer == null) return (0, 0);
+        var received = new List<BlockHeader>();
+        var tcs = new TaskCompletionSource<bool>();
+        void Handler(BsvMessage m) { if (m.Command == "headers") { try { ParseHeaders(m.Payload, received); } catch { } tcs.TrySetResult(true); } }
+        peer.OnMessage += Handler;
+        try
+        {
+            var gen = InternalHash(_net.GenesisHashHex);
+            peer.Send("getheaders", BuildGetHeaders(new[] { gen }));
+            await Task.WhenAny(tcs.Task, Task.Delay(waitMs));
+            return (ValidateBatch(received, gen), received.Count);
+        }
+        finally { peer.OnMessage -= Handler; }
+    }
+
+    private static byte[] InternalHash(string displayHex) { var b = Convert.FromHexString(displayHex); Array.Reverse(b); return b; }
+
+    private static byte[] BuildGetHeaders(byte[][] locator)
+    {
+        var b = new List<byte>();
+        var v = new byte[4]; BinaryPrimitives.WriteUInt32LittleEndian(v, (uint)BsvVersion.ProtocolVersion); b.AddRange(v);
+        BsvVersion.WriteVarInt(b, (ulong)locator.Length);
+        foreach (var h in locator) b.AddRange(h);
+        b.AddRange(new byte[32]); // hash stop = 0 → "send as many as you can"
+        return b.ToArray();
+    }
+
+    private static void ParseHeaders(byte[] payload, List<BlockHeader> outp)
+    {
+        int o = 0; ulong count = BsvVersion.ReadVarInt(payload, ref o);
+        for (ulong i = 0; i < count; i++)
+        {
+            if (o + 80 > payload.Length) break;
+            outp.Add(BlockHeader.Parse(payload.AsSpan(o, 80))); o += 80;
+            _ = BsvVersion.ReadVarInt(payload, ref o); // per-header tx count (0 in a headers message)
+        }
+    }
+
+    private static int ValidateBatch(List<BlockHeader> hs, byte[] genInternal)
+    {
+        int valid = 0; var prev = genInternal;
+        foreach (var h in hs)
+        {
+            if (!h.MeetsPow()) break;
+            if (!h.PrevHash.AsSpan().SequenceEqual(prev)) break;
+            prev = h.Hash(); valid++;
+        }
+        return valid;
     }
 
     public void Dispose()

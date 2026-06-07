@@ -9,8 +9,9 @@ but **not integrated/verified end-to-end**; `[ ]` = not started. The vast majori
 
 ## Stage 1 — BSV node (be a real node on the network)
 - [x] P2P wire envelope + version/verack handshake
-- [x] Connect to LIVE mainnet/testnet seeds + read chain tip (verified: mainnet 952,430 / testnet 1,739,770)
-- [~] header parse/PoW/chain/reorg (lib) — [ ] full header SYNC downloaded+validated from live peers
+- [x] Connect to LIVE mainnet/testnet seeds + read chain tip (verified: mainnet 952,433 / testnet 1,739,771)
+- [x] Download + VALIDATE real headers from LIVE peers: 2000 headers from genesis on BOTH mainnet & testnet, all 2000 valid (PoW + linkage). getheaders/headers protocol works against the real chain.
+- [~] header chain lib (parse/PoW/reorg) — [ ] full sync to the chain TIP (millions of headers) + persistent store + checkpoints
 - [ ] persistent header store; checkpoints; difficulty-retarget (DAA) enforcement
 - [ ] addr/getaddr peer management, peer scoring, ban list, reconnection, persistence
 - [ ] inv/getdata/tx/block relay verified on the live network; mempool; feefilter; large-message/streams
