@@ -25,7 +25,8 @@ public partial class MainWindow : Window
         var chat = new ChatService(_node, _profile.IdentityPriv, _profile.IdentityPub, _profile.Dir);
         ChatHost.Content = new ChatView(chat);
         _game = new GameView(_node, _profile.IdentityPriv, _profile.IdentityPub, vault, wallet.RefreshCards,
-            onChainSettle: (deck, pot) => wallet.PlayOnChainHand(deck, pot)); // settle a finished hand on real BSV
+            onChainSettle: (deck, pot) => wallet.PlayOnChainHand(deck, pot), // a hand is real BSV transactions only
+            canFund: stake => wallet.CanPlayOnChain(stake));                 // refuse to start without real sats
         _game.OnLeaveTable += () => { try { _botWindow?.Close(); _bot?.Dispose(); _bot = null; _botWindow = null; } catch { } };
         GameHost.Content = _game;
 
@@ -33,26 +34,13 @@ public partial class MainWindow : Window
         LobbyHost.Content = lobby;
         InitNetworkSelector();
 
-        Loaded += async (_, _) =>
+        Loaded += (_, _) =>
         {
-            _node.SetIdentity(_profile.IdentityPriv, _profile.IdentityPub); // sign presence/table announcements
-            await _node.StartAsync();
-            // announce the FULL pubkey as presence so peers can DM us (and find us in the lobby).
-            await _node.HeartbeatAsync(Convert.ToHexString(_profile.IdentityPub).ToLowerInvariant(), $"127.0.0.1:{_node.BoundPort}");
-            lobby.OnNodeReady(_node.BoundPort);
-
-            // LOCAL auto-discovery: two copies on one machine find and connect to each other (no manual IP).
-            var disc = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(3) };
-            disc.Tick += (_, _) =>
-            {
-                LocalDiscovery.Register(_node.BoundPort);
-                foreach (var port in LocalDiscovery.Peers(_node.BoundPort))
-                    if (_dialed.Add(port)) _node.Dial(new BsvPoker.Net.P2PNode.PeerAddr("127.0.0.1", port));
-            };
-            disc.Start();
-            LocalDiscovery.Register(_node.BoundPort);
-
-            StartBsvNetwork(); // connect to the live BSV network for the selected network
+            // RULE: the ONLY socket this app opens is the Bitcoin (BSV) P2P network. There is NO off-chain
+            // mesh, presence, discovery, or chat — every inter-machine message must be a Bitcoin transaction.
+            // The non-transaction P2P mesh (_node.StartAsync), HeartbeatAsync, and LocalDiscovery are therefore
+            // NOT started. (Lobby/chat/multiplayer are being rebuilt as on-chain transactions; see RED_TEST.)
+            StartBsvNetwork(); // connect to the live BSV network for the selected network — Bitcoin transactions only
             var netRefresh = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
             netRefresh.Tick += (_, _) => UpdateNetInfo();
             netRefresh.Start();
@@ -122,10 +110,12 @@ public partial class MainWindow : Window
     private void UpdateNetInfo()
     {
         var name = (NetworkBox.SelectedItem as System.Windows.Controls.ComboBoxItem)?.Content?.ToString() ?? "Mainnet";
-        var live = _bsvNode != null
-            ? $" · {_bsvNode.PeerCount} BSV peers · tip {_bsvNode.BestHeight} · validated {_storedHeight}"
-            : "";
-        NetInfo.Text = $"   {name}{live} · peer-to-peer";
+        // These are BITCOIN NETWORK NODES (blockchain infrastructure) — NOT other players. Players are
+        // discovered only on-chain; with no off-chain mesh there are 0 other players visible here yet.
+        var chain = _bsvNode != null
+            ? $"blockchain: {_bsvNode.PeerCount} BSV node(s) · tip {_bsvNode.BestHeight} · validated {_storedHeight}"
+            : "blockchain: connecting…";
+        NetInfo.Text = $"   {name} · {chain} · players: 0 (on-chain only)";
         Title = $"BSV Poker — {_profile.Name} — {name}";
     }
 

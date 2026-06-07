@@ -1,9 +1,11 @@
+using System.Security.Cryptography;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using System.Windows.Threading;
 using BsvPoker.App.Controls;
 using BsvPoker.Core;
+using BsvPoker.Core.Games;
 using BsvPoker.Net;
 
 namespace BsvPoker.App.Views;
@@ -41,7 +43,7 @@ public sealed class GameView : UserControl
     private readonly TextBlock _msg = new() { Foreground = new SolidColorBrush(Color.FromRgb(0xE8, 0xF5, 0xE9)), FontSize = 15, HorizontalAlignment = HorizontalAlignment.Center, TextWrapping = TextWrapping.Wrap };
     private readonly TextBlock _standings = new() { Foreground = new SolidColorBrush(Color.FromRgb(0xCF, 0xD8, 0xDC)), FontSize = 12, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 4, 0, 0), TextWrapping = TextWrapping.Wrap };
     private readonly TextBox _bet = new() { Width = 70, Text = "6", VerticalContentAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 4, 0) };
-    private readonly Button _deal = Mk("Practice deal", "#444444");
+    private readonly Button _deal = Mk("Play on-chain hand", "#3A6E2E");
     private readonly Button _fold = Mk("Fold", "#7A2E2E");
     private readonly Button _check = Mk("Check", "#333333");
     private readonly Button _call = Mk("Call", "#333333");
@@ -52,10 +54,12 @@ public sealed class GameView : UserControl
     /// <summary>Raised when the player leaves the table (so the host can stop any bot, etc.).</summary>
     public event Action? OnLeaveTable;
 
+    private readonly Func<long, bool>? _canFund; // true only when the wallet holds enough REAL on-chain sats
+
     public GameView(P2PNode node, byte[] priv, byte[] pub, CardVault vault, Action onCardsChanged,
-        Func<IReadOnlyList<Card>, long, string>? onChainSettle = null)
+        Func<IReadOnlyList<Card>, long, string>? onChainSettle = null, Func<long, bool>? canFund = null)
     {
-        _node = node; _priv = priv; _pub = pub; _vault = vault; _onCardsChanged = onCardsChanged; _onChainSettle = onChainSettle;
+        _node = node; _priv = priv; _pub = pub; _vault = vault; _onCardsChanged = onCardsChanged; _onChainSettle = onChainSettle; _canFund = canFund;
         Background = new SolidColorBrush(Color.FromRgb(0x0D, 0x0D, 0x0D)); Foreground = Brushes.White;
 
         var felt = new Border { Margin = new Thickness(16), CornerRadius = new CornerRadius(160) };
@@ -74,16 +78,9 @@ public sealed class GameView : UserControl
         inner.Child = g; felt.Child = inner;
 
         var bar = new WrapPanel { HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(10) };
-        _deal.Click += (_, _) => PracticeDeal();
-        _fold.Click += (_, _) => Do(ActionKind.Fold, 0);
-        _check.Click += (_, _) => Do(ActionKind.Check, 0);
-        _call.Click += (_, _) => Do(ActionKind.Call, 0);
-        _betBtn.Click += (_, _) => { if (long.TryParse(_bet.Text.Trim(), out var to)) Do(ActionKind.Raise, to); };
+        _deal.Click += (_, _) => PlayOnChain();          // the ONLY play: a real on-chain BSV hand
         _leave.Click += (_, _) => LeaveTable();
-        _onchain.Click += (_, _) => SettleOnChain();
-        bar.Children.Add(_deal); bar.Children.Add(_fold); bar.Children.Add(_check); bar.Children.Add(_call); bar.Children.Add(_bet); bar.Children.Add(_betBtn);
-        if (_onChainSettle != null) bar.Children.Add(_onchain);   // only when the wallet/node are available
-        bar.Children.Add(_leave);
+        bar.Children.Add(_deal); bar.Children.Add(_leave);
 
         var root = new Grid();
         root.RowDefinitions.Add(new RowDefinition());
@@ -97,12 +94,11 @@ public sealed class GameView : UserControl
 
     public void StartNetworked(string tableId, string tableName)
     {
-        _net?.Stop();
-        _practice = null;
-        _lastMintedHand = -1;
-        _net = new NetGame(_node, tableId, _priv, _pub);
-        _net.OnUpdate += () => Dispatcher.BeginInvoke(DispatcherPriority.Normal, new Action(Render));
-        _net.Start();
+        // Off-chain mesh play is NOT valid: the only allowed node-to-node poker is by on-chain BSV
+        // transactions. The chip-based NetGame is disabled; use "Play on-chain hand".
+        _net?.Stop(); _net = null; _practice = null;
+        _msg.Text = "Node-to-node poker is ONLY valid as on-chain BSV transactions. Off-chain table play is disabled — " +
+                    "fund your wallet and use “Play on-chain hand”.";
         Render();
     }
 
@@ -112,49 +108,40 @@ public sealed class GameView : UserControl
         return new Button { Content = text, Width = 110, Margin = new Thickness(4), Padding = new Thickness(0, 8, 0, 8), Foreground = Brushes.White, BorderThickness = new Thickness(0), Background = new SolidColorBrush(c) };
     }
 
-    /// <summary>Lobby "Play a bot" — you (seat 0) vs a practice bot (seat 1) at the chosen variant.</summary>
-    public void StartBot(Variant variant)
-    {
-        _net?.Stop(); _net = null; _botMode = true; _botVariant = variant;
-        for (int i = 0; i < 2; i++) if (_stacks[i] < 2) _stacks[i] = 100;
-        var deck = MentalPoker.ShuffledFrom(new[] { MentalPoker.FreshEntropy(), MentalPoker.FreshEntropy() }, Variants.CardSet(variant));
-        _practice = HoldemState.Create(_stacks, _button, 1, 2, deck, variant);
-        _button ^= 1;
-        Render();
-        DriveBot();
-    }
+    private const long OnChainStake = OnChainPot; // the real-sat stake a hand is played for
 
-    private void PracticeDeal()
+    /// <summary>
+    /// Play one hand entirely ON-CHAIN with real BSV — the ONLY valid play. There is no play-money mode:
+    /// a real 2-of-2 pot escrow is funded from your wallet, the hand is emitted as real BSV transactions
+    /// (table/hand genesis, escrow, shuffle, deal, board, bets, showdown, settlement), and the pot settles
+    /// on-chain. Requires real sats + a live BSV connection; refuses otherwise (never fakes a game).
+    /// </summary>
+    public void StartBot(Variant variant) => PlayOnChain();
+    private void PlayOnChain()
     {
-        _net?.Stop(); _net = null; _botMode = true; // the practice button now plays a bot at the current variant
-        for (int i = 0; i < 2; i++) if (_stacks[i] < 2) _stacks[i] = 100;
-        var deck = MentalPoker.ShuffledFrom(new[] { MentalPoker.FreshEntropy(), MentalPoker.FreshEntropy() }, Variants.CardSet(_botVariant));
-        _practice = HoldemState.Create(_stacks, _button, 1, 2, deck, _botVariant);
-        _button ^= 1;
-        Render();
-        DriveBot();
-    }
-
-    private void DriveBot()
-    {
-        // bot is seat 1; act on its turns until it's the human's turn (seat 0) or the hand ends.
-        while (_botMode && _practice is { Complete: false } st && st.ToAct == 1)
+        _net?.Stop(); _net = null; _practice = null; _botMode = false;
+        if (_onChainSettle == null) { _msg.Text = "On-chain play is unavailable (wallet/node not wired)."; return; }
+        if (_canFund != null && !_canFund(OnChainStake))
         {
-            try { st.Apply(BotPolicy.Decide(st)); } catch { break; }
+            _msg.Text = $"Real BSV required. Fund your wallet with at least {OnChainStake:N0} sat and connect to the network — " +
+                        "poker is ONLY played as on-chain BSV transactions. There is no play-money mode.";
+            return;
         }
-        if (_practice is { Complete: true }) _stacks = _practice.Seats.Select(s => s.Stack).ToArray();
-        Render();
+        var deck = ShuffledDeck(9); // a real shuffled deck for a heads-up hand
+        _msg.Text = _onChainSettle(deck, OnChainStake); // funds escrow + emits the full on-chain tape + settles
+    }
+
+    private static IReadOnlyList<Card> ShuffledDeck(int n)
+    {
+        var a = Enumerable.Range(0, 52).ToArray();
+        for (int i = 51; i > 0; i--) { int j = RandomNumberGenerator.GetInt32(i + 1); (a[i], a[j]) = (a[j], a[i]); }
+        return a.Take(n).Select(Card.FromIndex).ToList();
     }
 
     private void Do(ActionKind kind, long amt)
     {
-        if (_net != null) { _net.Act(kind, amt); return; }
-        if (_practice == null || _practice.Complete) return;
-        if (_botMode && _practice.ToAct != 0) return; // in bot mode you only act for seat 0
-        try { _practice.Apply(new GameAction(kind, _practice.ToAct, amt)); } catch (Exception ex) { _msg.Text = ex.Message; return; }
-        if (_practice.Complete) { _stacks = _practice.Seats.Select(s => s.Stack).ToArray(); Render(); return; }
-        if (_botMode) { DriveBot(); return; }
-        Render();
+        // interactive per-action betting is only valid as on-chain transactions; the off-chain chip path is removed.
+        _msg.Text = "Betting actions must be on-chain BSV transactions — use “Play on-chain hand”. (Interactive per-bet on-chain wagering is still being built.)";
     }
 
     /// <summary>
@@ -213,13 +200,8 @@ public sealed class GameView : UserControl
             return;
         }
         int me = ng.MySeat < 0 ? 0 : ng.MySeat;
-        // Cards are NFTs: mint MY hole cards into my wallet vault (sealed to me) once per dealt hand.
-        if (_lastMintedHand != ng.HandNumber && ng.MySeat >= 0 && hand.Seats[me].Hole.All(c => !c.IsFaceDown))
-        {
-            _lastMintedHand = ng.HandNumber;
-            foreach (var c in hand.Seats[me].Hole) _vault.AddCard(c.Index, System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
-            _onCardsChanged();
-        }
+        // Card NFTs are 1-sat ON-CHAIN outputs created by real Bitcoin transactions (the Deal/CardNft tape) —
+        // never minted for free into a local vault. (No free minting here.)
         foreach (var c in hand.Seats[me].Hole) { var cv = new CardView(); cv.ShowCard(c); _botCards.Children.Add(cv); }
         // one group per opponent seat (holes are face-down sentinels of the variant's count until showdown)
         _topInfo.Text = hand.Seats.Count > 2 ? "Opponents" : "";

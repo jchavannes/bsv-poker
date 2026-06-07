@@ -232,10 +232,62 @@ Console.WriteLine($"  accepted to mempool: {accepted}/{tape.Steps.Count}");
 Console.WriteLine(ok10 ? $"  ✓ all {minedCount} hand-tape transactions mined into the chain"
                        : $"  ✗ only {minedCount}/{tape.Steps.Count} tape transactions mined");
 
+Console.WriteLine("\n-- Phase 7: on-chain AUCTION — every bid is a conditional smart contract (win + refund branches) --");
+var seller = WalletKeys.Account(seed, 3, 0);
+var bidder = WalletKeys.Account(seed, 3, 1);
+long bid = 30_000_000;
+
+// WIN branch: a bid is locked in an AuctionEscrow contract; the seller grants the role by revealing the preimage
+var (ua, _) = await FundAndVerify(13, "1.0");
+var wa = new OnChainWallet(seed); wa.Add(ua);
+var preimage = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+var hlock = BsvPoker.Crypto.Hashes.Hash160(preimage);
+int curH = int.Parse(Cli("getblockcount"));
+var auc = Contracts.AuctionEscrow(hlock, seller.Pub, curH + 100, bidder.Pub);
+var bidFund = wa.SpendAction(auc, bid, 1000);
+node.Broadcast(Chain.Serialize(bidFund.Tx));
+var bidTxid = Chain.Txid(bidFund.Tx);
+await Task.Delay(1500); Cli($"generatetoaddress 1 {nodeAddr}");
+bool ok11 = ConfirmMined(bidTxid, "auction bid locked in a conditional contract");
+var claim = new Chain.Tx(2, new() { new(bidTxid, 0, Array.Empty<byte>(), 0xffffffff) },
+    new() { new(bid - 1000, Chain.P2pkhLockForPub(seller.Pub)) }, 0);
+var sSig = TxScriptChecker.Sign(claim, 0, auc, bid, seller.Priv);
+claim = claim with { Ins = new() { claim.Ins[0] with { ScriptSig = Contracts.AuctionWinUnlock(sSig, preimage) } } };
+var claimTxid = Chain.Txid(claim);
+try { Cli($"sendrawtransaction {Convert.ToHexString(Chain.Serialize(claim)).ToLowerInvariant()}"); } catch (Exception ex) { Console.WriteLine($"  claim rejected: {ex.Message}"); }
+await Task.Delay(800); Cli($"generatetoaddress 1 {nodeAddr}");
+bool ok12 = ConfirmMined(claimTxid, "seller claims the won bid (preimage revealed)");
+
+// REFUND branch: a second bid the seller never accepts; the bidder reclaims after the timeout (rejected before)
+var (ub, _) = await FundAndVerify(14, "1.0");
+var wb = new OnChainWallet(seed); wb.Add(ub);
+var pre2 = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+int curH2 = int.Parse(Cli("getblockcount"));
+uint timeout = (uint)(curH2 + 4);
+var auc2 = Contracts.AuctionEscrow(BsvPoker.Crypto.Hashes.Hash160(pre2), seller.Pub, timeout, bidder.Pub);
+var bid2 = wb.SpendAction(auc2, bid, 1000);
+node.Broadcast(Chain.Serialize(bid2.Tx)); var bid2Txid = Chain.Txid(bid2.Tx);
+await Task.Delay(1500); Cli($"generatetoaddress 1 {nodeAddr}");
+bool ok13 = ConfirmMined(bid2Txid, "second bid (to be refunded)");
+var refund = new Chain.Tx(2, new() { new(bid2Txid, 0, Array.Empty<byte>(), 0xfffffffe) },
+    new() { new(bid - 1000, Chain.P2pkhLockForPub(bidder.Pub)) }, timeout);
+var bSig = TxScriptChecker.Sign(refund, 0, auc2, bid, bidder.Priv);
+refund = refund with { Ins = new() { refund.Ins[0] with { ScriptSig = Contracts.AuctionRefundUnlock(bSig) } } };
+var refundTxid = Chain.Txid(refund);
+bool refundEarlyRejected;
+try { Cli($"sendrawtransaction {Convert.ToHexString(Chain.Serialize(refund)).ToLowerInvariant()}"); refundEarlyRejected = false; }
+catch { refundEarlyRejected = true; }
+Console.WriteLine(refundEarlyRejected ? "  ✓ refund correctly rejected before the timeout (CLTV enforced)" : "  ✗ refund accepted too early!");
+int hn = int.Parse(Cli("getblockcount"));
+if (hn <= timeout) Cli($"generatetoaddress {timeout - hn + 1} {nodeAddr}");
+try { Cli($"sendrawtransaction {Convert.ToHexString(Chain.Serialize(refund)).ToLowerInvariant()}"); } catch (Exception ex) { Console.WriteLine($"  refund rejected after timeout: {ex.Message}"); }
+await Task.Delay(800); Cli($"generatetoaddress 1 {nodeAddr}");
+bool ok14 = refundEarlyRejected && ConfirmMined(refundTxid, "bidder reclaims after timeout");
+
 node.Dispose();
-if (ok1 && ok2 && ok3 && ok4 && prematureRejected && ok5 && ok6 && ok7 && ok8 && ok9 && ok10)
+if (ok1 && ok2 && ok3 && ok4 && prematureRejected && ok5 && ok6 && ok7 && ok8 && ok9 && ok10 && ok11 && ok12 && ok13 && ok14)
 {
-    Console.WriteLine("\nSUCCESS ✓✓✓✓✓✓ END-TO-END PROVEN on real BSV consensus:");
+    Console.WriteLine("\nSUCCESS ✓✓✓✓✓✓✓ END-TO-END PROVEN on real BSV consensus:");
     Console.WriteLine("  • fund → SPV-verify → signed spend (mined)");
     Console.WriteLine("  • poker pot: 2-of-2 escrow (mined) → cooperative settlement to winner (mined)");
     Console.WriteLine("  • always-recoverable: pre-signed nLockTime recovery REJECTED before lock, ACCEPTED after (mined)");
