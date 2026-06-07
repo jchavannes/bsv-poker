@@ -1,15 +1,16 @@
 using System.Diagnostics;
 using System.Text.RegularExpressions;
 using BsvPoker.Core;
+using BsvPoker.Core.Games;
 using BsvPoker.Crypto;
 using BsvPoker.Net.Bsv;
 
-// REAL end-to-end on a live BSV regtest node: this proves the no-server money spine against actual consensus.
-//   node side (bitcoin-cli): mine coinbase, pay our address, mine the funding tx.
-//   client side (our library, over the P2P wire): connect, sync+validate headers, fetch the block via getdata,
-//     parse it, build a merkleblock, SPV-verify the funding into a UTXO, build+sign a spend, broadcast it.
-//   node side: mine again and confirm the node ACCEPTED and MINED our real signed transaction.
-// Nothing here is faked: real addresses, real funding, real SPV proof, a real consensus-valid spend.
+// REAL end-to-end on a live BSV regtest node — proves the no-server money spine AND the on-chain poker pot
+// mechanic against actual consensus. Nothing faked: real addresses, real funding, real SPV proofs, real
+// consensus-valid transactions the node accepts and mines.
+//   Phase 1: SPV-fund a wallet, build+sign+broadcast a plain spend, node mines it.
+//   Phase 2: fund a 2-of-2 poker escrow (real tx), then cooperatively settle the pot to the winner — both
+//            real txs the node accepts and mines. This is exactly how a hand's pot is funded and paid out.
 
 const string P2P = "127.0.0.1";
 const int P2PPort = 19444;
@@ -28,90 +29,96 @@ static string Cli(string args)
 
 Console.WriteLine("== BSV REGTEST END-TO-END (real node, real consensus) ==");
 
-// --- node: a funded wallet ---
 var nodeAddr = Cli("getnewaddress");
-Cli($"generatetoaddress 101 {nodeAddr}");           // mature coinbase → node has spendable coins
+Cli($"generatetoaddress 101 {nodeAddr}");                   // mature coinbase → node has spendable coins
 Console.WriteLine($"node funded; height = {Cli("getblockcount")}");
 
-// --- our client identity (regtest P2PKH address from our own seed) ---
 var seed = WalletKeys.NewSeed();
-var me = WalletKeys.Account(seed, 0, 0);
 var net = NetworkParams.For(BsvNetwork.Regtest);
-var myPayload = new byte[21]; myPayload[0] = net.AddressVersion; Hashes.Hash160(me.Pub).CopyTo(myPayload, 1);
-var myAddr = Base58.CheckEncode(myPayload);
-Console.WriteLine($"our regtest address: {myAddr}");
-
-// --- node: pay our address 1.0, then mine it into a block ---
-var fundTxid = Cli($"sendtoaddress {myAddr} 1.0");
-Console.WriteLine($"funding txid: {fundTxid}");
-var mined = Cli($"generatetoaddress 1 {nodeAddr}");
-var fundBlockHash = Regex.Match(mined, "[0-9a-f]{64}").Value;
-Console.WriteLine($"funding block: {fundBlockHash}");
-
-// --- client: connect over the P2P wire and validate headers ourselves ---
-Console.WriteLine($"regtest magic = {Convert.ToHexString(net.Magic)}");
-// raw diagnostic handshake so we can SEE why a connect fails (TCP vs magic vs timeout)
-try
-{
-    using var diag = new System.Net.Sockets.TcpClient();
-    await diag.ConnectAsync(P2P, P2PPort).WaitAsync(TimeSpan.FromSeconds(5));
-    Console.WriteLine($"TCP connect OK ({diag.Connected})");
-    var dp = new BsvPeer(net, diag);
-    await dp.HandshakeAsync(startHeight: 0, timeoutMs: 8000);
-    Console.WriteLine($"diagnostic handshake OK: remote version startHeight={dp.RemoteVersion?.StartHeight}");
-    dp.Dispose();
-}
-catch (Exception ex) { Console.WriteLine($"diagnostic handshake threw: {ex.GetType().Name}: {ex.Message}"); }
 
 var node = new BsvNode(net);
-if (!await node.ConnectAsync(P2P, P2PPort)) { Console.WriteLine("FAIL: could not connect/handshake the regtest node"); return 1; }
-Console.WriteLine($"connected: peers={node.PeerCount}, advertised tip={node.BestHeight}");
+if (!await node.ConnectAsync(P2P, P2PPort)) { Console.WriteLine("FAIL: could not connect/handshake the node"); return 1; }
 var storePath = Path.Combine(Path.GetTempPath(), "bsvpoker-regtest-e2e.dat");
 if (File.Exists(storePath)) File.Delete(storePath);
 var store = new HeaderStore(storePath);
-var (appended, height) = await node.SyncHeadersToStoreAsync(store, maxBatches: 5, waitMs: 6000);
-Console.WriteLine($"headers synced & validated: {height}");
+await node.SyncHeadersToStoreAsync(store, maxBatches: 5, waitMs: 6000);
+Console.WriteLine($"client connected (peers={node.PeerCount}); headers validated to {store.Count}");
 
-// --- client: fetch the funding block, parse it, SPV-verify the funding into a UTXO ---
-var raw = await node.GetBlockAsync(fundBlockHash, waitMs: 15000);
-if (raw == null) { Console.WriteLine("FAIL: node did not serve the block"); return 1; }
-var parsed = BsvBlock.Parse(raw);                    // validates merkle root vs header
-int idx = parsed.Txs.FindIndex(t => Chain.Txid(t) == fundTxid);
-if (idx < 0) { Console.WriteLine("FAIL: funding tx not in block"); return 1; }
-var fundTx = parsed.Txs[idx];
-var myLock = Chain.P2pkhLock(myPayload[1..]);
-uint vout = (uint)fundTx.Outs.FindIndex(o => o.Script.AsSpan().SequenceEqual(myLock));
-Console.WriteLine($"funding tx in block at idx {idx}, paying us at vout {vout} ({fundTx.Outs[(int)vout].Value} sat)");
-
-var (chain, _) = store.BuildChain();
-var mb = PartialMerkleTree.BuildMerkleBlock(parsed.Header, parsed.Txids, new HashSet<int> { idx });
-var utxo = SpvFunding.VerifyFromMerkleBlock(fundTx, vout, mb, chain, me.Pub, 0, 0);
-if (utxo == null) { Console.WriteLine("FAIL: SPV funding did not verify"); return 1; }
-Console.WriteLine($"SPV FUNDING VERIFIED against our own headers: {utxo.Value} sat UTXO {utxo.Txid[..16]}…:{utxo.Vout}");
-
-// --- client: build + sign a real spend, broadcast it over the P2P wire ---
-var backAddr = Cli("getnewaddress");
-var backPayload = Base58.CheckDecode(backAddr);
-var wallet = new OnChainWallet(seed); wallet.Add(utxo);
-var spend = wallet.BuildAction(Chain.P2pkhLock(backPayload[1..]), outputValue: 50_000_000, fee: 1000);
-if (!wallet.VerifySpend(spend)) { Console.WriteLine("FAIL: our spend failed self-verification"); return 1; }
-var ourTxid = Chain.Txid(spend.Tx);
-node.Broadcast(Chain.Serialize(spend.Tx));
-Console.WriteLine($"broadcast our signed spend: {ourTxid}");
-
-// --- node: mine, then confirm the node accepted+mined OUR transaction ---
-await Task.Delay(1500);                               // let the tx propagate to the node's mempool
-Cli($"generatetoaddress 1 {nodeAddr}");
-string confirmsJson;
-try { confirmsJson = Cli($"getrawtransaction {ourTxid} true"); }
-catch (Exception ex) { Console.WriteLine($"FAIL: node never saw our tx ({ex.Message})"); return 1; }
-var conf = Regex.Match(confirmsJson, "\"confirmations\"\\s*:\\s*(\\d+)").Groups[1].Value;
-node.Dispose();
-if (int.TryParse(conf, out var c) && c >= 1)
+bool ConfirmMined(string txid, string label)
 {
-    Console.WriteLine($"SUCCESS ✓ the regtest node ACCEPTED and MINED our spend ({c} confirmation(s)).");
-    Console.WriteLine("END-TO-END PROVEN: real fund → SPV-verify → real signed spend → consensus-accepted.");
+    try
+    {
+        var json = Cli($"getrawtransaction {txid} true");
+        var c = Regex.Match(json, "\"confirmations\"\\s*:\\s*(\\d+)").Groups[1].Value;
+        bool ok = int.TryParse(c, out var n) && n >= 1;
+        Console.WriteLine(ok ? $"  ✓ node mined {label} ({n} conf)" : $"  ✗ {label} not confirmed (conf='{c}')");
+        return ok;
+    }
+    catch (Exception ex) { Console.WriteLine($"  ✗ node never saw {label}: {ex.Message}"); return false; }
+}
+
+// Fund one of our receive keys with `btc`, mine it, then SPV-verify it into a UTXO against our own headers.
+async Task<(OnChainWallet.Utxo Utxo, WalletKeys Key)> FundAndVerify(uint recvIndex, string btc)
+{
+    var key = WalletKeys.Account(seed, 0, recvIndex);
+    var payload = new byte[21]; payload[0] = net.AddressVersion; Hashes.Hash160(key.Pub).CopyTo(payload, 1);
+    var addr = Base58.CheckEncode(payload);
+    var txid = Cli($"sendtoaddress {addr} {btc}");
+    var blockHash = Regex.Match(Cli($"generatetoaddress 1 {nodeAddr}"), "[0-9a-f]{64}").Value;
+    await node.SyncHeadersToStoreAsync(store, maxBatches: 3, waitMs: 6000);   // pull the new block's header
+    var raw = await node.GetBlockAsync(blockHash, waitMs: 15000) ?? throw new Exception("node did not serve block");
+    var parsed = BsvBlock.Parse(raw);
+    int idx = parsed.Txs.FindIndex(t => Chain.Txid(t) == txid);
+    if (idx < 0) throw new Exception("funding tx not in block");
+    var lockMe = Chain.P2pkhLock(payload[1..]);
+    uint vout = (uint)parsed.Txs[idx].Outs.FindIndex(o => o.Script.AsSpan().SequenceEqual(lockMe));
+    var (chain, _) = store.BuildChain();
+    var mb = PartialMerkleTree.BuildMerkleBlock(parsed.Header, parsed.Txids, new HashSet<int> { idx });
+    var utxo = SpvFunding.VerifyFromMerkleBlock(parsed.Txs[idx], vout, mb, chain, key.Pub, 0, recvIndex)
+               ?? throw new Exception("SPV funding did not verify");
+    Console.WriteLine($"  SPV-verified {utxo.Value} sat at {utxo.Txid[..12]}…:{utxo.Vout}");
+    return (utxo, key);
+}
+
+Console.WriteLine("\n-- Phase 1: SPV funding → plain signed spend → node mines it --");
+var (u0, _) = await FundAndVerify(0, "1.0");
+var w1 = new OnChainWallet(seed); w1.Add(u0);
+var backPayload = Base58.CheckDecode(Cli("getnewaddress"));
+var spend = w1.BuildAction(Chain.P2pkhLock(backPayload[1..]), 50_000_000, 1000);
+if (!w1.VerifySpend(spend)) { Console.WriteLine("FAIL: spend self-verify"); return 1; }
+node.Broadcast(Chain.Serialize(spend.Tx));
+var spendTxid = Chain.Txid(spend.Tx);
+Console.WriteLine($"broadcast spend {spendTxid[..12]}…");
+await Task.Delay(1500); Cli($"generatetoaddress 1 {nodeAddr}");
+bool ok1 = ConfirmMined(spendTxid, "plain spend");
+
+Console.WriteLine("\n-- Phase 2: on-chain poker pot — fund 2-of-2 escrow → cooperative settlement --");
+var (u1, _) = await FundAndVerify(3, "1.0");
+var a = WalletKeys.Account(seed, 0, 10);   // player A
+var b = WalletKeys.Account(seed, 0, 11);   // player B
+long pot = 50_000_000;
+var w2 = new OnChainWallet(seed); w2.Add(u1);
+var fund = OnChainHand.FundEscrow(w2, a.Pub, b.Pub, pot, 1000);   // real 2-of-2 escrow tx
+node.Broadcast(Chain.Serialize(fund.Tx));
+var escrowTxid = Chain.Txid(fund.Tx);
+Console.WriteLine($"broadcast escrow funding {escrowTxid[..12]}… (pot {pot} sat into 2-of-2)");
+await Task.Delay(1500); Cli($"generatetoaddress 1 {nodeAddr}");
+bool ok2 = ConfirmMined(escrowTxid, "escrow funding");
+
+// cooperative settlement: both players sign, pot paid to the winner (A)
+var settle = OnChainHand.Settle(escrowTxid, 0, pot, a.Pub, 1000, a.Priv, a.Pub, b.Priv, b.Pub);
+node.Broadcast(Chain.Serialize(settle));
+var settleTxid = Chain.Txid(settle);
+Console.WriteLine($"broadcast settlement {settleTxid[..12]}… (pot → winner A)");
+await Task.Delay(1500); Cli($"generatetoaddress 1 {nodeAddr}");
+bool ok3 = ConfirmMined(settleTxid, "pot settlement");
+
+node.Dispose();
+if (ok1 && ok2 && ok3)
+{
+    Console.WriteLine("\nSUCCESS ✓✓ END-TO-END PROVEN on real BSV consensus:");
+    Console.WriteLine("  fund → SPV-verify → signed spend (mined); and the poker pot: 2-of-2 escrow (mined) → cooperative settlement to the winner (mined).");
     return 0;
 }
-Console.WriteLine($"FAIL: our tx not confirmed (confirmations='{conf}')");
+Console.WriteLine("\nFAIL: one or more phases not confirmed");
 return 1;
