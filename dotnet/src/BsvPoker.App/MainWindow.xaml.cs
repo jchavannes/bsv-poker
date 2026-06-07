@@ -45,6 +45,7 @@ public partial class MainWindow : Window
         Loaded += (_, _) =>
         {
             StartBsvNetwork();   // the only Bitcoin-network connection (tx/headers/block) — nothing off-chain
+            _wallet.Refresh();   // the receive address is network-aware; show it for the loaded network
             StartTxLink();       // listen for transactions pushed to us IP-to-IP by other players
             var netRefresh = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
             netRefresh.Tick += (_, _) => UpdateNetInfo();
@@ -249,7 +250,8 @@ public partial class MainWindow : Window
         NetworkBox.SelectionChanged += (_, _) =>
         {
             try { System.IO.File.WriteAllText(file, NetworkBox.SelectedIndex.ToString()); } catch { }
-            StartBsvNetwork();
+            StartBsvNetwork();   // sets _currentNet from the selection
+            _wallet.Refresh();   // re-render the network-aware receive address for the newly selected network
             UpdateNetInfo();
         };
     }

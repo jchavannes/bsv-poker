@@ -607,6 +607,13 @@ public sealed class WalletView : UserControl
         return true;
     }
 
+    /// <summary>Re-render the wallet (e.g. after the network selector changes, so the address matches the network).</summary>
+    public void Refresh()
+    {
+        if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(new Action(Refresh)); return; }
+        Render();
+    }
+
     private void Render()
     {
         if (_locked)
