@@ -242,15 +242,16 @@ public partial class MainWindow : Window
 
     private void InitNetworkSelector()
     {
+        // ALWAYS start on Mainnet, every launch — Mainnet is primary, Testnet the backup, Regtest a distant 3rd
+        // and NEVER the default. The selected network is deliberately NOT persisted: the app always opens on
+        // Mainnet so it can never silently come up on a test network.
         var file = System.IO.Path.Combine(_profile.Dir, "network.txt");
-        int sel = 0; // default MAINNET (Mainnet primary, Testnet backup, Regtest a distant 3rd, never default)
-        try { if (System.IO.File.Exists(file) && int.TryParse(System.IO.File.ReadAllText(file).Trim(), out var v) && v is >= 0 and <= 2) sel = v; } catch { }
-        NetworkBox.SelectedIndex = sel;
+        try { if (System.IO.File.Exists(file)) System.IO.File.Delete(file); } catch { } // purge any stale saved choice
+        NetworkBox.SelectedIndex = 0; // Mainnet
         UpdateNetInfo();
         NetworkBox.SelectionChanged += (_, _) =>
         {
-            try { System.IO.File.WriteAllText(file, NetworkBox.SelectedIndex.ToString()); } catch { }
-            StartBsvNetwork();   // sets _currentNet from the selection
+            StartBsvNetwork();   // sets _currentNet from the selection (session-only; not persisted)
             _wallet.Refresh();   // re-render the network-aware receive address for the newly selected network
             UpdateNetInfo();
         };
