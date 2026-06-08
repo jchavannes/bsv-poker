@@ -1180,6 +1180,38 @@ public sealed class WalletView : UserControl
         catch (Exception ex) { return "On-chain settle failed: " + ex.Message; }
     }
 
+    /// <summary>
+    /// Mint the given cards as REAL on-chain 1-sat encrypted NFTs sealed to this wallet's identity: each card is
+    /// ECDH-sealed (CardNft.SealToPub), funded as a 1-sat NftLock output from real sats, broadcast, and stored
+    /// in the vault. No free/fake NFTs — if there aren't enough sats it stops and reports honestly. Returns a
+    /// status string. This is how every card dealt to you becomes an on-chain encrypted NFT in your wallet.
+    /// </summary>
+    public string MintCardNftsOnChain(IReadOnlyList<int> cardIndexes)
+    {
+        if (_locked) return "🔒 wallet locked — cannot mint card NFTs.";
+        var node = _node();
+        if (node == null || node.PeerCount == 0) return "no BSV peers — card NFTs not minted on-chain.";
+        int minted = 0;
+        foreach (var ci in cardIndexes)
+        {
+            try
+            {
+                var blind = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+                var sealedHex = CardNft.SealToPub(ci, blind, _identityPub);     // encrypted to my identity
+                var script = CardNft.NftLock(sealedHex, _identityPub);          // 1-sat on-chain NFT output
+                var (raw, status) = FundTx(script, 1, 500);
+                if (raw == null) return $"minted {minted} card NFT(s); stopped: {status}";
+                node.Broadcast(raw);
+                _vault.AddSealed(sealedHex);
+                minted++;
+            }
+            catch (Exception ex) { return $"minted {minted} card NFT(s); error: {ex.Message}"; }
+        }
+        RefreshCards();
+        Notify($"Minted {minted} card NFT(s) on-chain (encrypted to your identity).");
+        return $"minted {minted} card NFT(s) on-chain";
+    }
+
     /// <summary>The receive key for the given receive index (chain 0).</summary>
     private WalletKeys RecvKey(uint index) => WalletKeys.Account(_seed, 0, index);
 
