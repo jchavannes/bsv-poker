@@ -553,6 +553,10 @@ public sealed class WalletView : UserControl
         btns.Children.Add(sendBtn); btns.Children.Add(preview); btns.Children.Add(paste); btns.Children.Add(invoice); btns.Children.Add(clear);
         sp.Children.Add(btns);
         sp.Children.Add(_sendStatus);
+        void Est() { if (long.TryParse(_amount.Text, out var a) && a > 0) { var f = EstimateFee(1); _sendStatus.Text = $"Estimated fee {f:N0} sat · total {a + f:N0} sat · balance {Balance:N0} sat" + (a + f > Balance ? "  — INSUFFICIENT" : ""); } }
+        _amount.TextChanged += (_, _) => Est();
+        _feeRate.SelectionChanged += (_, _) => Est();
+        _fee.TextChanged += (_, _) => Est();
         return Scroll(sp);
     }
 
