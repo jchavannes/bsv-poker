@@ -456,6 +456,62 @@ public sealed class WalletView : UserControl
         if (dlg.ShowDialog() == true) { File.WriteAllText(dlg.FileName, WalletKeys.SeedToBackup(_seed)); _status.Text = "Seed backup saved (keep it secret)."; }
     }
 
+    private void LoadTxFromFile()
+    {
+        var dlg = new Microsoft.Win32.OpenFileDialog { Filter = "Transaction (*.txt;*.hex;*.tx)|*.txt;*.hex;*.tx|All files (*.*)|*.*" };
+        if (dlg.ShowDialog() != true) return;
+        try
+        {
+            var hex = File.ReadAllText(dlg.FileName).Trim();
+            var raw = Convert.FromHexString(hex);
+            var tx = Chain.Deserialize(raw);
+            var node = _node();
+            if (node == null || node.PeerCount == 0) { MessageBox.Show("No BSV peers connected.", "Broadcast"); return; }
+            node.Broadcast(raw);
+            _status.Text = "Broadcast tx " + Chain.Txid(tx);
+        }
+        catch (Exception ex) { MessageBox.Show("Could not load/broadcast: " + ex.Message, "Load transaction"); }
+    }
+
+    private void ExportLabels()
+    {
+        var dlg = new Microsoft.Win32.SaveFileDialog { Filter = "JSON (*.json)|*.json", FileName = "bsvpoker-labels.json" };
+        if (dlg.ShowDialog() != true) return;
+        var obj = new { txLabels = _w.TxLabels, addrLabels = _w.AddrLabels };
+        File.WriteAllText(dlg.FileName, JsonSerializer.Serialize(obj, new JsonSerializerOptions { WriteIndented = true }));
+        _status.Text = "Labels exported.";
+    }
+
+    private void ImportLabels()
+    {
+        var dlg = new Microsoft.Win32.OpenFileDialog { Filter = "JSON (*.json)|*.json|All files (*.*)|*.*" };
+        if (dlg.ShowDialog() != true) return;
+        try
+        {
+            using var doc = JsonDocument.Parse(File.ReadAllText(dlg.FileName));
+            if (doc.RootElement.TryGetProperty("txLabels", out var tl)) foreach (var p in tl.EnumerateObject()) _w.TxLabels[p.Name] = p.Value.GetString() ?? "";
+            if (doc.RootElement.TryGetProperty("addrLabels", out var al)) foreach (var p in al.EnumerateObject()) _w.AddrLabels[p.Name] = p.Value.GetString() ?? "";
+            Save(); Render(); _status.Text = "Labels imported.";
+        }
+        catch (Exception ex) { MessageBox.Show("Bad labels file: " + ex.Message, "Import labels"); }
+    }
+
+    private void ExportAddresses()
+    {
+        var dlg = new Microsoft.Win32.SaveFileDialog { Filter = "CSV (*.csv)|*.csv", FileName = "bsvpoker-addresses.csv" };
+        if (dlg.ShowDialog() != true) return;
+        var lines = new List<string> { "path,address,balance_sat,label" };
+        for (uint i = 0; i <= (uint)_w.RecvIndex; i++)
+        {
+            var addr = AddressForKey(0, i);
+            long bal = _w.Utxos.Where(u => !u.Spent && u.KeyChain == 0 && u.KeyIndex == i).Sum(u => u.Value);
+            var lbl = _w.AddrLabels.TryGetValue(addr, out var l) ? l.Replace(",", " ") : "";
+            lines.Add($"receive/{i},{addr},{bal},{lbl}");
+        }
+        File.WriteAllLines(dlg.FileName, lines);
+        _status.Text = "Addresses exported.";
+    }
+
     // ---- SEND: ElectrumSVP-style aligned grid form (Pay to / Amount+Max / Fee / Description) ----
     private UIElement BuildSendTab()
     {
@@ -722,10 +778,19 @@ public sealed class WalletView : UserControl
 
         sp.Children.Add(Lbl("Transactions"));
         var txs = new WrapPanel();
-        var load = Btn("Load / broadcast a raw transaction…"); load.Click += (_, _) => { if (Guard()) LoadBroadcastTx(); };
+        var load = Btn("Load / broadcast a raw transaction (text)…"); load.Click += (_, _) => { if (Guard()) LoadBroadcastTx(); };
+        var loadFile = Btn("Load transaction from file…"); loadFile.Click += (_, _) => { if (Guard()) LoadTxFromFile(); };
         var mpk = Btn("Show master public key"); mpk.Click += (_, _) => { if (Guard()) MessageBox.Show(Convert.ToHexString(_identityPub).ToLowerInvariant(), "Identity / master public key"); };
-        txs.Children.Add(load); txs.Children.Add(mpk);
+        txs.Children.Add(load); txs.Children.Add(loadFile); txs.Children.Add(mpk);
         sp.Children.Add(txs);
+
+        sp.Children.Add(Lbl("Export / import"));
+        var exp = new WrapPanel();
+        var expLabels = Btn("Export labels (JSON)…"); expLabels.Click += (_, _) => ExportLabels();
+        var impLabels = Btn("Import labels (JSON)…"); impLabels.Click += (_, _) => { if (Guard()) ImportLabels(); };
+        var expAddrs = Btn("Export addresses (CSV)…"); expAddrs.Click += (_, _) => { if (Guard()) ExportAddresses(); };
+        exp.Children.Add(expLabels); exp.Children.Add(impLabels); exp.Children.Add(expAddrs);
+        sp.Children.Add(exp);
         return Scroll(sp);
     }
 
