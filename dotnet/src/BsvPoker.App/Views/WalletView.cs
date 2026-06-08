@@ -1764,6 +1764,33 @@ public sealed class WalletView : UserControl
     {
         if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(new Action(RefreshCards)); return; }
         _cards.Children.Clear();
-        _cardsLabel.Text = "Card NFTs (1-sat on-chain outputs): 0 — cards appear only when dealt by real transactions";
+        var owned = _vault.Owned();
+        _cardsLabel.Text = owned.Count == 0
+            ? "Card NFTs (1-sat on-chain outputs sealed to your identity): none yet — they appear as real Deal transactions seal cards to you"
+            : $"Card NFTs (1-sat on-chain outputs sealed to your identity): {owned.Count}";
+        foreach (var (card, sealedHex) in owned)
+            _cards.Children.Add(NftTile(card, sealedHex));
+    }
+
+    /// <summary>An NFT tile rendering a real owned card NFT (its provenance is the sealed on-chain blob).</summary>
+    private UIElement NftTile(Card card, string sealedHex)
+    {
+        var face = new Border
+        {
+            Width = 84, Height = 116, Margin = new Thickness(0, 0, 10, 10), CornerRadius = new CornerRadius(8),
+            Background = Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(0x3A, 0x3A, 0x3A)), BorderThickness = new Thickness(1),
+        };
+        var fg = card.IsRed ? Brushes.Crimson : Brushes.Black;
+        var grid = new Grid();
+        grid.Children.Add(new TextBlock { Text = card.RankLabel, FontSize = 18, FontWeight = FontWeights.Bold, Foreground = fg, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(6, 4, 0, 0) });
+        grid.Children.Add(new TextBlock { Text = card.Glyph.ToString(), FontSize = 34, Foreground = fg, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center });
+        grid.Children.Add(new TextBlock { Text = card.RankLabel, FontSize = 18, FontWeight = FontWeights.Bold, Foreground = fg, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Bottom, Margin = new Thickness(0, 0, 6, 4) });
+        face.Child = grid;
+        face.ToolTip = $"Card NFT {card}\nsealed (on-chain provenance): {sealedHex[..Math.Min(24, sealedHex.Length)]}…\nClick to copy the sealed blob.";
+        face.MouseLeftButtonUp += (_, _) => CopyToClipboard(sealedHex, $"NFT {card} sealed blob copied.");
+        var wrap = new StackPanel { Width = 94 };
+        wrap.Children.Add(face);
+        wrap.Children.Add(new TextBlock { Text = $"NFT · {card}", Foreground = SubInk, FontSize = 11, HorizontalAlignment = HorizontalAlignment.Center });
+        return wrap;
     }
 }
