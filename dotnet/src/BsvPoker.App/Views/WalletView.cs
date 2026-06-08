@@ -484,6 +484,44 @@ public sealed class WalletView : UserControl
 
     private static bool ValidEmail(string e) => System.Text.RegularExpressions.Regex.IsMatch(e ?? "", @"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$");
 
+    /// <summary>Export my registered identity as a portable, self-signed certificate (JSON) others can verify.</summary>
+    private void ExportIdentityCert()
+    {
+        if (_w.Identity == null) { _status.Text = "Register your identity first."; RegisterDialog(); return; }
+        var json = JsonSerializer.Serialize(_w.Identity, new JsonSerializerOptions { WriteIndented = true });
+        var box = new TextBox { Text = json, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, FontFamily = new FontFamily("Consolas"), Height = 220, Width = 520, Background = FieldBg, Foreground = Accent, BorderBrush = Line, BorderThickness = new Thickness(1) };
+        var copy = new Button { Content = "Copy", Margin = new Thickness(0, 8, 0, 0), Padding = new Thickness(12, 6, 12, 6) };
+        copy.Click += (_, _) => CopyToClipboard(json, "Identity certificate copied.");
+        var win = new Window { Title = "My identity certificate (signed)", Width = 580, Height = 340, Owner = Window.GetWindow(this), Background = WinBg, Content = new ScrollViewer { Content = new StackPanel { Margin = new Thickness(12), Children = { new TextBlock { Text = "Share this — anyone can verify it was signed by your identity key:", Foreground = Ink }, box, copy } } } };
+        win.ShowDialog();
+    }
+
+    /// <summary>Verify another person's identity certificate: the signature must check out against the identity
+    /// public key embedded in it — proving the name/pseudonym/email really belong to that key.</summary>
+    private void VerifyIdentityCert()
+    {
+        var box = new TextBox { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, FontFamily = new FontFamily("Consolas"), Height = 180, Width = 520 }; ThemeOne(box);
+        var go = new Button { Content = "Verify", Margin = new Thickness(0, 8, 0, 0), Padding = new Thickness(12, 6, 12, 6) };
+        var result = new TextBlock { Margin = new Thickness(0, 8, 0, 0), FontWeight = FontWeights.Bold, TextWrapping = TextWrapping.Wrap };
+        var win = new Window { Title = "Verify an identity certificate", Width = 580, Height = 360, Owner = Window.GetWindow(this), Background = WinBg, Content = new ScrollViewer { Content = new StackPanel { Margin = new Thickness(12), Children = { new TextBlock { Text = "Paste someone's identity certificate (JSON):", Foreground = Ink }, box, go, result } } } };
+        go.Click += (_, _) =>
+        {
+            try
+            {
+                var r = JsonSerializer.Deserialize<Registration>(box.Text.Trim());
+                if (r == null || r.IdentityPub.Length == 0) { result.Text = "Not a certificate."; result.Foreground = Brushes.IndianRed; return; }
+                var pub = Convert.FromHexString(r.IdentityPub);
+                bool ok = WalletExtras.VerifyMessage(pub, r.Canonical(), r.Signature);
+                result.Text = ok ? $"✔ VALID — {r.DisplayName} (@{r.Pseudonym}), {r.Email}\nis bound to identity key {r.IdentityPub[..16]}…" : "✖ INVALID — the signature does not match the identity key. Do NOT trust this identity.";
+                result.Foreground = ok ? Accent : Brushes.IndianRed;
+                if (ok && !_w.Contacts.Any(c => string.Equals(c.IdentityPub, r.IdentityPub, StringComparison.OrdinalIgnoreCase)))
+                    result.Text += "\n(Tip: add them in Contacts as @" + r.Pseudonym + ")";
+            }
+            catch (Exception ex) { result.Text = "Could not parse/verify: " + ex.Message; result.Foreground = Brushes.IndianRed; }
+        };
+        win.ShowDialog();
+    }
+
     /// <summary>
     /// Mandatory identity REGISTRATION: the user fills in display name + pseudonym + email (validated) + optional
     /// country; we bind it to the Base ID key by SELF-SIGNING the fields (a verifiable identity certificate) and
@@ -1210,7 +1248,9 @@ public sealed class WalletView : UserControl
         sp.Children.Add(_idPub);
         var idBtns = new WrapPanel { Margin = new Thickness(0, 6, 0, 0) };
         var copyId = Btn("Copy identity key"); copyId.Click += (_, _) => { if (Guard()) CopyToClipboard(Convert.ToHexString(_identityPub).ToLowerInvariant(), "Identity key copied."); };
-        idBtns.Children.Add(copyId);
+        var exportCert = Btn("Export my identity certificate"); exportCert.Click += (_, _) => ExportIdentityCert();
+        var verifyCert = Btn("Verify someone's identity…"); verifyCert.Click += (_, _) => VerifyIdentityCert();
+        idBtns.Children.Add(copyId); idBtns.Children.Add(exportCert); idBtns.Children.Add(verifyCert);
         sp.Children.Add(idBtns);
         sp.Children.Add(Lbl("Identity QR (others scan this to add you as a contact)"));
         try { sp.Children.Add(new Border { Background = Brushes.White, Padding = new Thickness(6), HorizontalAlignment = HorizontalAlignment.Left, Child = new System.Windows.Controls.Image { Source = RenderQr("bsvid:" + Convert.ToHexString(_identityPub).ToLowerInvariant()), Stretch = Stretch.None } }); } catch { }
