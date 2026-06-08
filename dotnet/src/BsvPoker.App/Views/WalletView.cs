@@ -1934,7 +1934,8 @@ public sealed class WalletView : UserControl
         _sbBalance.Text = $"{Balance:N0} sat" + (Pending > 0 ? $"  (+{Pending:N0} pending)" : "") + (WatchedBalance > 0 ? $"  [watch {WatchedBalance:N0}]" : "");
         _sbLock.Text = "🔓 unlocked";
         var node = _node();
-        _sbNetwork.Text = $"{_net().Network}  ·  SPV peers: {(node?.PeerCount ?? 0)}";
+        var who = string.IsNullOrWhiteSpace(_w.Handle) ? "" : $"@{_w.Handle} · ";
+        _sbNetwork.Text = $"{who}acct #{_accountIndex} · {_net().Network} · SPV peers: {(node?.PeerCount ?? 0)}";
     }
 
     /// <summary>Resolve a peer's identity public key (hex) to a saved contact handle, or null. Lets the chat /
