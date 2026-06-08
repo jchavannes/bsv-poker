@@ -41,6 +41,8 @@ MerkleProofTests.All();
 PartialMerkleTreeTests.All();
 TxCodecTests.All();
 SpvFundingTests.All();
+BloomFilterTests.All();
+SpvDiscoveryTests.All();
 ScriptTests.All();
 
 return T.Summary();

@@ -47,6 +47,24 @@ public sealed class HeadersChain
     public bool Knows(string hashHex) => _byHash.ContainsKey(hashHex);
     public Entry? Get(string hashHex) => _byHash.TryGetValue(hashHex, out var e) ? e : null;
 
+    /// <summary>
+    /// The most recent <paramref name="n"/> validated headers on the active chain, tip first. Used to ask peers
+    /// for <c>merkleblock</c> proofs over recent blocks so a payment that confirmed before we connected is still
+    /// discovered (the SPV rescan). Walks back from the tip by parent linkage.
+    /// </summary>
+    public IReadOnlyList<Entry> Recent(int n)
+    {
+        var outp = new List<Entry>();
+        var cur = Tip;
+        while (cur != null && outp.Count < n)
+        {
+            outp.Add(cur);
+            if (!_byHash.TryGetValue(cur.PrevHex, out var parent)) break;
+            cur = parent;
+        }
+        return outp;
+    }
+
     // a header's parent hash in display (big-endian) form, matching HashHex()
     private static string PrevHex(BlockHeader h) { var p = (byte[])h.PrevHash.Clone(); Array.Reverse(p); return Convert.ToHexString(p).ToLowerInvariant(); }
 }

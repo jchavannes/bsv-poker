@@ -32,6 +32,11 @@ public sealed class WalletView : UserControl
     private byte[] _seed = Array.Empty<byte>();   // the 32-byte master seed held in memory
     private bool _locked;                          // true when the wallet is encrypted and not yet unlocked this session
 
+    /// <summary>True once the seed is in memory and the wallet can derive keys (needed before the SPV filter is built).</summary>
+    public bool IsUnlocked => !_locked;
+    /// <summary>Raised the moment the wallet becomes usable (fresh, unlocked, or restored) so the node can load our SPV filter.</summary>
+    public event Action? OnUnlocked;
+
     private readonly Func<BsvNode?> _node;          // current network's live node (for broadcast); may be null/peerless
     private readonly Func<HeaderStore?> _store;     // current network's validated header store (for SPV verification)
     private readonly Func<NetworkParams> _net;      // current network parameters (address version, etc.)
@@ -71,7 +76,9 @@ public sealed class WalletView : UserControl
         var newAddr = Btn("New address"); newAddr.Click += (_, _) => { if (Guard()) { _w.RecvIndex++; Save(); Render(); } };
         var importBtn = Btn("Import funding (SPV envelope)…"); importBtn.Click += (_, _) => { if (Guard()) ImportFunding(); };
         var makeEnv = Btn("Create funding envelope…"); makeEnv.Click += async (_, _) => { if (Guard()) await CreateEnvelope(); };
-        root.Children.Add(new WrapPanel { Children = { copyAddr, newAddr, importBtn, makeEnv } });
+        var findTx = Btn("Find a payment by txid…"); findTx.Click += async (_, _) => { if (Guard()) await FindByTxid(); };
+        var rescan = Btn("Rescan for my payments now"); rescan.Click += (_, _) => { if (Guard()) { _status.Text = "Rescanning the chain for payments to your address…"; RescanRequested?.Invoke(); } };
+        root.Children.Add(new WrapPanel { Children = { copyAddr, newAddr, importBtn, makeEnv, findTx, rescan } });
 
         var send = new WrapPanel { Margin = new Thickness(0, 14, 0, 0) };
         send.Children.Add(new TextBlock { Text = "Send  amount ", Foreground = Brushes.Gray, VerticalAlignment = VerticalAlignment.Center });
@@ -175,6 +182,65 @@ public sealed class WalletView : UserControl
 
     /// <summary>Txids of coins still awaiting confirmation (so the node can fetch their blocks).</summary>
     public IReadOnlyList<string> PendingTxids() => _w.Utxos.Where(u => !u.Confirmed && !u.Spent).Select(u => u.Txid).Distinct().ToList();
+
+    /// <summary>
+    /// The address material to load into the node's SPV bloom filter: for every receive and change key in our
+    /// scan range, both the 20-byte hash160 (which a P2PKH output pushes — this is what matches a payment TO us)
+    /// and the 33-byte public key. Peers then relay back exactly our own transactions, with no server scanning
+    /// the chain for us. A wider scan range = a few more keys watched; correctness is unaffected either way.
+    /// </summary>
+    public IReadOnlyList<byte[]> FilterElements()
+    {
+        var elems = new List<byte[]>();
+        uint gap = (uint)_w.RecvIndex + 50;
+        for (uint chain = 0; chain <= 2; chain++)            // 0 = receive, 1 = change, 2 = seat/escrow keys
+            for (uint i = 0; i <= gap; i++)
+            {
+                var pub = WalletKeys.Account(_seed, chain, i).Pub;
+                elems.Add(Hashes.Hash160(pub));
+                elems.Add(pub);
+            }
+        return elems;
+    }
+
+    /// <summary>
+    /// Credit a payment the node discovered for us via SPV: the matching transaction plus the raw merkleblock
+    /// proving it was mined. We re-verify the proof against the headers WE validated and that the output really
+    /// pays one of our keys (<see cref="SpvFunding.VerifyFromMerkleBlock"/>); only then is a CONFIRMED UTXO
+    /// added. This is the automatic "you sent funds and it shows up" path — no envelope to paste, no server.
+    /// </summary>
+    public bool ConfirmIncoming(Core.Chain.Tx tx, byte[] merkleBlockPayload)
+    {
+        if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(new Action(() => ConfirmIncoming(tx, merkleBlockPayload))); return false; }
+        if (_locked) return false;
+        var store = _store(); if (store == null || store.Count == 0) return false;     // need our own validated headers
+        var (chain, _) = store.BuildChain();
+        bool changed = false;
+        uint gap = (uint)_w.RecvIndex + 50;
+        for (uint v = 0; v < (uint)tx.Outs.Count; v++)
+            for (uint c = 0; c <= 2 && !changed; c++)
+                for (uint i = 0; i <= gap; i++)
+                {
+                    var pub = WalletKeys.Account(_seed, c, i).Pub;
+                    var utxo = SpvFunding.VerifyFromMerkleBlock(tx, v, merkleBlockPayload, chain, pub, c, i);
+                    if (utxo == null) continue;
+                    if (!_w.Utxos.Any(u => u.Txid == utxo.Txid && u.Vout == utxo.Vout))
+                    {
+                        _w.Utxos.Add(new UtxoRec { Txid = utxo.Txid, Vout = utxo.Vout, Value = utxo.Value, KeyChain = c, KeyIndex = i, Confirmed = true });
+                        AppendTx("received", utxo.Value, $"SPV-confirmed {utxo.Txid[..12]}…:{utxo.Vout}");
+                        changed = true;
+                    }
+                    else // already known (was pending) → mark it confirmed now that we hold the proof
+                        foreach (var u in _w.Utxos.Where(u => u.Txid == utxo.Txid && u.Vout == utxo.Vout && !u.Confirmed))
+                        { u.Confirmed = true; changed = true; AppendTx("confirmed", u.Value, $"{u.Txid[..12]}…:{u.Vout} mined"); }
+                    break;
+                }
+        if (changed) { Save(); Render(); }
+        return changed;
+    }
+
+    /// <summary>Set by the host window: triggers an SPV rescan (mempool pull + recent filtered blocks) for our addresses.</summary>
+    public Action? RescanRequested;
 
     /// <summary>
     /// True when the wallet holds enough REAL (SPV-confirmed) coin to seat a hand. STANDALONE SPV — there is
@@ -316,6 +382,49 @@ public sealed class WalletView : UserControl
             catch (Exception ex) { MessageBox.Show("Could not import: " + ex.Message, "Import error"); }
         };
         win.ShowDialog();
+    }
+
+    /// <summary>
+    /// Find a payment by its transaction id (and the hash of the block that confirmed it): fetch that block
+    /// from a peer over our own node, locate the transaction, build a merkle proof, and credit any output that
+    /// pays one of our keys — verified against the headers we validated ourselves. This is the txid funding
+    /// path: you (or the payer) supply the txid + block hash and the wallet does the rest, no server.
+    /// </summary>
+    private async System.Threading.Tasks.Task FindByTxid()
+    {
+        var txidBox = new TextBox { Width = 520, FontFamily = new FontFamily("Consolas") };
+        var blkBox = new TextBox { Width = 520, FontFamily = new FontFamily("Consolas") };
+        var go = new Button { Content = "Fetch & credit", Margin = new Thickness(0, 10, 0, 0), Padding = new Thickness(12, 6, 12, 6) };
+        var sp = new StackPanel { Margin = new Thickness(12) };
+        sp.Children.Add(new TextBlock { Text = "Payment transaction id (txid):", Foreground = Brushes.Gray }); sp.Children.Add(txidBox);
+        sp.Children.Add(new TextBlock { Text = "Hash of the block that confirmed it:", Foreground = Brushes.Gray, Margin = new Thickness(0, 8, 0, 0) }); sp.Children.Add(blkBox);
+        sp.Children.Add(go);
+        var win = new Window { Title = "Find a payment by txid", Width = 580, Height = 240, Owner = Window.GetWindow(this), Content = new ScrollViewer { Content = sp } };
+        go.Click += async (_, _) =>
+        {
+            try
+            {
+                var node = _node();
+                if (node == null || node.PeerCount == 0) { MessageBox.Show("No BSV peers connected yet — wait for peers, then retry.", "No peers"); return; }
+                var store = _store();
+                if (store == null || store.Count == 0) { MessageBox.Show("No validated headers yet — wait for header sync, then retry.", "Cannot verify"); return; }
+                var wantTxid = txidBox.Text.Trim().ToLowerInvariant();
+                go.IsEnabled = false;
+                var raw = await node.GetBlockAsync(blkBox.Text.Trim());
+                go.IsEnabled = true;
+                if (raw == null) { MessageBox.Show("That block was not served by any peer — check the block hash.", "Not found"); return; }
+                var parsed = BsvBlock.Parse(raw);                                  // validates merkle root vs header
+                int idx = parsed.Txs.FindIndex(t => Chain.Txid(t) == wantTxid);
+                if (idx < 0) { MessageBox.Show("That txid is not in that block — wrong block hash?", "Not in block"); return; }
+                var mb = PartialMerkleTree.BuildMerkleBlock(parsed.Header, parsed.Txids, new HashSet<int> { idx });
+                if (ConfirmIncoming(parsed.Txs[idx], mb))
+                { _status.Text = "Payment found and credited (SPV-verified)."; win.Close(); }
+                else MessageBox.Show("The transaction was found, but no output pays your wallet (or that block isn't in your validated headers yet).", "Nothing to credit");
+            }
+            catch (Exception ex) { go.IsEnabled = true; MessageBox.Show("Could not find the payment: " + ex.Message, "Error"); }
+        };
+        win.ShowDialog();
+        await System.Threading.Tasks.Task.CompletedTask;
     }
 
     /// <summary>
@@ -522,6 +631,7 @@ public sealed class WalletView : UserControl
             {
                 _seed = WalletKeys.BackupToSeed(WalletExtras.DecryptSeed(_w.Seed, pw));
                 _locked = false;
+                OnUnlocked?.Invoke();
             }
             catch { MessageBox.Show("Wrong password — try again.", "Unlock failed", MessageBoxButton.OK, MessageBoxImage.Warning); }
         }
@@ -571,7 +681,7 @@ public sealed class WalletView : UserControl
         var win = new Window { Title = "Restore wallet — enter your seed backup", Width = 500, Height = 200, Owner = Window.GetWindow(this), Content = new StackPanel { Margin = new Thickness(12), Children = { box, ok } } };
         ok.Click += (_, _) =>
         {
-            try { _seed = WalletKeys.BackupToSeed(box.Text.Trim()); _w = new File_ { Seed = WalletKeys.SeedToBackup(_seed), RecvIndex = 0 }; _locked = false; AppendTx("restore", 0, "wallet restored from seed"); Save(); Render(); win.Close(); }
+            try { _seed = WalletKeys.BackupToSeed(box.Text.Trim()); _w = new File_ { Seed = WalletKeys.SeedToBackup(_seed), RecvIndex = 0 }; _locked = false; OnUnlocked?.Invoke(); AppendTx("restore", 0, "wallet restored from seed"); Save(); Render(); win.Close(); }
             catch (Exception ex) { MessageBox.Show(ex.Message, "Invalid seed"); }
         };
         win.ShowDialog();

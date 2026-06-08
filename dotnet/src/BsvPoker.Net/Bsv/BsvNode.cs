@@ -66,6 +66,8 @@ public sealed class BsvNode : IDisposable
             await peer.HandshakeAsync(startHeight: BestHeight, ct: _cts.Token);
             _peers[key] = peer;
             peer.OnMessage += m => HandleRelay(peer, m);   // receive relayed transactions (announce/chat/etc.) from the network
+            // give this fresh peer our SPV filter so it relays our own transactions back to us
+            if (_filter is { } f) { try { peer.Send("filterload", f.ToFilterLoad()); peer.Send("mempool", Array.Empty<byte>()); } catch { } }
             if (peer.RemoteVersion is { } v && v.StartHeight > BestHeight) BestHeight = v.StartHeight;
             return true;
         }
@@ -74,6 +76,50 @@ public sealed class BsvNode : IDisposable
 
     /// <summary>Raised when a transaction is relayed to us by the network (used for automatic peer discovery + inbound messages).</summary>
     public event Action<BsvPoker.Core.Chain.Tx>? OnRelayedTransaction;
+
+    /// <summary>
+    /// Raised when a transaction that matched our SPV filter arrives WITH a proof that it was mined: the tx and
+    /// the raw <c>merkleblock</c> payload whose partial tree contains it. The wallet verifies the proof against
+    /// its own validated headers (<see cref="SpvFunding.VerifyFromMerkleBlock"/>) before crediting anything.
+    /// </summary>
+    public event Action<BsvPoker.Core.Chain.Tx, byte[]>? OnConfirmedTransaction;
+
+    private volatile BloomFilter? _filter;
+    // a merkleblock proves a set of txids were mined; we cache it by matched txid so that when the matching tx
+    // arrives moments later (peers send the merkleblock first, then the txs) we can pair proof ↔ transaction.
+    private readonly ConcurrentDictionary<string, byte[]> _proofByTxid = new();
+
+    /// <summary>
+    /// Load (or replace) the SPV bloom filter from the wallet's own address material and push it to every peer.
+    /// After loading we also pull the peers' mempools so a payment that is still unconfirmed shows up at once.
+    /// </summary>
+    public void SetSpvFilter(BloomFilter filter)
+    {
+        _filter = filter;
+        var payload = filter.ToFilterLoad();
+        foreach (var p in _peers.Values) { try { p.Send("filterload", payload); } catch { } }
+        RequestMempool();
+    }
+
+    /// <summary>Ask peers for the txids in their mempool that match our filter (instant detect of a just-sent payment).</summary>
+    public void RequestMempool()
+    {
+        foreach (var p in _peers.Values) { try { p.Send("mempool", Array.Empty<byte>()); } catch { } }
+    }
+
+    /// <summary>
+    /// Ask peers for <c>merkleblock</c> proofs (filtered blocks) over the given block hashes — an SPV rescan of
+    /// recent history so a payment that confirmed before we connected is still discovered. Hashes are display
+    /// (big-endian) form; we request MSG_FILTERED_BLOCK (type 3) so only our matching txs + a proof come back.
+    /// </summary>
+    public void RequestFilteredBlocks(IEnumerable<string> blockHashesDisplayHex)
+    {
+        if (_filter == null) return;
+        var internalHashes = blockHashesDisplayHex.Select(InternalHash).ToList();
+        if (internalHashes.Count == 0) return;
+        var gd = BuildGetDataMany(3 /* MSG_FILTERED_BLOCK */, internalHashes);
+        foreach (var p in _peers.Values) { try { p.Send("getdata", gd); } catch { } }
+    }
 
     // Handle messages a peer relays: announce inventory we want (tx) → getdata; a relayed tx → parse + surface.
     private void HandleRelay(BsvPeer peer, BsvMessage m)
@@ -97,10 +143,24 @@ public sealed class BsvNode : IDisposable
                     peer.Send("getdata", gd.ToArray());
                 }
             }
+            else if (m.Command == "merkleblock")
+            {
+                // a proof that some txs were mined: remember it keyed by each matched txid so the tx messages
+                // that follow can be paired with their proof. We do NOT trust it yet — the wallet re-verifies
+                // the partial tree against a header IT validated before crediting anything.
+                var parsed = PartialMerkleTree.ParseMerkleBlock(m.Payload);
+                foreach (var (txidInternal, _) in parsed.Matched)
+                {
+                    var disp = (byte[])txidInternal.Clone(); Array.Reverse(disp);
+                    _proofByTxid[Convert.ToHexString(disp).ToLowerInvariant()] = m.Payload;
+                }
+            }
             else if (m.Command == "tx")
             {
                 int o = 0; var tx = BsvPoker.Core.Chain.Deserialize(m.Payload, ref o);
-                OnRelayedTransaction?.Invoke(tx);
+                OnRelayedTransaction?.Invoke(tx);                              // unconfirmed / mempool (shown as pending)
+                if (_proofByTxid.TryGetValue(BsvPoker.Core.Chain.Txid(tx), out var proof))
+                    OnConfirmedTransaction?.Invoke(tx, proof);                 // we also hold a mined-proof for it
             }
         }
         catch { }
@@ -237,6 +297,15 @@ public sealed class BsvNode : IDisposable
         BsvVersion.WriteVarInt(b, 1);                 // one inventory vector
         var t = new byte[4]; BinaryPrimitives.WriteUInt32LittleEndian(t, invType); b.AddRange(t);
         b.AddRange(hashInternal);
+        return b.ToArray();
+    }
+
+    private static byte[] BuildGetDataMany(uint invType, IReadOnlyList<byte[]> hashesInternal)
+    {
+        var b = new List<byte>();
+        BsvVersion.WriteVarInt(b, (ulong)hashesInternal.Count);
+        var t = new byte[4]; BinaryPrimitives.WriteUInt32LittleEndian(t, invType);
+        foreach (var h in hashesInternal) { b.AddRange(t); b.AddRange(h); }
         return b.ToArray();
     }
 

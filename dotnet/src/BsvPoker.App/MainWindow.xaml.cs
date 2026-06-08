@@ -24,6 +24,7 @@ public partial class MainWindow : Window
         var wallet = new WalletView(_profile.Dir, vault, () => _bsvNode, () => _headerStore, () => _currentNet);
         WalletHost.Content = wallet;
         _wallet = wallet;
+        _wallet.RescanRequested = SpvRescan;   // the wallet's "Rescan for my payments now" button
 
         _game = new GameView(_profile.IdentityPriv, _profile.IdentityPub, vault, wallet.RefreshCards,
             playHand: RunLiveHand);   // a hand is a genuine two-party on-chain mental-poker deal vs a real peer
@@ -50,6 +51,13 @@ public partial class MainWindow : Window
             var netRefresh = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
             netRefresh.Tick += (_, _) => UpdateNetInfo();
             netRefresh.Start();
+            // SPV discovery: periodically pull the mempool (instant detect of a just-sent payment) and rescan
+            // recent blocks with our filter (catches a payment that confirmed before we were connected).
+            var spvScan = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(20) };
+            spvScan.Tick += (_, _) => SpvRescan();
+            spvScan.Start();
+            // re-arm the SPV filter the instant the wallet is unlocked (it needs the seed to derive our addresses)
+            _wallet.OnUnlocked += () => { ApplySpvFilter(); SpvRescan(); };
             // announce ourselves on-chain so peers auto-discover our key + address (a funded Announce tx)
             var ann = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(45) };
             ann.Tick += (_, _) => Announce();
@@ -274,6 +282,8 @@ public partial class MainWindow : Window
         _currentNet = NetworkParams.For(net);
         _bsvNode = new BsvNode(_currentNet);
         _bsvNode.OnRelayedTransaction += Ingest;   // auto-discover peers + receive messages from network-relayed txs
+        _bsvNode.OnConfirmedTransaction += (tx, mb) => _wallet.ConfirmIncoming(tx, mb); // SPV-proven payment → credit it
+        ApplySpvFilter();                          // load our addresses into the node so peers relay our own txs back
         var storePath = System.IO.Path.Combine(_profile.Dir, $"headers-{net}.dat");
         _headerStore = new HeaderStore(storePath);
         _storedHeight = _headerStore.Count;
@@ -297,6 +307,47 @@ public partial class MainWindow : Window
             }
         });
         UpdateNetInfo();
+    }
+
+    /// <summary>
+    /// Build the SPV bloom filter from the wallet's own addresses and load it into the node, so peers relay our
+    /// own transactions (incoming payments and our spends) back to us — the no-server way the wallet sees the
+    /// chain. Does nothing until the wallet is unlocked (the seed is needed to derive the addresses).
+    /// </summary>
+    private void ApplySpvFilter()
+    {
+        if (_bsvNode == null || !_wallet.IsUnlocked) return;
+        try
+        {
+            var elems = _wallet.FilterElements();
+            var tweak = System.BitConverter.ToUInt32(System.Security.Cryptography.RandomNumberGenerator.GetBytes(4));
+            var filter = new BloomFilter(elems.Count, 0.00001, tweak);
+            foreach (var e in elems) filter.Insert(e);
+            _bsvNode.SetSpvFilter(filter);   // pushes filterload to peers + pulls their mempools
+        }
+        catch { }
+    }
+
+    /// <summary>
+    /// Pull peer mempools and rescan recent blocks with our filter so a payment is discovered whether it is
+    /// still unconfirmed OR confirmed before we connected. Matching txs come back with a merkleblock proof we
+    /// verify against our own headers in <see cref="WalletView.ConfirmIncoming"/>.
+    /// </summary>
+    private void SpvRescan()
+    {
+        if (_bsvNode == null || _bsvNode.PeerCount == 0 || !_wallet.IsUnlocked) return;
+        try
+        {
+            _bsvNode.RequestMempool();
+            var store = _headerStore;
+            if (store != null && store.Count > 0)
+            {
+                var (chain, _) = store.BuildChain();
+                var recent = chain.Recent(2000).Select(e => e.HashHex).ToList();   // last ~2 weeks of blocks
+                if (recent.Count > 0) _bsvNode.RequestFilteredBlocks(recent);
+            }
+        }
+        catch { }
     }
 
     private void UpdateNetInfo()
