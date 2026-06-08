@@ -437,6 +437,9 @@ public sealed class WalletView : UserControl
     // ---- the ElectrumSVP-style account wizard (Standard / Restore / Import) ----
     private void AccountWizard()
     {
+        // STEP 0: a welcome / splash page (ElectrumSVP shows one — we do every step, never skip).
+        WizardWelcome();
+
         var sp = new StackPanel { Margin = new Thickness(20) };
         sp.Children.Add(new TextBlock { Text = "Add an account", FontSize = 18, FontWeight = FontWeights.Bold, Foreground = Ink, Margin = new Thickness(0, 0, 0, 6) });
         sp.Children.Add(new TextBlock { Text = "How would you like to set up this wallet? Your keys are kept encrypted and password-protected.", TextWrapping = TextWrapping.Wrap, Foreground = SubInk, Margin = new Thickness(0, 0, 0, 12), MaxWidth = 420 });
@@ -458,10 +461,25 @@ public sealed class WalletView : UserControl
         win.ShowDialog();
     }
 
+    /// <summary>The wizard welcome/splash page — shown before any choice (we never skip a step).</summary>
+    private void WizardWelcome()
+    {
+        var sp = new StackPanel { Margin = new Thickness(24) };
+        sp.Children.Add(new TextBlock { Text = "BSV Wallet", FontSize = 22, FontWeight = FontWeights.Bold, Foreground = Ink });
+        sp.Children.Add(new TextBlock { Text = "A standalone SPV BSV wallet with identity (Base ID + Type-42), encrypted card NFTs, 2-of-2 vaults with recovery, and pure peer-to-peer play — modelled on ElectrumSVP and built far beyond it. Your keys are encrypted and password-protected; everything is on-chain and server-less.", Foreground = SubInk, TextWrapping = TextWrapping.Wrap, MaxWidth = 420, Margin = new Thickness(0, 8, 0, 12) });
+        var go = new Button { Content = "Get started", Padding = new Thickness(14, 8, 14, 8), HorizontalAlignment = HorizontalAlignment.Left, IsDefault = true };
+        sp.Children.Add(go);
+        var win = new Window { Title = "Welcome", Width = 480, Height = 280, WindowStartupLocation = WindowStartupLocation.CenterOwner, Owner = Window.GetWindow(this), Background = WinBg, Content = new ScrollViewer { Content = sp } };
+        go.Click += (_, _) => win.Close();
+        win.ShowDialog();
+    }
+
     /// <summary>The Standard new-wallet flow: show the seed for backup → confirm it was written down → set a
     /// password. Mirrors ElectrumSVP's create-seed / confirm-seed / password pages (BSV-native seed, not BIP39).</summary>
     private void StandardSeedFlow()
     {
+        // STEP 1 (ElectrumSVP order): set the wallet password first (encrypt the keys at rest).
+        SetPassword();
         var seed = WalletKeys.SeedToBackup(_seed);
         // page 1: show the seed
         var seedBox = new TextBox { Text = seed, IsReadOnly = true, TextWrapping = TextWrapping.Wrap, FontFamily = new FontFamily("Consolas"), Background = FieldBg, Foreground = Accent, BorderBrush = Line, BorderThickness = new Thickness(1), Padding = new Thickness(6), Width = 420 };
@@ -491,10 +509,8 @@ public sealed class WalletView : UserControl
         };
         w2.ShowDialog();
 
-        // page 3: set a password (encrypt the keys at rest)
-        SetPassword();
         Render();
-        _status.Text = "New wallet ready — seed backed up and keys encrypted.";
+        _status.Text = "New wallet ready — password set, seed backed up and confirmed, keys encrypted.";
     }
 
     private string AccountPath(int i) => Path.Combine(_dataDir, i == 0 ? "wallet.json" : $"wallet-{i}.json");
