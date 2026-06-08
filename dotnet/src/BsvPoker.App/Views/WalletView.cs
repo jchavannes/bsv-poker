@@ -1784,22 +1784,57 @@ public sealed class WalletView : UserControl
         return win.DialogResult == true ? result : null;
     }
 
-    /// <summary>Set or change the wallet password (encrypts the wallet seed at rest), or remove it.</summary>
+    /// <summary>Password strength, ElectrumSV-style: entropy from length + digits + mixed case + symbols.</summary>
+    private static (string Label, Brush Colour) PasswordStrength(string pw)
+    {
+        if (pw.Length == 0) return ("", Brushes.Gray);
+        double bits = 0; int sets = 0;
+        if (pw.Any(char.IsLower)) { sets += 26; }
+        if (pw.Any(char.IsUpper)) { sets += 26; }
+        if (pw.Any(char.IsDigit)) { sets += 10; }
+        if (pw.Any(c => !char.IsLetterOrDigit(c))) { sets += 33; }
+        if (sets > 0) bits = pw.Length * Math.Log2(sets);
+        if (bits < 60) return ("Weak", Brushes.IndianRed);
+        if (bits < 90) return ("Medium", Brushes.Goldenrod);
+        if (bits < 120) return ("Strong", Brushes.MediumSeaGreen);
+        return ("Very strong", Brushes.LimeGreen);
+    }
+
+    /// <summary>
+    /// Set / change the wallet password — ElectrumSV's ChangePasswordDialog UX: New + Confirm fields, a live
+    /// strength meter, and an OK that stays disabled until the two entries match. Encrypts the seed at rest
+    /// (AES-GCM via WalletExtras). Leaving both blank removes the password.
+    /// </summary>
     private void SetPassword()
     {
         if (_locked) { MessageBox.Show("Unlock the wallet first.", "Wallet locked"); return; }
-        var pw = PasswordPrompt("Set wallet password", "Choose a password to encrypt your wallet seed on disk.\nLeave blank and press OK to REMOVE the password.");
-        if (pw == null) return;
-        if (pw.Length == 0)
+        bool has = WalletExtras.IsEncryptedSeed(_w.Seed);
+        var pw1 = new PasswordBox { Width = 320 };
+        var pw2 = new PasswordBox { Width = 320 };
+        var strength = new TextBlock { Margin = new Thickness(0, 4, 0, 0), FontWeight = FontWeights.Bold };
+        var ok = new Button { Content = "OK", Margin = new Thickness(0, 12, 8, 0), Padding = new Thickness(16, 6, 16, 6), IsDefault = true, IsEnabled = false };
+        var cancel = new Button { Content = "Cancel", Margin = new Thickness(0, 12, 0, 0), Padding = new Thickness(16, 6, 16, 6), IsCancel = true };
+        void Recheck()
         {
-            _w.Seed = WalletKeys.SeedToBackup(_seed); Save(); // remove encryption
-            _status.Text = "Wallet password removed — seed is now stored in the clear.";
-            return;
+            var (lbl, col) = PasswordStrength(pw1.Password);
+            strength.Text = pw1.Password.Length == 0 ? "(blank = remove password)" : $"Strength: {lbl}";
+            strength.Foreground = pw1.Password.Length == 0 ? SubInk : col;
+            ok.IsEnabled = pw1.Password == pw2.Password;   // OK disabled until they match (ElectrumSV behaviour)
         }
-        var confirm = PasswordPrompt("Confirm password", "Re-enter the password to confirm:");
-        if (confirm == null) return;
-        if (confirm != pw) { MessageBox.Show("Passwords do not match.", "Set password"); return; }
-        _w.Seed = WalletExtras.EncryptSeed(WalletKeys.SeedToBackup(_seed), pw); Save();
+        pw1.PasswordChanged += (_, _) => Recheck(); pw2.PasswordChanged += (_, _) => Recheck();
+        var sp = new StackPanel { Margin = new Thickness(16) };
+        sp.Children.Add(new TextBlock { Text = has ? "Your wallet is password protected. Use this dialog to change your password." : "Your wallet needs a password. Use this dialog to set your password.", Foreground = Ink, TextWrapping = TextWrapping.Wrap, MaxWidth = 320 });
+        sp.Children.Add(new TextBlock { Text = "New password:", Foreground = SubInk, Margin = new Thickness(0, 10, 0, 2) }); sp.Children.Add(pw1);
+        sp.Children.Add(new TextBlock { Text = "Confirm password:", Foreground = SubInk, Margin = new Thickness(0, 8, 0, 2) }); sp.Children.Add(pw2);
+        sp.Children.Add(strength);
+        sp.Children.Add(new WrapPanel { Children = { ok, cancel } });
+        var win = new Window { Title = "Wallet password", Width = 380, Height = 280, WindowStartupLocation = WindowStartupLocation.CenterOwner, Background = WinBg, Content = sp, ResizeMode = ResizeMode.NoResize };
+        if (Window.GetWindow(this) is { } owner && owner.IsLoaded) win.Owner = owner;
+        Recheck();
+        ok.Click += (_, _) => win.DialogResult = true;
+        if (win.ShowDialog() != true) return;
+        if (pw1.Password.Length == 0) { _w.Seed = WalletKeys.SeedToBackup(_seed); Save(); _status.Text = "Wallet password removed — seed stored in the clear."; return; }
+        _w.Seed = WalletExtras.EncryptSeed(WalletKeys.SeedToBackup(_seed), pw1.Password); Save();
         _status.Text = "Wallet encrypted — your seed is now password-protected at rest.";
     }
 
