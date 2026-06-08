@@ -24,8 +24,23 @@ namespace BsvPoker.App.Views;
 public sealed class WalletView : UserControl
 {
     private sealed class Tx { public string Time { get; set; } = ""; public string Type { get; set; } = ""; public long Amount { get; set; } public long Balance { get; set; } public string Memo { get; set; } = ""; }
-    private sealed class UtxoRec { public string Txid { get; set; } = ""; public uint Vout { get; set; } public long Value { get; set; } public uint KeyChain { get; set; } public uint KeyIndex { get; set; } public bool Spent { get; set; } public bool Confirmed { get; set; } }
-    private sealed class File_ { public string Seed { get; set; } = ""; public int RecvIndex { get; set; } public List<UtxoRec> Utxos { get; set; } = new(); public List<Tx> History { get; set; } = new(); }
+    private sealed class UtxoRec { public string Txid { get; set; } = ""; public uint Vout { get; set; } public long Value { get; set; } public uint KeyChain { get; set; } public uint KeyIndex { get; set; } public bool Spent { get; set; } public bool Confirmed { get; set; } public bool Frozen { get; set; } }
+    private sealed class SendRec { public string Txid { get; set; } = ""; public long Amount { get; set; } public long Fee { get; set; } public string To { get; set; } = ""; public string Time { get; set; } = ""; }
+    private sealed class Contact { public string Handle { get; set; } = ""; public string IdentityPub { get; set; } = ""; public string Note { get; set; } = ""; }
+    private sealed class PayRequest { public string Address { get; set; } = ""; public long Amount { get; set; } public string Memo { get; set; } = ""; public string Time { get; set; } = ""; }
+    private sealed class File_
+    {
+        public string Seed { get; set; } = "";
+        public int RecvIndex { get; set; }
+        public List<UtxoRec> Utxos { get; set; } = new();
+        public List<Tx> History { get; set; } = new();
+        public List<SendRec> Sends { get; set; } = new();                  // real outgoing broadcasts (for history)
+        public Dictionary<string, string> TxLabels { get; set; } = new();  // txid -> user label
+        public Dictionary<string, string> AddrLabels { get; set; } = new();// address -> user label
+        public List<Contact> Contacts { get; set; } = new();               // handle -> identity pubkey
+        public List<PayRequest> Requests { get; set; } = new();            // payment requests we issued
+        public string Handle { get; set; } = "";                           // this wallet's own identity handle
+    }
 
     private readonly string _path;
     private File_ _w = new();
@@ -53,6 +68,34 @@ public sealed class WalletView : UserControl
     private readonly WrapPanel _cards = new() { Margin = new Thickness(0, 4, 0, 0) };
     private readonly TextBlock _cardsLabel = new() { Foreground = Brushes.Gray, Margin = new Thickness(0, 14, 0, 2), Text = "My cards (NFTs)" };
 
+    // ---- ElectrumSV-style tabbed UI state ----
+    private KeyRing _ring = null!;                                  // hash-chained Type-42 key ring over the master seed
+    private readonly TabControl _tabs = new() { Background = new SolidColorBrush(Color.FromRgb(0x12, 0x12, 0x12)), Foreground = Brushes.White, BorderThickness = new Thickness(0) };
+    private readonly TextBox _sendPayTo = new() { Width = 520, FontFamily = new FontFamily("Consolas"), AcceptsReturn = true, Height = 56, TextWrapping = TextWrapping.Wrap, ToolTip = "An address, an identity handle (@bob), an identity pubkey (hex), or a bitcoin:/pay: URI" };
+    private readonly TextBox _sendLabel = new() { Width = 520 };
+    private readonly ComboBox _feeRate = new() { Width = 200 };
+    private readonly TextBlock _sendStatus = new() { Foreground = Brushes.Gray, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
+    private readonly TextBox _reqAmount = new() { Width = 160, Text = "0" };
+    private readonly TextBox _reqMemo = new() { Width = 320 };
+    private readonly TextBox _reqUri = new() { Width = 520, IsReadOnly = true, FontFamily = new FontFamily("Consolas"), TextWrapping = TextWrapping.Wrap, Background = Brushes.Transparent, Foreground = Brushes.LightGreen, BorderThickness = new Thickness(0) };
+    private readonly System.Windows.Controls.Image _reqQr = new() { Width = 220, Height = 220, Margin = new Thickness(0, 8, 0, 0), HorizontalAlignment = HorizontalAlignment.Left, Stretch = Stretch.None };
+    private readonly DataGrid _historyGrid = NewGrid();
+    private readonly DataGrid _coinsGrid = NewGrid();
+    private readonly DataGrid _addrGrid = NewGrid();
+    private readonly DataGrid _contactsGrid = NewGrid();
+    private readonly DataGrid _requestsGrid = NewGrid();
+    private readonly TextBlock _idPub = new() { Foreground = Brushes.LightGreen, FontFamily = new FontFamily("Consolas"), TextWrapping = TextWrapping.Wrap };
+    private readonly TextBox _idHandle = new() { Width = 240 };
+
+    private static DataGrid NewGrid() => new()
+    {
+        AutoGenerateColumns = false, IsReadOnly = false, CanUserAddRows = false, CanUserDeleteRows = false,
+        Background = new SolidColorBrush(Color.FromRgb(0x0F, 0x0F, 0x0F)), Foreground = Brushes.White,
+        RowBackground = new SolidColorBrush(Color.FromRgb(0x16, 0x16, 0x16)), AlternatingRowBackground = new SolidColorBrush(Color.FromRgb(0x1C, 0x1C, 0x1C)),
+        GridLinesVisibility = DataGridGridLinesVisibility.Horizontal, HeadersVisibility = DataGridHeadersVisibility.Column,
+        BorderThickness = new Thickness(0), FontFamily = new FontFamily("Consolas"), FontSize = 12, SelectionMode = DataGridSelectionMode.Extended,
+    };
+
     public WalletView(string dataDir, CardVault vault, Func<BsvNode?> node, Func<HeaderStore?> store, Func<NetworkParams> net)
     {
         _vault = vault; _node = node; _store = store; _net = net;
@@ -62,71 +105,283 @@ public sealed class WalletView : UserControl
         _path = Path.Combine(dataDir, "wallet.json");
         Load();
 
-        var root = new StackPanel { Margin = new Thickness(20) };
-        root.Children.Add(new TextBlock { Text = "Wallet — real BSV (SPV, on-chain)", FontSize = 22, FontWeight = FontWeights.Bold, Foreground = Brushes.White });
-        root.Children.Add(new TextBlock { Text = "Balance (confirmed, satoshis)", Foreground = Brushes.Gray, Margin = new Thickness(0, 10, 0, 0) });
-        root.Children.Add(_bal);
+        if (_seed.Length == 32) _ring = new KeyRing(_seed, Math.Max(1, _w.RecvIndex));
 
-        // No card UI at all unless real on-chain card NFTs exist — there is nothing card-like to show with no sats.
-        // (Real 1-sat card NFTs from on-chain Deal transactions will populate this once that path is wired.)
+        // Top bar: title + live balance, then a TabControl that IS the wallet (ElectrumSV-style sub-tabs).
+        var titleBar = new DockPanel { Margin = new Thickness(14, 12, 14, 4), LastChildFill = false };
+        var title = new TextBlock { Text = "Wallet", FontSize = 20, FontWeight = FontWeights.Bold, Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center };
+        DockPanel.SetDock(title, Dock.Left); titleBar.Children.Add(title);
+        var balPanel = new StackPanel { Orientation = Orientation.Horizontal };
+        balPanel.Children.Add(new TextBlock { Text = "Balance: ", Foreground = Brushes.Gray, VerticalAlignment = VerticalAlignment.Center, FontSize = 16 });
+        _bal.FontSize = 20; balPanel.Children.Add(_bal);
+        DockPanel.SetDock(balPanel, Dock.Right); titleBar.Children.Add(balPanel);
 
-        root.Children.Add(new TextBlock { Text = "Receive address (give this to your funder)", Foreground = Brushes.Gray, Margin = new Thickness(0, 10, 0, 2) });
-        root.Children.Add(_recv);
+        _tabs.Items.Add(new TabItem { Header = "Send", Content = BuildSendTab() });
+        _tabs.Items.Add(new TabItem { Header = "Receive", Content = BuildReceiveTab() });
+        _tabs.Items.Add(new TabItem { Header = "History", Content = BuildHistoryTab() });
+        _tabs.Items.Add(new TabItem { Header = "Coins", Content = BuildCoinsTab() });
+        _tabs.Items.Add(new TabItem { Header = "Addresses", Content = BuildAddressesTab() });
+        _tabs.Items.Add(new TabItem { Header = "Contacts", Content = BuildContactsTab() });
+        _tabs.Items.Add(new TabItem { Header = "NFTs", Content = BuildNftTab() });
+        _tabs.Items.Add(new TabItem { Header = "Identity", Content = BuildIdentityTab() });
+        _tabs.Items.Add(new TabItem { Header = "Tools", Content = BuildToolsTab() });
+        _tabs.SelectionChanged += (_, _) => Render();
+
+        var rootGrid = new Grid();
+        rootGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        rootGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        rootGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        Grid.SetRow(titleBar, 0); rootGrid.Children.Add(titleBar);
+        Grid.SetRow(_tabs, 1); rootGrid.Children.Add(_tabs);
+        var statusBar = new Border { Background = new SolidColorBrush(Color.FromRgb(0x16, 0x16, 0x16)), Padding = new Thickness(12, 4, 12, 4), Child = _status };
+        _status.Margin = new Thickness(0); Grid.SetRow(statusBar, 2); rootGrid.Children.Add(statusBar);
+        Content = rootGrid;
+        Render();
+    }
+
+    // ============================ ElectrumSV-style tabs ============================
+
+    private static TextBlock Lbl(string t) => new() { Text = t, Foreground = Brushes.Gray, Margin = new Thickness(0, 8, 0, 2) };
+    private static TextBlock H(string t) => new() { Text = t, Foreground = Brushes.White, FontSize = 16, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 0, 8) };
+    private static ScrollViewer Scroll(UIElement e) => new() { Content = e, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
+
+    // ---- SEND: pay an address, an identity/handle, a pubkey, a raw tx, or a BIP270/bitcoin: URI ----
+    private UIElement BuildSendTab()
+    {
+        var sp = new StackPanel { Margin = new Thickness(16) };
+        sp.Children.Add(H("Send a payment"));
+        sp.Children.Add(new TextBlock { Text = "Pay to — an address, an identity handle (@bob), an identity public key (hex), or a payment URI (bitcoin:… / pay:…). A payment is a payment: you can pay anyone.", Foreground = Brushes.Gray, TextWrapping = TextWrapping.Wrap, MaxWidth = 560, HorizontalAlignment = HorizontalAlignment.Left });
+        sp.Children.Add(Lbl("Pay to")); sp.Children.Add(_sendPayTo);
+        sp.Children.Add(Lbl("Description / label")); sp.Children.Add(_sendLabel);
+
+        var amtRow = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
+        amtRow.Children.Add(new TextBlock { Text = "Amount (sat) ", Foreground = Brushes.Gray, VerticalAlignment = VerticalAlignment.Center });
+        amtRow.Children.Add(_amount);
+        var max = Btn("Max"); max.Click += (_, _) => { if (Guard()) _amount.Text = Math.Max(0, Balance - EstimateFee(1)).ToString(); };
+        amtRow.Children.Add(max);
+        amtRow.Children.Add(new TextBlock { Text = "  Fee rate ", Foreground = Brushes.Gray, VerticalAlignment = VerticalAlignment.Center });
+        _feeRate.Items.Clear();
+        foreach (var r in new[] { "0.5 sat/kB", "1 sat/kB (standard)", "5 sat/kB (priority)", "Custom fee (sat)…" }) _feeRate.Items.Add(r);
+        _feeRate.SelectedIndex = 1;
+        amtRow.Children.Add(_feeRate);
+        amtRow.Children.Add(new TextBlock { Text = "  ", VerticalAlignment = VerticalAlignment.Center });
+        amtRow.Children.Add(_fee);
+        sp.Children.Add(amtRow);
+
+        var btns = new WrapPanel { Margin = new Thickness(0, 12, 0, 0) };
+        var preview = Btn("Preview…"); preview.Click += (_, _) => { if (Guard()) PreviewSend(); };
+        var paste = Btn("Paste URI / invoice…"); paste.Click += (_, _) => PasteUri();
+        var sendBtn = Btn("Send"); sendBtn.Background = new SolidColorBrush(Color.FromRgb(0x2E, 0x7D, 0x32)); sendBtn.Foreground = Brushes.White;
+        sendBtn.Click += async (_, _) => { if (Guard()) await SendPayment(); };
+        var clear = Btn("Clear"); clear.Click += (_, _) => { _sendPayTo.Clear(); _sendLabel.Clear(); _amount.Text = "0"; _sendStatus.Text = ""; };
+        btns.Children.Add(sendBtn); btns.Children.Add(preview); btns.Children.Add(paste); btns.Children.Add(clear);
+        sp.Children.Add(btns);
+        sp.Children.Add(_sendStatus);
+        return Scroll(sp);
+    }
+
+    // ---- RECEIVE: address + amount + QR + saved payment requests ----
+    private UIElement BuildReceiveTab()
+    {
+        var sp = new StackPanel { Margin = new Thickness(16) };
+        sp.Children.Add(H("Receive a payment"));
+        sp.Children.Add(Lbl("Your receiving address (a fresh hash-chained key — give it to your payer)"));
+        sp.Children.Add(_recv);
+        var addrBtns = new WrapPanel { Margin = new Thickness(0, 6, 0, 0) };
         var copyAddr = Btn("Copy address"); copyAddr.Click += (_, _) => { if (Guard()) CopyToClipboard(ReceiveAddress(), "Address copied."); };
         var newAddr = Btn("New address"); newAddr.Click += (_, _) => { if (Guard()) { _w.RecvIndex++; Save(); Render(); } };
+        addrBtns.Children.Add(copyAddr); addrBtns.Children.Add(newAddr);
+        sp.Children.Add(addrBtns);
+
+        sp.Children.Add(Lbl("Requested amount (sat) and description → builds a payment URI + QR"));
+        var reqRow = new WrapPanel();
+        reqRow.Children.Add(_reqAmount);
+        reqRow.Children.Add(new TextBlock { Text = "  ", VerticalAlignment = VerticalAlignment.Center });
+        reqRow.Children.Add(_reqMemo);
+        var makeReq = Btn("Create request"); makeReq.Click += (_, _) => { if (Guard()) CreateRequest(); };
+        reqRow.Children.Add(makeReq);
+        sp.Children.Add(reqRow);
+        sp.Children.Add(Lbl("Payment URI")); sp.Children.Add(_reqUri);
+        var copyUri = Btn("Copy URI"); copyUri.Click += (_, _) => CopyToClipboard(_reqUri.Text, "Payment URI copied.");
+        sp.Children.Add(copyUri);
+        sp.Children.Add(_reqQr);
+
+        sp.Children.Add(Lbl("Saved requests"));
+        _requestsGrid.Columns.Clear();
+        _requestsGrid.Columns.Add(new DataGridTextColumn { Header = "Time", Binding = new System.Windows.Data.Binding("Time"), IsReadOnly = true, Width = 150 });
+        _requestsGrid.Columns.Add(new DataGridTextColumn { Header = "Amount", Binding = new System.Windows.Data.Binding("Amount"), IsReadOnly = true, Width = 110 });
+        _requestsGrid.Columns.Add(new DataGridTextColumn { Header = "Description", Binding = new System.Windows.Data.Binding("Memo"), IsReadOnly = true, Width = 220 });
+        _requestsGrid.Columns.Add(new DataGridTextColumn { Header = "Address", Binding = new System.Windows.Data.Binding("Address"), IsReadOnly = true, Width = 360 });
+        _requestsGrid.Height = 160;
+        sp.Children.Add(_requestsGrid);
+
+        sp.Children.Add(Lbl("SPV funding (no server) — import a payment proof, find by txid, or claim a payment sent to your identity"));
+        var fund = new WrapPanel();
         var importBtn = Btn("Import funding (SPV envelope)…"); importBtn.Click += (_, _) => { if (Guard()) ImportFunding(); };
         var makeEnv = Btn("Create funding envelope…"); makeEnv.Click += async (_, _) => { if (Guard()) await CreateEnvelope(); };
         var findTx = Btn("Find a payment by txid…"); findTx.Click += async (_, _) => { if (Guard()) await FindByTxid(); };
-        var rescan = Btn("Rescan for my payments now"); rescan.Click += (_, _) => { if (Guard()) { _status.Text = "Rescanning the chain for payments to your address…"; RescanRequested?.Invoke(); } };
-        root.Children.Add(new WrapPanel { Children = { copyAddr, newAddr, importBtn, makeEnv, findTx, rescan } });
-
-        var send = new WrapPanel { Margin = new Thickness(0, 14, 0, 0) };
-        send.Children.Add(new TextBlock { Text = "Send  amount ", Foreground = Brushes.Gray, VerticalAlignment = VerticalAlignment.Center });
-        send.Children.Add(_amount);
-        send.Children.Add(new TextBlock { Text = "  fee ", Foreground = Brushes.Gray, VerticalAlignment = VerticalAlignment.Center });
-        send.Children.Add(_fee);
-        send.Children.Add(new TextBlock { Text = "  to ", Foreground = Brushes.Gray, VerticalAlignment = VerticalAlignment.Center });
-        send.Children.Add(_dest);
-        var sendBtn = Btn("Send"); sendBtn.Click += (_, _) => DoSend();
-        send.Children.Add(sendBtn);
-        root.Children.Add(send);
-
-        root.Children.Add(new TextBlock { Text = "History", Foreground = Brushes.Gray, Margin = new Thickness(0, 14, 0, 4) });
-        var gv = new GridView();
-        gv.Columns.Add(new GridViewColumn { Header = "Time", Width = 170, DisplayMemberBinding = new System.Windows.Data.Binding("Time") });
-        gv.Columns.Add(new GridViewColumn { Header = "Type", Width = 90, DisplayMemberBinding = new System.Windows.Data.Binding("Type") });
-        gv.Columns.Add(new GridViewColumn { Header = "Amount (sat)", Width = 110, DisplayMemberBinding = new System.Windows.Data.Binding("Amount") });
-        gv.Columns.Add(new GridViewColumn { Header = "Balance", Width = 100, DisplayMemberBinding = new System.Windows.Data.Binding("Balance") });
-        gv.Columns.Add(new GridViewColumn { Header = "Memo", Width = 300, DisplayMemberBinding = new System.Windows.Data.Binding("Memo") });
-        _history.View = gv;
-        root.Children.Add(_history);
-
-        var backup = new WrapPanel { Margin = new Thickness(0, 14, 0, 0) };
-        var showPhrase = Btn("Back up — show wallet seed");
-        showPhrase.Click += (_, _) => { if (Guard()) MessageBox.Show(WalletKeys.SeedToBackup(_seed), "Write this seed down — it recovers your whole wallet", MessageBoxButton.OK, MessageBoxImage.Warning); };
-        var restore = Btn("Restore from seed…");
-        restore.Click += (_, _) => Restore();
-        var pwBtn = Btn("Set / change password…");
-        pwBtn.Click += (_, _) => SetPassword();
-        var unlockBtn = Btn("Unlock…");
-        unlockBtn.Click += (_, _) => { Unlock(); Render(); };
-        backup.Children.Add(showPhrase); backup.Children.Add(restore); backup.Children.Add(pwBtn); backup.Children.Add(unlockBtn);
-        root.Children.Add(backup);
-
-        var adv = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
-        var sign = Btn("Sign message…");
-        sign.Click += (_, _) => { if (Guard()) SignMessageDialog(); };
-        var verify = Btn("Verify message…");
-        verify.Click += (_, _) => VerifyMessageDialog();
-        var coins = Btn("Coins (UTXOs)…");
-        coins.Click += (_, _) => { if (Guard()) ShowCoins(); };
-        adv.Children.Add(sign); adv.Children.Add(verify); adv.Children.Add(coins);
-        root.Children.Add(adv);
-        root.Children.Add(_status);
-
-        Content = new ScrollViewer { Content = root };
-        Render();
+        var rescan = Btn("Rescan now"); rescan.Click += (_, _) => { if (Guard()) { _status.Text = "Rescanning the chain for payments…"; RescanRequested?.Invoke(); } };
+        var claim = Btn("Claim a payment to my identity…"); claim.Click += (_, _) => { if (Guard()) ClaimIdentityPayment(); };
+        fund.Children.Add(importBtn); fund.Children.Add(makeEnv); fund.Children.Add(findTx); fund.Children.Add(rescan); fund.Children.Add(claim);
+        sp.Children.Add(fund);
+        return Scroll(sp);
     }
+
+    // ---- HISTORY: every real movement (received + sent), editable labels, running balance ----
+    private UIElement BuildHistoryTab()
+    {
+        var sp = new StackPanel { Margin = new Thickness(16) };
+        sp.Children.Add(H("History"));
+        _historyGrid.Columns.Clear();
+        _historyGrid.Columns.Add(new DataGridTextColumn { Header = "Time", Binding = new System.Windows.Data.Binding("Time"), IsReadOnly = true, Width = 150 });
+        _historyGrid.Columns.Add(new DataGridTextColumn { Header = "Type", Binding = new System.Windows.Data.Binding("Type"), IsReadOnly = true, Width = 90 });
+        _historyGrid.Columns.Add(new DataGridTextColumn { Header = "Amount (sat)", Binding = new System.Windows.Data.Binding("Amount"), IsReadOnly = true, Width = 120 });
+        _historyGrid.Columns.Add(new DataGridTextColumn { Header = "Balance", Binding = new System.Windows.Data.Binding("Balance"), IsReadOnly = true, Width = 120 });
+        _historyGrid.Columns.Add(new DataGridTextColumn { Header = "Description / txid", Binding = new System.Windows.Data.Binding("Memo"), IsReadOnly = true, Width = 460 });
+        _historyGrid.Height = 460;
+        sp.Children.Add(_historyGrid);
+        var row = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
+        var copyTxid = Btn("Copy txid"); copyTxid.Click += (_, _) => { if (_historyGrid.SelectedItem is Tx t) { var id = t.Memo.Split(' ')[0]; CopyToClipboard(id, "txid copied."); } };
+        var export = Btn("Export history (CSV)…"); export.Click += (_, _) => ExportHistory();
+        row.Children.Add(copyTxid); row.Children.Add(export);
+        sp.Children.Add(row);
+        return Scroll(sp);
+    }
+
+    // ---- COINS: every UTXO, freeze/unfreeze, spend selected, labels ----
+    private UIElement BuildCoinsTab()
+    {
+        var sp = new StackPanel { Margin = new Thickness(16) };
+        sp.Children.Add(H("Coins (UTXOs) — full coin control"));
+        _coinsGrid.Columns.Clear();
+        _coinsGrid.Columns.Add(new DataGridTextColumn { Header = "Outpoint", Binding = new System.Windows.Data.Binding("Outpoint"), IsReadOnly = true, Width = 340 });
+        _coinsGrid.Columns.Add(new DataGridTextColumn { Header = "Address", Binding = new System.Windows.Data.Binding("Address"), IsReadOnly = true, Width = 320 });
+        _coinsGrid.Columns.Add(new DataGridTextColumn { Header = "Value (sat)", Binding = new System.Windows.Data.Binding("Value"), IsReadOnly = true, Width = 120 });
+        _coinsGrid.Columns.Add(new DataGridTextColumn { Header = "Status", Binding = new System.Windows.Data.Binding("Status"), IsReadOnly = true, Width = 100 });
+        _coinsGrid.Columns.Add(new DataGridTextColumn { Header = "Frozen", Binding = new System.Windows.Data.Binding("Frozen"), IsReadOnly = true, Width = 70 });
+        _coinsGrid.Height = 440;
+        sp.Children.Add(_coinsGrid);
+        var row = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
+        var freeze = Btn("Freeze"); freeze.Click += (_, _) => SetFrozen(true);
+        var unfreeze = Btn("Unfreeze"); unfreeze.Click += (_, _) => SetFrozen(false);
+        var spend = Btn("Spend selected…"); spend.Click += (_, _) => { if (Guard()) SpendSelectedCoins(); };
+        var copyOp = Btn("Copy outpoint"); copyOp.Click += (_, _) => { if (_coinsGrid.SelectedItem != null) CopyToClipboard(_coinsGrid.SelectedItem.GetType().GetProperty("Outpoint")!.GetValue(_coinsGrid.SelectedItem)!.ToString()!, "Outpoint copied."); };
+        row.Children.Add(freeze); row.Children.Add(unfreeze); row.Children.Add(spend); row.Children.Add(copyOp);
+        sp.Children.Add(row);
+        return Scroll(sp);
+    }
+
+    // ---- ADDRESSES: the KeyRing — per-address balance, derivation path, WIF, freeze, labels ----
+    private UIElement BuildAddressesTab()
+    {
+        var sp = new StackPanel { Margin = new Thickness(16) };
+        sp.Children.Add(H("Addresses / Keys (hash-chained Type-42 key ring)"));
+        _addrGrid.Columns.Clear();
+        _addrGrid.Columns.Add(new DataGridTextColumn { Header = "Address", Binding = new System.Windows.Data.Binding("Address"), IsReadOnly = true, Width = 340 });
+        _addrGrid.Columns.Add(new DataGridTextColumn { Header = "Path", Binding = new System.Windows.Data.Binding("Path"), IsReadOnly = true, Width = 150 });
+        _addrGrid.Columns.Add(new DataGridTextColumn { Header = "Balance (sat)", Binding = new System.Windows.Data.Binding("Balance"), IsReadOnly = true, Width = 120 });
+        _addrGrid.Columns.Add(new DataGridTextColumn { Header = "Used", Binding = new System.Windows.Data.Binding("Used"), IsReadOnly = true, Width = 60 });
+        _addrGrid.Columns.Add(new DataGridTextColumn { Header = "Label", Binding = new System.Windows.Data.Binding("Label"), IsReadOnly = true, Width = 260 });
+        _addrGrid.Height = 440;
+        sp.Children.Add(_addrGrid);
+        var row = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
+        var copy = Btn("Copy address"); copy.Click += (_, _) => { if (_addrGrid.SelectedItem != null) CopyToClipboard(PropOf(_addrGrid.SelectedItem, "Address"), "Address copied."); };
+        var wif = Btn("Show private key (WIF)…"); wif.Click += (_, _) => { if (Guard()) ShowWif(); };
+        var more = Btn("Show 20 more addresses"); more.Click += (_, _) => { if (Guard()) { _w.RecvIndex += 20; Save(); Render(); } };
+        row.Children.Add(copy); row.Children.Add(wif); row.Children.Add(more);
+        sp.Children.Add(row);
+        return Scroll(sp);
+    }
+
+    // ---- CONTACTS: handle ↔ identity public key; pay or chat a contact ----
+    private UIElement BuildContactsTab()
+    {
+        var sp = new StackPanel { Margin = new Thickness(16) };
+        sp.Children.Add(H("Contacts (identities / handles)"));
+        _contactsGrid.Columns.Clear();
+        _contactsGrid.Columns.Add(new DataGridTextColumn { Header = "Handle", Binding = new System.Windows.Data.Binding("Handle"), IsReadOnly = true, Width = 160 });
+        _contactsGrid.Columns.Add(new DataGridTextColumn { Header = "Identity public key", Binding = new System.Windows.Data.Binding("IdentityPub"), IsReadOnly = true, Width = 520 });
+        _contactsGrid.Columns.Add(new DataGridTextColumn { Header = "Note", Binding = new System.Windows.Data.Binding("Note"), IsReadOnly = true, Width = 220 });
+        _contactsGrid.Height = 360;
+        sp.Children.Add(_contactsGrid);
+        var add = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
+        var hBox = new TextBox { Width = 160 }; var pBox = new TextBox { Width = 520, FontFamily = new FontFamily("Consolas") };
+        add.Children.Add(new TextBlock { Text = "Handle ", Foreground = Brushes.Gray, VerticalAlignment = VerticalAlignment.Center }); add.Children.Add(hBox);
+        add.Children.Add(new TextBlock { Text = "  Identity pubkey (hex) ", Foreground = Brushes.Gray, VerticalAlignment = VerticalAlignment.Center }); add.Children.Add(pBox);
+        var addBtn = Btn("Add / update");
+        addBtn.Click += (_, _) => { AddContact(hBox.Text.Trim(), pBox.Text.Trim()); hBox.Clear(); pBox.Clear(); };
+        add.Children.Add(addBtn);
+        sp.Children.Add(add);
+        var ops = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
+        var pay = Btn("Pay this contact…"); pay.Click += (_, _) => { if (_contactsGrid.SelectedItem != null) { _sendPayTo.Text = "@" + PropOf(_contactsGrid.SelectedItem, "Handle"); _tabs.SelectedIndex = 0; } };
+        var del = Btn("Delete"); del.Click += (_, _) => { if (_contactsGrid.SelectedItem != null) { var h = PropOf(_contactsGrid.SelectedItem, "Handle"); _w.Contacts.RemoveAll(c => c.Handle == h); Save(); Render(); } };
+        ops.Children.Add(pay); ops.Children.Add(del);
+        sp.Children.Add(ops);
+        return Scroll(sp);
+    }
+
+    // ---- NFTs: 1-sat on-chain card/token outputs the wallet holds ----
+    private UIElement BuildNftTab()
+    {
+        var sp = new StackPanel { Margin = new Thickness(16) };
+        sp.Children.Add(H("NFTs / tokens"));
+        sp.Children.Add(_cardsLabel);
+        sp.Children.Add(_cards);
+        return Scroll(sp);
+    }
+
+    // ---- IDENTITY: your Base ID key (login/handle), master public key, what it is ----
+    private UIElement BuildIdentityTab()
+    {
+        var sp = new StackPanel { Margin = new Thickness(16) };
+        sp.Children.Add(H("Your identity (Base ID key)"));
+        sp.Children.Add(new TextBlock { Text = "Your Base ID key is your identity — like an NFT you own. It is NEVER used as an address; it only derives one-time ECDH sub-keys (Type-42), all linked in an HMAC hash chain. Give others your handle or identity public key so they can pay and message you.", Foreground = Brushes.Gray, TextWrapping = TextWrapping.Wrap, MaxWidth = 620, HorizontalAlignment = HorizontalAlignment.Left });
+        sp.Children.Add(Lbl("Handle (your name, e.g. bob)"));
+        var hrow = new WrapPanel();
+        hrow.Children.Add(_idHandle);
+        var setH = Btn("Set handle"); setH.Click += (_, _) => { _w.Handle = _idHandle.Text.Trim().TrimStart('@'); Save(); Render(); _status.Text = $"Handle set to @{_w.Handle}"; };
+        hrow.Children.Add(setH);
+        sp.Children.Add(hrow);
+        sp.Children.Add(Lbl("Identity public key (share this)"));
+        sp.Children.Add(_idPub);
+        var idBtns = new WrapPanel { Margin = new Thickness(0, 6, 0, 0) };
+        var copyId = Btn("Copy identity key"); copyId.Click += (_, _) => { if (Guard()) CopyToClipboard(Convert.ToHexString(_ring.IdentityPub()).ToLowerInvariant(), "Identity key copied."); };
+        idBtns.Children.Add(copyId);
+        sp.Children.Add(idBtns);
+        return Scroll(sp);
+    }
+
+    // ---- TOOLS: seed, password/encrypt, sign/verify, load+broadcast tx, master pubkey ----
+    private UIElement BuildToolsTab()
+    {
+        var sp = new StackPanel { Margin = new Thickness(16) };
+        sp.Children.Add(H("Tools & wallet security"));
+        sp.Children.Add(Lbl("The keys that control your bitcoin are kept encrypted and password-protected at rest."));
+        var sec = new WrapPanel();
+        var pwBtn = Btn("Set / change password (encrypt keys)…"); pwBtn.Click += (_, _) => SetPassword();
+        var unlockBtn = Btn("Unlock…"); unlockBtn.Click += (_, _) => { Unlock(); Render(); };
+        var showPhrase = Btn("Back up — show wallet seed"); showPhrase.Click += (_, _) => { if (Guard()) MessageBox.Show(WalletKeys.SeedToBackup(_seed), "Write this seed down — it recovers your whole wallet", MessageBoxButton.OK, MessageBoxImage.Warning); };
+        var restore = Btn("Restore from seed…"); restore.Click += (_, _) => Restore();
+        sec.Children.Add(pwBtn); sec.Children.Add(unlockBtn); sec.Children.Add(showPhrase); sec.Children.Add(restore);
+        sp.Children.Add(sec);
+
+        sp.Children.Add(Lbl("Messages"));
+        var msg = new WrapPanel();
+        var sign = Btn("Sign message…"); sign.Click += (_, _) => { if (Guard()) SignMessageDialog(); };
+        var verify = Btn("Verify message…"); verify.Click += (_, _) => VerifyMessageDialog();
+        msg.Children.Add(sign); msg.Children.Add(verify);
+        sp.Children.Add(msg);
+
+        sp.Children.Add(Lbl("Transactions"));
+        var txs = new WrapPanel();
+        var load = Btn("Load / broadcast a raw transaction…"); load.Click += (_, _) => { if (Guard()) LoadBroadcastTx(); };
+        var mpk = Btn("Show master public key"); mpk.Click += (_, _) => { if (Guard()) MessageBox.Show(Convert.ToHexString(_ring.IdentityPub()).ToLowerInvariant(), "Identity / master public key"); };
+        txs.Children.Add(load); txs.Children.Add(mpk);
+        sp.Children.Add(txs);
+        return Scroll(sp);
+    }
+
+    private static string PropOf(object o, string p) => o.GetType().GetProperty(p)!.GetValue(o)?.ToString() ?? "";
 
     // ---- real on-chain funding & spending ----
 
@@ -598,10 +853,11 @@ public sealed class WalletView : UserControl
     private void Load()
     {
         try { if (File.Exists(_path)) _w = JsonSerializer.Deserialize<File_>(File.ReadAllText(_path)) ?? new File_(); } catch { _w = new File_(); }
-        // NO FAKE COINS / NO FAKE HISTORY: keep ONLY real SPV-confirmed unspent coins, and discard any stale
-        // free-form history (history is now DERIVED from real coins, never a stored log). Balance + history
-        // are rebuilt from real on-chain state only — nothing is ever invented or carried over fabricated.
-        _w.Utxos = _w.Utxos.Where(u => u.Confirmed && !u.Spent).ToList();
+        // NO FAKE COINS / NO FAKE HISTORY: keep ONLY real, SPV-CONFIRMED coins (spent ones are kept so genuine
+        // history survives a restart; the balance counts confirmed-unspent only). Drop any not-yet-confirmed
+        // (pending) coins — they are re-discovered by the SPV rescan, never carried over as if real. The send
+        // log (_w.Sends) is real broadcasts this wallet made; labels/contacts/requests are user metadata.
+        _w.Utxos = _w.Utxos.Where(u => u.Confirmed).ToList();
         _w.History.Clear();
         if (WalletExtras.IsEncryptedSeed(_w.Seed))
         {
@@ -691,15 +947,32 @@ public sealed class WalletView : UserControl
     // could record amounts/events that never happened. This is intentionally a no-op: nothing fake is stored.
     private void AppendTx(string type, long amount, string memo) { }
 
-    /// <summary>The wallet history, derived ONLY from real SPV-confirmed coins held — never invented.</summary>
+    /// <summary>
+    /// The wallet history, derived ONLY from REAL on-chain movements the wallet actually saw: every received
+    /// coin (SPV-confirmed or pending), and every transaction this wallet actually broadcast (recorded in
+    /// _w.Sends). A fresh/unfunded wallet has no coins and no sends, so it shows NOTHING — never invented.
+    /// </summary>
     private List<Tx> DerivedHistory()
     {
-        long run = 0; var rows = new List<Tx>();
-        foreach (var u in _w.Utxos.Where(u => u.Confirmed && !u.Spent).OrderBy(u => u.Txid))
-        {
-            run += u.Value;
-            rows.Add(new Tx { Time = "on-chain", Type = "received", Amount = u.Value, Balance = run, Memo = $"{u.Txid[..Math.Min(12, u.Txid.Length)]}…:{u.Vout} (SPV-verified)" });
-        }
+        var rows = new List<Tx>();
+        foreach (var u in _w.Utxos)
+            rows.Add(new Tx {
+                Time = u.Confirmed ? "on-chain" : "pending",
+                Type = "received",
+                Amount = u.Value,
+                Balance = 0,
+                Memo = $"{u.Txid} :{u.Vout}" + (_w.TxLabels.TryGetValue(u.Txid, out var rl) ? "  — " + rl : ""),
+            });
+        foreach (var s in _w.Sends)
+            rows.Add(new Tx {
+                Time = s.Time,
+                Type = "sent",
+                Amount = -(s.Amount + s.Fee),
+                Balance = 0,
+                Memo = $"{s.Txid}  → {s.To}" + (_w.TxLabels.TryGetValue(s.Txid, out var sl) ? "  — " + sl : ""),
+            });
+        long run = 0;
+        foreach (var r in rows) { run += r.Amount; r.Balance = run; }
         return rows;
     }
 
@@ -730,13 +1003,345 @@ public sealed class WalletView : UserControl
         {
             _bal.Text = "🔒 locked";
             _recv.Text = "Wallet is encrypted — press “Unlock…” to enter your password.";
-            _history.ItemsSource = DerivedHistory();
+            _historyGrid.ItemsSource = null; _coinsGrid.ItemsSource = null; _addrGrid.ItemsSource = null;
             return;
         }
+        if (_ring == null && _seed.Length == 32) _ring = new KeyRing(_seed, Math.Max(1, _w.RecvIndex));
         _bal.Text = Balance.ToString("N0") + " sat" + (Pending > 0 ? $"   (+{Pending:N0} pending)" : "");
         _recv.Text = ReceiveAddress() + $"   (#{_w.RecvIndex})";
-        _history.ItemsSource = DerivedHistory();
+
+        _historyGrid.ItemsSource = DerivedHistory();
+        _coinsGrid.ItemsSource = _w.Utxos.Select(u => new {
+            Outpoint = $"{u.Txid[..Math.Min(12, u.Txid.Length)]}…:{u.Vout}",
+            Address = AddressForKey(u.KeyChain, u.KeyIndex),
+            Value = u.Value.ToString("N0"),
+            Status = u.Spent ? "spent" : (u.Confirmed ? "confirmed" : "pending"),
+            Frozen = u.Frozen ? "❄" : "",
+            FullOutpoint = $"{u.Txid}:{u.Vout}",
+        }).Where(x => true).ToList();
+
+        // Addresses: identity-derived receive keys 0..RecvIndex + their balances/labels
+        var addrRows = new List<object>();
+        for (uint i = 0; i <= (uint)_w.RecvIndex; i++)
+        {
+            var addr = AddressForKey(0, i);
+            long bal = _w.Utxos.Where(u => !u.Spent && u.KeyChain == 0 && u.KeyIndex == i).Sum(u => u.Value);
+            bool used = _w.Utxos.Any(u => u.KeyChain == 0 && u.KeyIndex == i);
+            addrRows.Add(new { Address = addr, Path = $"receive/{i}", Balance = bal.ToString("N0"), Used = used ? "yes" : "", Label = _w.AddrLabels.TryGetValue(addr, out var l) ? l : "" });
+        }
+        _addrGrid.ItemsSource = addrRows;
+
+        _contactsGrid.ItemsSource = _w.Contacts.ToList();
+        _requestsGrid.ItemsSource = _w.Requests.AsEnumerable().Reverse().ToList();
+
+        if (_ring != null) _idPub.Text = Convert.ToHexString(_ring.IdentityPub()).ToLowerInvariant();
+        if (string.IsNullOrEmpty(_idHandle.Text)) _idHandle.Text = _w.Handle;
+
         RefreshCards();
+    }
+
+    /// <summary>The P2PKH address for one of our keys (network-aware), used to label coins/addresses.</summary>
+    private string AddressForKey(uint chain, uint index)
+    {
+        var pub = WalletKeys.Account(_seed, chain, index).Pub;
+        var payload = new byte[21]; payload[0] = _net().AddressVersion; Hashes.Hash160(pub).CopyTo(payload, 1);
+        return Base58.CheckEncode(payload);
+    }
+
+    // ============================ Send / fees / payee resolution ============================
+
+    private long FeeRatePerKb() => (_feeRate.SelectedIndex) switch { 0 => 500, 2 => 5000, 3 => -1, _ => 1000 };
+    private long EstimateFee(int outputs)
+    {
+        long rate = FeeRatePerKb();
+        if (rate < 0) { return long.TryParse(_fee.Text, out var f) && f >= 0 ? f : 0; } // custom fee field
+        int inputs = Math.Max(1, _w.Utxos.Count(u => !u.Spent && !u.Frozen && u.Confirmed));
+        int size = inputs * 148 + outputs * 34 + 10;
+        return Math.Max(1, (long)Math.Ceiling(size * rate / 1000.0));
+    }
+
+    /// <summary>
+    /// Resolve a "pay to" string into a P2PKH lock script and a human destination label. Accepts: a Base58
+    /// address; an identity handle (@bob / a known contact); an identity public key (hex, 33 bytes); or a
+    /// bitcoin:/pay: URI (address + optional amount). Identity targets derive a fresh one-time Type-42 sub-
+    /// address from the payee's identity key + our identity key + a random invoice (returned for the receipt).
+    /// </summary>
+    private (byte[] Lock, string Dest, string? IdentityPub, string? Invoice)? ResolvePayee(string raw)
+    {
+        raw = raw.Trim();
+        if (raw.Length == 0) { _sendStatus.Text = "Enter who to pay."; return null; }
+
+        // a payment URI: bitcoin:<addr>?amount=..  or pay:<addr>
+        if (raw.StartsWith("bitcoin:", StringComparison.OrdinalIgnoreCase) || raw.StartsWith("pay:", StringComparison.OrdinalIgnoreCase))
+        {
+            var body = raw.Substring(raw.IndexOf(':') + 1);
+            var q = body.IndexOf('?');
+            var addr = (q >= 0 ? body[..q] : body).Trim();
+            if (q >= 0)
+            {
+                foreach (var kv in body[(q + 1)..].Split('&'))
+                {
+                    var p = kv.Split('=', 2);
+                    if (p.Length == 2 && p[0].Equals("amount", StringComparison.OrdinalIgnoreCase) && decimal.TryParse(p[1], out var amtBsv))
+                        _amount.Text = ((long)(amtBsv * 100_000_000m)).ToString(); // URI amounts are in BSV
+                }
+            }
+            raw = addr;
+        }
+
+        // an identity handle
+        if (raw.StartsWith("@"))
+        {
+            var h = raw[1..];
+            var c = _w.Contacts.FirstOrDefault(x => string.Equals(x.Handle, h, StringComparison.OrdinalIgnoreCase));
+            if (c == null) { _sendStatus.Text = $"No contact @{h}. Add their identity key in Contacts first."; return null; }
+            raw = c.IdentityPub; // fall through to identity-pubkey handling
+        }
+
+        // an identity public key (33-byte compressed, hex) → Type-42 one-time payment address
+        if ((raw.Length == 66 || raw.Length == 130) && System.Text.RegularExpressions.Regex.IsMatch(raw, "^[0-9a-fA-F]+$"))
+        {
+            try
+            {
+                var payeeId = Convert.FromHexString(raw);
+                if (Secp256k1.IsValidPoint(payeeId))
+                {
+                    var invoice = "pay-" + Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(8)).ToLowerInvariant();
+                    var oneTimePub = IdentityPayment.PayToPub(payeeId, _ring.IdentityPriv(), invoice);
+                    var lockS = Chain.P2pkhLockForPub(oneTimePub);
+                    return (lockS, $"identity {raw[..12]}… (one-time {Convert.ToHexString(Hashes.Hash160(oneTimePub))[..8]}…)", raw, invoice);
+                }
+            }
+            catch { }
+        }
+
+        // a Base58 address
+        try
+        {
+            var payload = Base58.CheckDecode(raw);
+            if (payload.Length != 21) { _sendStatus.Text = "Invalid address length."; return null; }
+            if (payload[0] != _net().AddressVersion) { _sendStatus.Text = $"Address is for a different network (0x{payload[0]:x2}); current network expects 0x{_net().AddressVersion:x2}."; return null; }
+            return (Chain.P2pkhLock(payload[1..]), raw, null, null);
+        }
+        catch { _sendStatus.Text = "Could not parse 'pay to' — not an address, identity, handle, or URI."; return null; }
+    }
+
+    private async System.Threading.Tasks.Task SendPayment()
+    {
+        _sendStatus.Text = "";
+        var resolved = ResolvePayee(_sendPayTo.Text);
+        if (resolved == null) return;
+        if (!long.TryParse(_amount.Text, out var amount) || amount <= 0) { _sendStatus.Text = "Enter a positive amount (sat)."; return; }
+        long fee = EstimateFee(1);
+        if (amount + fee > Balance) { _sendStatus.Text = $"Insufficient funds: have {Balance:N0}, need {amount + fee:N0} sat (incl. fee {fee:N0})."; return; }
+        var node = _node();
+        if (node == null || node.PeerCount == 0) { _sendStatus.Text = "No BSV peers connected yet — cannot broadcast. Wait for peers, then retry."; return; }
+        try
+        {
+            var w = new OnChainWallet(_seed);
+            foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.Frozen && u.Confirmed)) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
+            var spend = w.BuildAction(resolved.Value.Lock, amount, fee);
+            if (!w.VerifySpend(spend)) { _sendStatus.Text = "Built transaction failed self-verification — not broadcast."; return; }
+            node.Broadcast(Chain.Serialize(spend.Tx));
+            var txid = Chain.Txid(spend.Tx);
+            foreach (var inp in spend.Inputs) foreach (var u in _w.Utxos.Where(u => u.Txid == inp.Txid && u.Vout == inp.Vout)) u.Spent = true;
+            DetectSelfOutputs(spend.Tx, txid);
+            _w.Sends.Add(new SendRec { Txid = txid, Amount = amount, Fee = fee, To = resolved.Value.Dest, Time = DateTime.Now.ToString("yyyy-MM-dd HH:mm") });
+            if (!string.IsNullOrWhiteSpace(_sendLabel.Text)) _w.TxLabels[txid] = _sendLabel.Text.Trim();
+            Save(); Render();
+            // identity payment: the payee needs (our identity pub + invoice) to derive the spend key — give the user the receipt
+            if (resolved.Value.IdentityPub != null)
+            {
+                var receipt = $"identity-payment|{Convert.ToHexString(_ring.IdentityPub()).ToLowerInvariant()}|{resolved.Value.Invoice}|{txid}";
+                CopyToClipboard(receipt, "Sent. Payment receipt copied — give it to the payee so they can claim it.");
+                MessageBox.Show($"Paid {amount:N0} sat to {resolved.Value.Dest}.\n\nGive the payee this claim receipt so they can derive the key and see the coin:\n\n{receipt}", "Identity payment sent");
+            }
+            _sendStatus.Text = $"Broadcast {amount:N0} sat (fee {fee:N0}) to {resolved.Value.Dest}.  tx {txid}";
+            _sendPayTo.Clear(); _sendLabel.Clear();
+        }
+        catch (Exception ex) { _sendStatus.Text = "Send failed: " + ex.Message; }
+        await System.Threading.Tasks.Task.CompletedTask;
+    }
+
+    private void PreviewSend()
+    {
+        var resolved = ResolvePayee(_sendPayTo.Text);
+        if (resolved == null) return;
+        if (!long.TryParse(_amount.Text, out var amount) || amount <= 0) { _sendStatus.Text = "Enter a positive amount (sat)."; return; }
+        long fee = EstimateFee(1);
+        MessageBox.Show($"Pay to: {resolved.Value.Dest}\nAmount: {amount:N0} sat\nFee: {fee:N0} sat\nTotal: {amount + fee:N0} sat\nFrom balance: {Balance:N0} sat\n\nLabel: {_sendLabel.Text}", "Preview payment");
+    }
+
+    private void PasteUri()
+    {
+        try { var t = Clipboard.GetText(); if (!string.IsNullOrWhiteSpace(t)) { _sendPayTo.Text = t.Trim(); _tabs.SelectedIndex = 0; _sendStatus.Text = "Pasted from clipboard — review and Send."; } }
+        catch { _sendStatus.Text = "Nothing to paste."; }
+    }
+
+    // ============================ Receive: requests + QR ============================
+
+    private void CreateRequest()
+    {
+        long.TryParse(_reqAmount.Text, out var amt);
+        var addr = ReceiveAddress();
+        var memo = _reqMemo.Text.Trim();
+        _w.Requests.Add(new PayRequest { Address = addr, Amount = amt, Memo = memo, Time = DateTime.Now.ToString("yyyy-MM-dd HH:mm") });
+        _w.RecvIndex++; // a new request gets a fresh address next time
+        Save();
+        var uri = $"bitcoin:{addr}" + (amt > 0 || memo.Length > 0 ? "?" : "") +
+                  string.Join("&", new[] { amt > 0 ? $"amount={amt / 100_000_000m}" : null, memo.Length > 0 ? $"label={Uri.EscapeDataString(memo)}" : null }.Where(s => s != null));
+        _reqUri.Text = uri;
+        try { _reqQr.Source = RenderQr(uri); } catch (Exception ex) { _sendStatus.Text = "QR error: " + ex.Message; }
+        Render();
+    }
+
+    /// <summary>Render a QR matrix to a crisp black-on-white bitmap (8 px/module + a quiet zone).</summary>
+    private static System.Windows.Media.Imaging.BitmapSource RenderQr(string text)
+    {
+        var m = QrCode.Encode(text);
+        int n = m.GetLength(0), scale = 6, quiet = 4, dim = (n + quiet * 2) * scale;
+        var wb = new System.Windows.Media.Imaging.WriteableBitmap(dim, dim, 96, 96, System.Windows.Media.PixelFormats.Bgra32, null);
+        var px = new byte[dim * dim * 4];
+        for (int i = 0; i < px.Length; i += 4) { px[i] = 255; px[i + 1] = 255; px[i + 2] = 255; px[i + 3] = 255; } // white
+        for (int r = 0; r < n; r++)
+            for (int c = 0; c < n; c++)
+                if (m[r, c])
+                    for (int dy = 0; dy < scale; dy++)
+                        for (int dx = 0; dx < scale; dx++)
+                        {
+                            int y = (r + quiet) * scale + dy, x = (c + quiet) * scale + dx, o = (y * dim + x) * 4;
+                            px[o] = 0; px[o + 1] = 0; px[o + 2] = 0; px[o + 3] = 255; // black module
+                        }
+        wb.WritePixels(new Int32Rect(0, 0, dim, dim), px, dim * 4, 0);
+        return wb;
+    }
+
+    private void ExportHistory()
+    {
+        try
+        {
+            var dlg = new Microsoft.Win32.SaveFileDialog { Filter = "CSV (*.csv)|*.csv", FileName = "bsvpoker-history.csv" };
+            if (dlg.ShowDialog() != true) return;
+            var lines = new List<string> { "time,type,amount_sat,balance_sat,memo" };
+            foreach (var t in DerivedHistory()) lines.Add($"{t.Time},{t.Type},{t.Amount},{t.Balance},\"{t.Memo.Replace("\"", "'")}\"");
+            File.WriteAllLines(dlg.FileName, lines);
+            _status.Text = "History exported to " + dlg.FileName;
+        }
+        catch (Exception ex) { _status.Text = "Export failed: " + ex.Message; }
+    }
+
+    // ============================ Coins: freeze + spend selected ============================
+
+    private void SetFrozen(bool frozen)
+    {
+        foreach (var item in _coinsGrid.SelectedItems)
+        {
+            var op = PropOf(item!, "FullOutpoint"); var parts = op.Split(':');
+            if (parts.Length != 2 || !uint.TryParse(parts[1], out var vout)) continue;
+            foreach (var u in _w.Utxos.Where(u => u.Txid == parts[0] && u.Vout == vout)) u.Frozen = frozen;
+        }
+        Save(); Render();
+    }
+
+    private void SpendSelectedCoins()
+    {
+        var picked = new List<UtxoRec>();
+        foreach (var item in _coinsGrid.SelectedItems)
+        {
+            var op = PropOf(item!, "FullOutpoint"); var parts = op.Split(':');
+            if (parts.Length == 2 && uint.TryParse(parts[1], out var vout))
+                picked.AddRange(_w.Utxos.Where(u => u.Txid == parts[0] && u.Vout == vout && !u.Spent));
+        }
+        if (picked.Count == 0) { _status.Text = "Select one or more coins to spend."; return; }
+        _tabs.SelectedIndex = 0;
+        _amount.Text = Math.Max(0, picked.Sum(u => u.Value) - EstimateFee(1)).ToString();
+        _sendStatus.Text = $"{picked.Count} coin(s) selected ({picked.Sum(u => u.Value):N0} sat). Enter who to pay and Send.";
+    }
+
+    // ============================ Addresses: WIF ============================
+
+    private void ShowWif()
+    {
+        if (_addrGrid.SelectedItem == null) { _status.Text = "Select an address."; return; }
+        var path = PropOf(_addrGrid.SelectedItem, "Path"); // "receive/<i>"
+        if (!uint.TryParse(path.Split('/').Last(), out var i)) return;
+        var priv = WalletKeys.Account(_seed, 0, i).Priv;
+        var payload = new byte[34]; payload[0] = _net().WifVersion; priv.CopyTo(payload, 1); payload[33] = 0x01; // compressed
+        MessageBox.Show($"Address: {PropOf(_addrGrid.SelectedItem, "Address")}\nPath: {path}\n\nPRIVATE KEY (WIF) — keep secret:\n{Base58.CheckEncode(payload)}", "Private key", MessageBoxButton.OK, MessageBoxImage.Warning);
+    }
+
+    // ============================ Contacts ============================
+
+    private void AddContact(string handle, string pubHex)
+    {
+        handle = handle.TrimStart('@');
+        if (handle.Length == 0) { _status.Text = "Enter a handle."; return; }
+        try { var p = Convert.FromHexString(pubHex); if (!Secp256k1.IsValidPoint(p)) throw new Exception(); }
+        catch { _status.Text = "Identity public key must be a valid 33-byte compressed key (hex)."; return; }
+        _w.Contacts.RemoveAll(c => string.Equals(c.Handle, handle, StringComparison.OrdinalIgnoreCase));
+        _w.Contacts.Add(new Contact { Handle = handle, IdentityPub = pubHex.ToLowerInvariant() });
+        Save(); Render();
+        _status.Text = $"Contact @{handle} saved.";
+    }
+
+    // ============================ Claim an identity payment ============================
+
+    private void ClaimIdentityPayment()
+    {
+        var box = new TextBox { Width = 520, AcceptsReturn = true, Height = 70, TextWrapping = TextWrapping.Wrap, FontFamily = new FontFamily("Consolas") };
+        var go = new Button { Content = "Derive spend key & rescan", Margin = new Thickness(0, 10, 0, 0), Padding = new Thickness(12, 6, 12, 6) };
+        var sp = new StackPanel { Margin = new Thickness(12) };
+        sp.Children.Add(new TextBlock { Text = "Paste the claim receipt the payer gave you (identity-payment|payerIdPub|invoice|txid):", Foreground = Brushes.Gray });
+        sp.Children.Add(box); sp.Children.Add(go);
+        var win = new Window { Title = "Claim a payment to my identity", Width = 580, Height = 220, Owner = Window.GetWindow(this), Content = sp };
+        go.Click += (_, _) =>
+        {
+            try
+            {
+                var parts = box.Text.Trim().Split('|');
+                if (parts.Length < 3) { MessageBox.Show("Bad receipt format.", "Claim"); return; }
+                var payerPub = Convert.FromHexString(parts[1]); var invoice = parts[2];
+                var spendPriv = IdentityPayment.SpendPriv(_ring.IdentityPriv(), payerPub, invoice);
+                var oneTimePub = Secp256k1.PublicKeyCompressed(spendPriv);
+                // record the derived key as a watched address so the SPV rescan/import can credit the coin
+                var addr = Base58.CheckEncode(Prefix(_net().AddressVersion, Hashes.Hash160(oneTimePub)));
+                _status.Text = $"Derived your one-time payment address {addr}. Rescanning…";
+                RescanRequested?.Invoke();
+                MessageBox.Show($"Your one-time payment address is:\n{addr}\n\nIt is controlled by a key only you can derive (identity + invoice). Once the payment confirms it will appear after a rescan / SPV import.", "Identity payment");
+                win.Close();
+            }
+            catch (Exception ex) { MessageBox.Show("Could not claim: " + ex.Message, "Claim"); }
+        };
+        win.ShowDialog();
+    }
+
+    private static byte[] Prefix(byte v, byte[] h20) { var p = new byte[21]; p[0] = v; h20.CopyTo(p, 1); return p; }
+
+    // ============================ Load / broadcast a raw transaction ============================
+
+    private void LoadBroadcastTx()
+    {
+        var box = new TextBox { Width = 540, AcceptsReturn = true, Height = 160, TextWrapping = TextWrapping.Wrap, FontFamily = new FontFamily("Consolas") };
+        var go = new Button { Content = "Broadcast", Margin = new Thickness(0, 10, 0, 0), Padding = new Thickness(12, 6, 12, 6) };
+        var sp = new StackPanel { Margin = new Thickness(12) };
+        sp.Children.Add(new TextBlock { Text = "Paste a raw transaction (hex) to broadcast over your BSV peers:", Foreground = Brushes.Gray });
+        sp.Children.Add(box); sp.Children.Add(go);
+        var win = new Window { Title = "Load / broadcast a transaction", Width = 600, Height = 300, Owner = Window.GetWindow(this), Content = sp };
+        go.Click += (_, _) =>
+        {
+            try
+            {
+                var raw = Convert.FromHexString(box.Text.Trim());
+                var tx = Chain.Deserialize(raw);            // validate it parses
+                var node = _node();
+                if (node == null || node.PeerCount == 0) { MessageBox.Show("No BSV peers connected.", "Broadcast"); return; }
+                node.Broadcast(raw);
+                MessageBox.Show("Broadcast tx " + Chain.Txid(tx), "Broadcast");
+                win.Close();
+            }
+            catch (Exception ex) { MessageBox.Show("Invalid transaction: " + ex.Message, "Broadcast"); }
+        };
+        win.ShowDialog();
     }
 
     /// <summary>
