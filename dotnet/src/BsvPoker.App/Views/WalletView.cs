@@ -26,7 +26,7 @@ public sealed class WalletView : UserControl
     private sealed class Tx { public string Time { get; set; } = ""; public string Type { get; set; } = ""; public long Amount { get; set; } public long Balance { get; set; } public string Memo { get; set; } = ""; }
     private sealed class UtxoRec { public string Txid { get; set; } = ""; public uint Vout { get; set; } public long Value { get; set; } public uint KeyChain { get; set; } public uint KeyIndex { get; set; } public bool Spent { get; set; } public bool Confirmed { get; set; } public bool Frozen { get; set; } public bool WatchOnly { get; set; } }
     private sealed class SendRec { public string Txid { get; set; } = ""; public long Amount { get; set; } public long Fee { get; set; } public string To { get; set; } = ""; public string Time { get; set; } = ""; public string RawHex { get; set; } = ""; }
-    private sealed class Contact { public string Handle { get; set; } = ""; public string IdentityPub { get; set; } = ""; public string Note { get; set; } = ""; }
+    private sealed class Contact { public string Handle { get; set; } = ""; public string IdentityPub { get; set; } = ""; public string Note { get; set; } = ""; public string DisplayName { get; set; } = ""; public string Email { get; set; } = ""; public bool Verified { get; set; } }
     private sealed class PayRequest { public string Address { get; set; } = ""; public long Amount { get; set; } public string Memo { get; set; } = ""; public string Time { get; set; } = ""; public string Expires { get; set; } = ""; }
     private sealed class File_
     {
@@ -938,9 +938,11 @@ public sealed class WalletView : UserControl
         var sp = new StackPanel { Margin = new Thickness(16) };
         sp.Children.Add(H("Contacts (identities / handles)"));
         _contactsGrid.Columns.Clear();
-        _contactsGrid.Columns.Add(new DataGridTextColumn { Header = "Handle", Binding = new System.Windows.Data.Binding("Handle"), IsReadOnly = true, Width = 160 });
-        _contactsGrid.Columns.Add(new DataGridTextColumn { Header = "Identity public key", Binding = new System.Windows.Data.Binding("IdentityPub"), IsReadOnly = true, Width = 520 });
-        _contactsGrid.Columns.Add(new DataGridTextColumn { Header = "Note", Binding = new System.Windows.Data.Binding("Note"), IsReadOnly = true, Width = 220 });
+        _contactsGrid.Columns.Add(new DataGridTextColumn { Header = "✓", Binding = new System.Windows.Data.Binding("Verified"), IsReadOnly = true, Width = 36 });
+        _contactsGrid.Columns.Add(new DataGridTextColumn { Header = "Handle", Binding = new System.Windows.Data.Binding("Handle"), IsReadOnly = true, Width = 140 });
+        _contactsGrid.Columns.Add(new DataGridTextColumn { Header = "Name", Binding = new System.Windows.Data.Binding("DisplayName"), IsReadOnly = true, Width = 160 });
+        _contactsGrid.Columns.Add(new DataGridTextColumn { Header = "Email", Binding = new System.Windows.Data.Binding("Email"), IsReadOnly = true, Width = 200 });
+        _contactsGrid.Columns.Add(new DataGridTextColumn { Header = "Identity public key", Binding = new System.Windows.Data.Binding("IdentityPub"), IsReadOnly = true, Width = 420 });
         _contactsGrid.Height = 360;
         sp.Children.Add(_contactsGrid);
         var add = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
@@ -955,8 +957,9 @@ public sealed class WalletView : UserControl
         var pay = Btn("Pay this contact…"); pay.Click += (_, _) => { if (_contactsGrid.SelectedItem != null) { _sendPayTo.Text = "@" + PropOf(_contactsGrid.SelectedItem, "Handle"); SelectTab("Send"); _amount.Focus(); } };
         var msg = Btn("Message (encrypt)…"); msg.Click += (_, _) => { if (Guard() && _contactsGrid.SelectedItem != null) EncryptMessageDialog("@" + PropOf(_contactsGrid.SelectedItem, "Handle")); };
         var copyKey = Btn("Copy identity key"); copyKey.Click += (_, _) => { if (_contactsGrid.SelectedItem != null) CopyToClipboard(PropOf(_contactsGrid.SelectedItem, "IdentityPub"), "Identity key copied."); };
+        var importCert = Btn("Import identity certificate…"); importCert.Click += (_, _) => ImportIdentityCert();
         var del = Btn("Delete"); del.Click += (_, _) => { if (_contactsGrid.SelectedItem != null) { var h = PropOf(_contactsGrid.SelectedItem, "Handle"); _w.Contacts.RemoveAll(c => c.Handle == h); Save(); Render(); } };
-        ops.Children.Add(pay); ops.Children.Add(msg); ops.Children.Add(copyKey); ops.Children.Add(del);
+        ops.Children.Add(pay); ops.Children.Add(msg); ops.Children.Add(copyKey); ops.Children.Add(importCert); ops.Children.Add(del);
         sp.Children.Add(ops);
         return Scroll(sp);
     }
@@ -2132,7 +2135,7 @@ public sealed class WalletView : UserControl
         }
         _addrGrid.ItemsSource = addrRows;
 
-        _contactsGrid.ItemsSource = _w.Contacts.ToList();
+        _contactsGrid.ItemsSource = _w.Contacts.Select(c => new { Verified = c.Verified ? "✓" : "", c.Handle, c.DisplayName, c.Email, c.IdentityPub }).ToList();
         _vaultsGrid.ItemsSource = _w.Vaults.Select(v => new { v.Name, v.Address, Funded = v.Funded ? v.FundValue.ToString("N0") : "—", v.LockHeight }).ToList();
         _requestsGrid.ItemsSource = _w.Requests.AsEnumerable().Reverse().Select(q => new {
             q.Time, q.Amount, q.Memo, q.Expires, q.Address,
@@ -2696,6 +2699,32 @@ public sealed class WalletView : UserControl
     {
         if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(new Action(() => ImportContact(handle, pubHex))); return; }
         AddContact(handle, pubHex);
+    }
+
+    /// <summary>Import a contact from a signed identity certificate: verify the signature against the embedded
+    /// key, then save the contact WITH the verified real name + email + a ✓. This is a trusted, verified contact.</summary>
+    private void ImportIdentityCert()
+    {
+        var box = new TextBox { AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, FontFamily = new FontFamily("Consolas"), Height = 180, Width = 520 }; ThemeOne(box);
+        var go = new Button { Content = "Verify & add", Margin = new Thickness(0, 8, 0, 0), Padding = new Thickness(12, 6, 12, 6) };
+        var res = new TextBlock { Margin = new Thickness(0, 8, 0, 0), FontWeight = FontWeights.Bold, TextWrapping = TextWrapping.Wrap };
+        var win = new Window { Title = "Import identity certificate", Width = 580, Height = 340, Owner = Window.GetWindow(this), Background = WinBg, Content = new ScrollViewer { Content = new StackPanel { Margin = new Thickness(12), Children = { new TextBlock { Text = "Paste a person's signed identity certificate (JSON):", Foreground = Ink }, box, go, res } } } };
+        go.Click += (_, _) =>
+        {
+            try
+            {
+                var r = JsonSerializer.Deserialize<Registration>(box.Text.Trim());
+                if (r == null || r.IdentityPub.Length == 0) { res.Text = "Not a certificate."; res.Foreground = Brushes.IndianRed; return; }
+                var pub = Convert.FromHexString(r.IdentityPub);
+                if (!WalletExtras.VerifyMessage(pub, r.Canonical(), r.Signature)) { res.Text = "✖ INVALID signature — not added."; res.Foreground = Brushes.IndianRed; return; }
+                _w.Contacts.RemoveAll(c => string.Equals(c.IdentityPub, r.IdentityPub, StringComparison.OrdinalIgnoreCase));
+                _w.Contacts.Add(new Contact { Handle = r.Pseudonym, IdentityPub = r.IdentityPub.ToLowerInvariant(), DisplayName = r.DisplayName, Email = r.Email, Verified = true });
+                Save(); Render();
+                res.Text = $"✓ Added verified contact {r.DisplayName} (@{r.Pseudonym})."; res.Foreground = Accent;
+            }
+            catch (Exception ex) { res.Text = "Could not import: " + ex.Message; res.Foreground = Brushes.IndianRed; }
+        };
+        win.ShowDialog();
     }
 
     private void AddContact(string handle, string pubHex)
