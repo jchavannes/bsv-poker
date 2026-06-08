@@ -73,7 +73,7 @@ public partial class MainWindow : Window
             ann.Start();
             Announce();
         };
-        Closed += (_, _) => { try { _botWindow?.Close(); } catch { } try { _bot?.Dispose(); } catch { } try { _bsvNode?.Dispose(); } catch { } try { _link?.Dispose(); } catch { } };
+        Closed += (_, _) => { foreach (var w in _botWindows.ToList()) { try { w.Close(); } catch { } } foreach (var b in _bots.ToList()) { try { b.Dispose(); } catch { } } try { _bsvNode?.Dispose(); } catch { } try { _link?.Dispose(); } catch { } };
     }
 
     private WalletView _wallet = null!;
@@ -121,29 +121,30 @@ public partial class MainWindow : Window
     }
 
     private TxDealChannel? _activeDeal;
-    private BotPlayer? _bot;
-    private BotWindow? _botWindow;
+    private readonly List<BotPlayer> _bots = new();        // Alice can run as MANY of her own bots as she likes
+    private readonly List<BotWindow> _botWindows = new();
 
     /// <summary>
-    /// Open a bot: a SEPARATE automated player (its own identity, wallet, TxLink, and gossip node) in its own
-    /// small distinct window. We cross-seed gossip so the human and the bot discover each other on the poker
-    /// overlay; once both are funded, "Play on-chain hand" plays a real two-party on-chain hand against the bot.
+    /// Open one of MY bots: a SEPARATE automated player (its own identity DERIVED from mine, wallet, TxLink, and
+    /// gossip node) in its own small window. Alice can open as many as she wants and play them; each bot only ever
+    /// plays its owner (Alice). Cross-seeds gossip so I discover the bot; "Play on-chain hand" → choose the bot →
+    /// real two-party mental-poker hand. Bots are for testing and soft play and are always available.
     /// </summary>
     private int _botCount;
 
     private void PlayBot()
     {
-        if (_botWindow != null) { _botWindow.Activate(); return; }
         // the bot is DERIVED from MY identity (Type-42) and named <my-handle>-Bot-NNN; it will only ever play me.
         var ownerHandle = string.IsNullOrWhiteSpace(_wallet.MyHandle) ? _profile.Name.Replace(" ", "") : _wallet.MyHandle;
-        _bot = new BotPlayer(_currentNet, LocalIp(), _profile.IdentityPriv, _profile.IdentityPub, ++_botCount, ownerHandle);
+        var bot = new BotPlayer(_currentNet, LocalIp(), _profile.IdentityPriv, _profile.IdentityPub, ++_botCount, ownerHandle);
         var myHex = Convert.ToHexString(_profile.IdentityPub).ToLowerInvariant();
-        _bot.AddPeer(myHex, MyEndpoint());                 // the bot knows how to reach us
-        _gossip?.AddSeed(_bot.PubHex, _bot.Endpoint);      // we know how to reach the bot
-        _botWindow = new BotWindow(_bot) { Owner = this };
-        _botWindow.Closed += (_, _) => { _bot = null; _botWindow = null; UpdateNetInfo(); };
-        _botWindow.Show();
-        _bot.Announce();
+        bot.AddPeer(myHex, MyEndpoint());                  // the bot knows how to reach us
+        _gossip?.AddSeed(bot.PubHex, bot.Endpoint);        // we know how to reach the bot
+        var win = new BotWindow(bot) { Owner = this };
+        _bots.Add(bot); _botWindows.Add(win);
+        win.Closed += (_, _) => { _bots.Remove(bot); _botWindows.Remove(win); UpdateNetInfo(); };
+        win.Show();
+        bot.Announce();
         UpdateNetInfo();
     }
 

@@ -47,7 +47,7 @@ public sealed class GameView : UserControl
         var barHost = new Border { Background = new SolidColorBrush(Color.FromRgb(0x16, 0x16, 0x16)), Padding = new Thickness(8) };
         barHost.Child = bar; Grid.SetRow(barHost, 1); root.Children.Add(barHost);
         Content = root;
-        ShowMessage("Press “Play on-chain hand”. A fair deal requires a real opponent (discovered automatically) and real BSV funds — there is no local or bot deck.");
+        ShowMessage("Press “Play on-chain hand” and choose an opponent — a real discovered player, OR one of YOUR OWN bots (open one from the Lobby for testing / soft play). Every deal is genuine two-party mental poker (no shared deck), real BSV; your bots only ever play you.");
     }
 
     /// <summary>Lobby entry point.</summary>
