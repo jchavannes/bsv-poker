@@ -1954,12 +1954,31 @@ public sealed class WalletView : UserControl
 
     private void Restore()
     {
-        var box = new TextBox { AcceptsReturn = true, Height = 80, Width = 460, TextWrapping = TextWrapping.Wrap };
-        var ok = new Button { Content = "Restore", Margin = new Thickness(0, 10, 0, 0), Padding = new Thickness(10, 6, 10, 6) };
-        var win = new Window { Title = "Restore wallet — enter your seed backup", Width = 500, Height = 200, Owner = Window.GetWindow(this), Content = new StackPanel { Margin = new Thickness(12), Children = { box, ok } } };
+        // ElectrumSVP-style restore: the seed is validated LIVE as you type; Restore stays disabled until the
+        // seed is a valid wallet backup. After restoring, the identity must still be registered (every step).
+        var box = new TextBox { AcceptsReturn = true, Height = 80, Width = 460, TextWrapping = TextWrapping.Wrap }; ThemeOne(box);
+        var status = new TextBlock { Margin = new Thickness(0, 6, 0, 0), FontWeight = FontWeights.Bold };
+        var ok = new Button { Content = "Restore", Margin = new Thickness(0, 10, 0, 0), Padding = new Thickness(12, 6, 12, 6), IsEnabled = false };
+        void Check()
+        {
+            try { var s = WalletKeys.BackupToSeed(box.Text.Trim()); var good = s.Length == 32; ok.IsEnabled = good; status.Text = good ? "✔ valid wallet seed" : "not a valid seed"; status.Foreground = good ? Accent : Brushes.IndianRed; }
+            catch { ok.IsEnabled = false; status.Text = box.Text.Trim().Length == 0 ? "" : "✖ not a valid wallet seed backup"; status.Foreground = Brushes.IndianRed; }
+        }
+        box.TextChanged += (_, _) => Check();
+        var sp = new StackPanel { Margin = new Thickness(12) };
+        sp.Children.Add(new TextBlock { Text = "Enter your wallet seed backup (Base58Check):", Foreground = Ink });
+        sp.Children.Add(box); sp.Children.Add(status); sp.Children.Add(ok);
+        var win = new Window { Title = "Restore wallet — enter your seed backup", Width = 500, Height = 240, Owner = Window.GetWindow(this), Background = WinBg, Content = new ScrollViewer { Content = sp } };
         ok.Click += (_, _) =>
         {
-            try { _seed = WalletKeys.BackupToSeed(box.Text.Trim()); _w = new File_ { Seed = WalletKeys.SeedToBackup(_seed), RecvIndex = 0 }; _locked = false; OnUnlocked?.Invoke(); AppendTx("restore", 0, "wallet restored from seed"); Save(); Render(); win.Close(); }
+            try
+            {
+                _seed = WalletKeys.BackupToSeed(box.Text.Trim());
+                _w = new File_ { Seed = WalletKeys.SeedToBackup(_seed), RecvIndex = 0 };
+                _locked = false; OnUnlocked?.Invoke(); Save(); Render(); win.Close();
+                if (!IsRegistered) RegisterDialog();              // restored wallet still needs a registered identity
+                _status.Text = "Wallet restored from seed.";
+            }
             catch (Exception ex) { MessageBox.Show(ex.Message, "Invalid seed"); }
         };
         win.ShowDialog();
