@@ -14,6 +14,9 @@ public sealed class GameView : UserControl
 {
     private readonly Func<string>? _playHand;
     private readonly TextBlock _msg = new() { Foreground = Brushes.White, FontSize = 16, TextWrapping = TextWrapping.Wrap, MaxWidth = 720, TextAlignment = TextAlignment.Center };
+    private readonly WrapPanel _board = new() { HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 10, 0, 4) };
+    private readonly WrapPanel _holes = new() { HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 4, 0, 0) };
+    private readonly TextBlock _oppLine = new() { Foreground = Brushes.White, FontSize = 13, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 6, 0, 0) };
 
     public event Action? OnLeaveTable;
 
@@ -27,6 +30,9 @@ public sealed class GameView : UserControl
         var inner = new Border { CornerRadius = new CornerRadius(150), BorderBrush = new SolidColorBrush(Color.FromRgb(0xA9, 0x81, 0x2B)), BorderThickness = new Thickness(6), Margin = new Thickness(10) };
         var col = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(24) };
         col.Children.Add(new TextBlock { Text = "On-chain table — real BSV, real opponent only", FontWeight = FontWeights.Bold, FontSize = 18, Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 0, 0, 10) });
+        col.Children.Add(_oppLine);
+        col.Children.Add(_board);
+        col.Children.Add(_holes);
         col.Children.Add(_msg);
         inner.Child = col; felt.Child = inner;
 
@@ -55,6 +61,26 @@ public sealed class GameView : UserControl
     }
 
     private void ShowMessage(string s) => _msg.Text = s;
+
+    /// <summary>Render a completed hand as real card tiles (your hole cards are now on-chain NFTs) + opponent + result.</summary>
+    public void ShowHand(IReadOnlyList<Card> holes, IReadOnlyList<Card> board, string opponent, string result)
+    {
+        if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(new Action(() => ShowHand(holes, board, opponent, result))); return; }
+        _oppLine.Text = $"Opponent: {opponent}";
+        _board.Children.Clear(); foreach (var c in board) _board.Children.Add(Tile(c));
+        _holes.Children.Clear(); foreach (var c in holes) _holes.Children.Add(Tile(c));
+        _msg.Text = result;
+    }
+
+    private static UIElement Tile(Card card)
+    {
+        var fg = card.IsRed ? Brushes.Crimson : Brushes.Black;
+        var face = new Border { Width = 54, Height = 74, Margin = new Thickness(4), CornerRadius = new CornerRadius(6), Background = Brushes.White, BorderBrush = new SolidColorBrush(Color.FromRgb(0x20, 0x20, 0x20)), BorderThickness = new Thickness(1) };
+        var g = new Grid();
+        g.Children.Add(new TextBlock { Text = card.RankLabel, FontSize = 13, FontWeight = FontWeights.Bold, Foreground = fg, HorizontalAlignment = HorizontalAlignment.Left, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(4, 2, 0, 0) });
+        g.Children.Add(new TextBlock { Text = card.Glyph.ToString(), FontSize = 24, Foreground = fg, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center });
+        face.Child = g; return face;
+    }
 
     private static Button Mk(string text, string hex)
     {

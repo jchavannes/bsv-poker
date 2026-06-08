@@ -178,13 +178,10 @@ public partial class MainWindow : Window
                 _wallet.MarkSpent(s.Utxo.Txid, s.Utxo.Vout);
                 // every card dealt to me becomes a REAL on-chain encrypted NFT sealed to my identity (in my wallet)
                 var mintStatus = _wallet.MintCardNftsOnChain(r.MyHoles.Select(c => c.Index).ToList());
-                string holes = string.Join(" ", r.MyHoles.Select(CardStr));
-                string board = string.Join(" ", r.Board.Select(CardStr));
                 bool iWon = (r.WinnerSeat == 0) == initiator;
-                _game?.ShowStatus($"On-chain hand complete — every message was a Bitcoin transaction.\n" +
-                                  $"Your hole cards: {holes}\nBoard: {board}\nPot: {r.Pot:N0} sat → {(iWon ? "YOU win" : "opponent wins")}\n" +
-                                  $"Shuffle/remask proofs verified: {r.ProofsVerified}. Escrow + settlement broadcast to miners.\n" +
-                                  $"Card NFTs: {mintStatus} (see the NFTs tab in your wallet).");
+                var oppName = _wallet.HandleFor(peerHex) is { } h ? "@" + h : peerHex[..12] + "…";
+                _game?.ShowHand(r.MyHoles, r.Board, oppName,
+                    $"Pot {r.Pot:N0} sat → {(iWon ? "YOU win" : "opponent wins")} · proofs verified: {r.ProofsVerified} · NFTs: {mintStatus}");
             }
             catch (Exception ex) { _game?.ShowStatus("Hand did not complete: " + ex.Message); }
             finally { _activeDeal = null; }
