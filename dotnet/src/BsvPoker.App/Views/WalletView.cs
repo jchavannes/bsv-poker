@@ -25,7 +25,7 @@ public sealed class WalletView : UserControl
 {
     private sealed class Tx { public string Time { get; set; } = ""; public string Type { get; set; } = ""; public long Amount { get; set; } public long Balance { get; set; } public string Memo { get; set; } = ""; }
     private sealed class UtxoRec { public string Txid { get; set; } = ""; public uint Vout { get; set; } public long Value { get; set; } public uint KeyChain { get; set; } public uint KeyIndex { get; set; } public bool Spent { get; set; } public bool Confirmed { get; set; } public bool Frozen { get; set; } }
-    private sealed class SendRec { public string Txid { get; set; } = ""; public long Amount { get; set; } public long Fee { get; set; } public string To { get; set; } = ""; public string Time { get; set; } = ""; }
+    private sealed class SendRec { public string Txid { get; set; } = ""; public long Amount { get; set; } public long Fee { get; set; } public string To { get; set; } = ""; public string Time { get; set; } = ""; public string RawHex { get; set; } = ""; }
     private sealed class Contact { public string Handle { get; set; } = ""; public string IdentityPub { get; set; } = ""; public string Note { get; set; } = ""; }
     private sealed class PayRequest { public string Address { get; set; } = ""; public long Amount { get; set; } public string Memo { get; set; } = ""; public string Time { get; set; } = ""; }
     private sealed class File_
@@ -1664,7 +1664,7 @@ public sealed class WalletView : UserControl
             var txid = Chain.Txid(spend.Tx);
             foreach (var inp in spend.Inputs) foreach (var u in _w.Utxos.Where(u => u.Txid == inp.Txid && u.Vout == inp.Vout)) u.Spent = true;
             DetectSelfOutputs(spend.Tx, txid);
-            _w.Sends.Add(new SendRec { Txid = txid, Amount = total, Fee = fee, To = string.Join("; ", dests), Time = DateTime.Now.ToString("yyyy-MM-dd HH:mm") });
+            _w.Sends.Add(new SendRec { Txid = txid, Amount = total, Fee = fee, To = string.Join("; ", dests), Time = DateTime.Now.ToString("yyyy-MM-dd HH:mm"), RawHex = Convert.ToHexString(Chain.Serialize(spend.Tx)).ToLowerInvariant() });
             Notify($"Sent {total:N0} sat (fee {fee:N0}) to {dests.Count} output(s).");
             if (!string.IsNullOrWhiteSpace(label)) _w.TxLabels[txid] = label;
             Save(); Render();
@@ -1759,11 +1759,36 @@ public sealed class WalletView : UserControl
         var ins = _w.Utxos.Where(u => u.Txid == txid).ToList();
         var send = _w.Sends.FirstOrDefault(s => s.Txid == txid);
         var sb = new System.Text.StringBuilder();
-        sb.AppendLine("Transaction: " + txid);
+        sb.AppendLine("Transaction id: " + txid);
         if (_w.TxLabels.TryGetValue(txid, out var lbl)) sb.AppendLine("Label: " + lbl);
-        if (send != null) sb.AppendLine($"Sent: {send.Amount:N0} sat (fee {send.Fee:N0}) at {send.Time}\nTo: {send.To}");
-        foreach (var u in ins) sb.AppendLine($"Output :{u.Vout} = {u.Value:N0} sat → {AddressForKey(u.KeyChain, u.KeyIndex)} [{(u.Spent ? "spent" : u.Confirmed ? "confirmed" : "pending")}]");
-        MessageBox.Show(sb.ToString(), "Transaction details");
+        if (send != null) sb.AppendLine($"Sent {send.Amount:N0} sat (fee {send.Fee:N0}) at {send.Time}  →  {send.To}");
+        // full input/output breakdown from the stored raw transaction, when we have it
+        if (send != null && send.RawHex.Length > 0)
+        {
+            try
+            {
+                var tx = Chain.Deserialize(Convert.FromHexString(send.RawHex));
+                sb.AppendLine($"\nVersion {tx.Version}, locktime {tx.LockTime}, size {send.RawHex.Length / 2} bytes");
+                sb.AppendLine($"\nInputs ({tx.Ins.Count}):");
+                foreach (var i in tx.Ins) sb.AppendLine($"  {i.PrevTxid[..Math.Min(16, i.PrevTxid.Length)]}…:{i.Vout}");
+                sb.AppendLine($"\nOutputs ({tx.Outs.Count}):");
+                for (int o = 0; o < tx.Outs.Count; o++)
+                {
+                    var os = tx.Outs[o];
+                    string who = os.Script.Length == 25 && os.Script[0] == 0x76 ? Base58.CheckEncode(Prefix(_net().AddressVersion, os.Script[3..23])) : $"script[{os.Script.Length}B]";
+                    sb.AppendLine($"  :{o} = {os.Value:N0} sat → {who}");
+                }
+            }
+            catch { }
+        }
+        else
+        {
+            sb.AppendLine("\nOur outputs in this tx:");
+            foreach (var u in ins) sb.AppendLine($"  :{u.Vout} = {u.Value:N0} sat → {AddressForKey(u.KeyChain, u.KeyIndex)} [{(u.Spent ? "spent" : u.Confirmed ? "confirmed" : "pending")}]");
+        }
+        var box = new TextBox { Text = sb.ToString(), IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, FontFamily = new FontFamily("Consolas"), Background = FieldBg, Foreground = Ink, BorderThickness = new Thickness(0) };
+        var win = new Window { Title = "Transaction details", Width = 560, Height = 420, Owner = Window.GetWindow(this), Background = WinBg, Content = new ScrollViewer { Content = box, Margin = new Thickness(10) } };
+        win.ShowDialog();
     }
 
     private void SetAddrLabel(string address)
@@ -1856,7 +1881,7 @@ public sealed class WalletView : UserControl
 
             foreach (var inp in spend.Inputs) foreach (var u in _w.Utxos.Where(u => u.Txid == inp.Txid && u.Vout == inp.Vout)) u.Spent = true;
             DetectSelfOutputs(spend.Tx, txid);
-            _w.Sends.Add(new SendRec { Txid = txid, Amount = pr.Total, Fee = fee, To = $"invoice: {pr.Memo}", Time = DateTime.Now.ToString("yyyy-MM-dd HH:mm") });
+            _w.Sends.Add(new SendRec { Txid = txid, Amount = pr.Total, Fee = fee, To = $"invoice: {pr.Memo}", Time = DateTime.Now.ToString("yyyy-MM-dd HH:mm"), RawHex = rawHex });
             Save(); Render();
             _sendStatus.Text = ack.Ok ? $"Invoice paid — tx {txid}. Merchant ACK: {ack.Memo}" : $"Paid on-chain (tx {txid}) but the merchant ACK failed: {ack.Raw}";
         }
