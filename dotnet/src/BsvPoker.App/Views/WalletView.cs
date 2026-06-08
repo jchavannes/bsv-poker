@@ -596,8 +596,9 @@ public sealed class WalletView : UserControl
         var freeze = Btn("Freeze"); freeze.Click += (_, _) => SetFrozen(true);
         var unfreeze = Btn("Unfreeze"); unfreeze.Click += (_, _) => SetFrozen(false);
         var spend = Btn("Spend selected…"); spend.Click += (_, _) => { if (Guard()) SpendSelectedCoins(); };
-        var copyOp = Btn("Copy outpoint"); copyOp.Click += (_, _) => { if (_coinsGrid.SelectedItem != null) CopyToClipboard(_coinsGrid.SelectedItem.GetType().GetProperty("Outpoint")!.GetValue(_coinsGrid.SelectedItem)!.ToString()!, "Outpoint copied."); };
-        row.Children.Add(freeze); row.Children.Add(unfreeze); row.Children.Add(spend); row.Children.Add(copyOp);
+        var copyOp = Btn("Copy outpoint"); copyOp.Click += (_, _) => { if (_coinsGrid.SelectedItem != null) CopyToClipboard(PropOf(_coinsGrid.SelectedItem, "FullOutpoint"), "Outpoint copied."); };
+        var details = Btn("Details…"); details.Click += (_, _) => { if (_coinsGrid.SelectedItem != null) TxDetails(PropOf(_coinsGrid.SelectedItem, "FullOutpoint").Split(':')[0]); };
+        row.Children.Add(freeze); row.Children.Add(unfreeze); row.Children.Add(spend); row.Children.Add(copyOp); row.Children.Add(details);
         sp.Children.Add(row);
         return Scroll(sp);
     }
@@ -753,7 +754,7 @@ public sealed class WalletView : UserControl
                 }
             }
         }
-        if (added) { AppendTx("incoming (pending)", 0, "awaiting confirmation"); Save(); Render(); }
+        if (added) { AppendTx("incoming (pending)", 0, "awaiting confirmation"); Notify("Incoming payment detected (pending confirmation)."); Save(); Render(); }
         return added;
     }
 
@@ -826,6 +827,7 @@ public sealed class WalletView : UserControl
                     {
                         _w.Utxos.Add(new UtxoRec { Txid = utxo.Txid, Vout = utxo.Vout, Value = utxo.Value, KeyChain = c, KeyIndex = i, Confirmed = true });
                         AppendTx("received", utxo.Value, $"SPV-confirmed {utxo.Txid[..12]}…:{utxo.Vout}");
+                        Notify($"Received {utxo.Value:N0} sat (SPV-confirmed).");
                         changed = true;
                     }
                     else // already known (was pending) → mark it confirmed now that we hold the proof
@@ -1576,6 +1578,7 @@ public sealed class WalletView : UserControl
             foreach (var inp in spend.Inputs) foreach (var u in _w.Utxos.Where(u => u.Txid == inp.Txid && u.Vout == inp.Vout)) u.Spent = true;
             DetectSelfOutputs(spend.Tx, txid);
             _w.Sends.Add(new SendRec { Txid = txid, Amount = total, Fee = fee, To = string.Join("; ", dests), Time = DateTime.Now.ToString("yyyy-MM-dd HH:mm") });
+            Notify($"Sent {total:N0} sat (fee {fee:N0}) to {dests.Count} output(s).");
             if (!string.IsNullOrWhiteSpace(label)) _w.TxLabels[txid] = label;
             Save(); Render();
             if (receipts.Count > 0)
