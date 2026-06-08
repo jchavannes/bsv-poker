@@ -305,12 +305,51 @@ public sealed class WalletView : UserControl
         var standard = Opt("Standard wallet (recommended)", "Create a brand-new wallet with a fresh BSV-native seed.");
         var restore = Opt("Restore from a seed backup", "I already have a wallet seed and want to restore it.");
         var import = Opt("Import a private key (WIF)", "Sweep coins controlled by an existing private key into this wallet.");
-        standard.Click += (_, _) => { win.Close(); MessageBox.Show("Your new wallet is ready. Back up your seed (Account → Show seed backup) and set a password (Wallet → Password).", "Wallet created"); SetPassword(); Render(); };
+        standard.Click += (_, _) => { win.Close(); StandardSeedFlow(); };
         restore.Click += (_, _) => { win.Close(); Restore(); };
         import.Click += (_, _) => { win.Close(); SweepWif(); };
         sp.Children.Add(standard); sp.Children.Add(restore); sp.Children.Add(import);
         win.Content = new ScrollViewer { Content = sp };
         win.ShowDialog();
+    }
+
+    /// <summary>The Standard new-wallet flow: show the seed for backup → confirm it was written down → set a
+    /// password. Mirrors ElectrumSVP's create-seed / confirm-seed / password pages (BSV-native seed, not BIP39).</summary>
+    private void StandardSeedFlow()
+    {
+        var seed = WalletKeys.SeedToBackup(_seed);
+        // page 1: show the seed
+        var seedBox = new TextBox { Text = seed, IsReadOnly = true, TextWrapping = TextWrapping.Wrap, FontFamily = new FontFamily("Consolas"), Background = FieldBg, Foreground = Accent, BorderBrush = Line, BorderThickness = new Thickness(1), Padding = new Thickness(6), Width = 420 };
+        var wrote = new CheckBox { Content = "I have written my seed down and stored it safely", Foreground = Ink, Margin = new Thickness(0, 10, 0, 0) };
+        var next = new Button { Content = "Continue", Margin = new Thickness(0, 12, 0, 0), Padding = new Thickness(12, 6, 12, 6), IsEnabled = false };
+        wrote.Checked += (_, _) => next.IsEnabled = true; wrote.Unchecked += (_, _) => next.IsEnabled = false;
+        var sp1 = new StackPanel { Margin = new Thickness(16) };
+        sp1.Children.Add(new TextBlock { Text = "Back up your wallet seed", FontSize = 16, FontWeight = FontWeights.Bold, Foreground = Ink });
+        sp1.Children.Add(new TextBlock { Text = "This single seed recovers your entire wallet. Anyone with it controls your coins. Write it down — it is shown only now.", Foreground = SubInk, TextWrapping = TextWrapping.Wrap, MaxWidth = 420, Margin = new Thickness(0, 4, 0, 8) });
+        sp1.Children.Add(seedBox); sp1.Children.Add(wrote); sp1.Children.Add(next);
+        var w1 = new Window { Title = "New wallet — back up your seed", Width = 480, Height = 320, WindowStartupLocation = WindowStartupLocation.CenterOwner, Owner = Window.GetWindow(this), Background = WinBg, Content = new ScrollViewer { Content = sp1 } };
+        next.Click += (_, _) => w1.Close();
+        w1.ShowDialog();
+
+        // page 2: confirm the seed by re-typing it
+        var confirm = new TextBox { TextWrapping = TextWrapping.Wrap, FontFamily = new FontFamily("Consolas"), Background = FieldBg, Foreground = Ink, BorderBrush = Line, BorderThickness = new Thickness(1), Padding = new Thickness(6), Width = 420, Height = 60, AcceptsReturn = true };
+        var ok = new Button { Content = "Confirm", Margin = new Thickness(0, 12, 0, 0), Padding = new Thickness(12, 6, 12, 6) };
+        var sp2 = new StackPanel { Margin = new Thickness(16) };
+        sp2.Children.Add(new TextBlock { Text = "Confirm your seed", FontSize = 16, FontWeight = FontWeights.Bold, Foreground = Ink });
+        sp2.Children.Add(new TextBlock { Text = "Re-type the seed exactly to confirm you have it.", Foreground = SubInk, Margin = new Thickness(0, 4, 0, 8) });
+        sp2.Children.Add(confirm); sp2.Children.Add(ok);
+        var w2 = new Window { Title = "New wallet — confirm your seed", Width = 480, Height = 250, WindowStartupLocation = WindowStartupLocation.CenterOwner, Owner = Window.GetWindow(this), Background = WinBg, Content = new ScrollViewer { Content = sp2 } };
+        ok.Click += (_, _) =>
+        {
+            if (confirm.Text.Trim() != seed) { MessageBox.Show("That does not match your seed. Try again (copy it exactly).", "Confirm seed"); return; }
+            w2.Close();
+        };
+        w2.ShowDialog();
+
+        // page 3: set a password (encrypt the keys at rest)
+        SetPassword();
+        Render();
+        _status.Text = "New wallet ready — seed backed up and keys encrypted.";
     }
 
     private void BackupSeedToFile()
