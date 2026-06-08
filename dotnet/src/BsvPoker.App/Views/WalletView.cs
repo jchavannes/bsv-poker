@@ -790,8 +790,10 @@ public sealed class WalletView : UserControl
         var copy = Btn("Copy address"); copy.Click += (_, _) => { if (_addrGrid.SelectedItem != null) CopyToClipboard(PropOf(_addrGrid.SelectedItem, "Address"), "Address copied."); };
         var label = Btn("Set label…"); label.Click += (_, _) => { if (_addrGrid.SelectedItem != null) SetAddrLabel(PropOf(_addrGrid.SelectedItem, "Address")); };
         var wif = Btn("Show private key (WIF)…"); wif.Click += (_, _) => { if (Guard()) ShowWif(); };
+        var freezeA = Btn("Freeze address"); freezeA.Click += (_, _) => FreezeAddress(true);
+        var unfreezeA = Btn("Unfreeze address"); unfreezeA.Click += (_, _) => FreezeAddress(false);
         var more = Btn("Show 20 more addresses"); more.Click += (_, _) => { if (Guard()) { _w.RecvIndex += 20; Save(); Render(); } };
-        row.Children.Add(copy); row.Children.Add(label); row.Children.Add(wif); row.Children.Add(more);
+        row.Children.Add(copy); row.Children.Add(label); row.Children.Add(wif); row.Children.Add(freezeA); row.Children.Add(unfreezeA); row.Children.Add(more);
         _addrGrid.MouseDoubleClick += (_, _) => { if (_addrGrid.SelectedItem != null) SetAddrLabel(PropOf(_addrGrid.SelectedItem, "Address")); };
         sp.Children.Add(row);
         return Scroll(sp);
@@ -2222,6 +2224,16 @@ public sealed class WalletView : UserControl
         var win = new Window { Title = "Label for coin " + outpoint[..Math.Min(18, outpoint.Length)] + "…", Width = 470, Height = 150, Owner = Window.GetWindow(this), Background = WinBg, Content = new StackPanel { Margin = new Thickness(12), Children = { new TextBlock { Text = "Coin label:", Foreground = Ink }, box, ok } } };
         ok.Click += (_, _) => { var t = box.Text.Trim(); if (t.Length == 0) _w.CoinLabels.Remove(outpoint); else _w.CoinLabels[outpoint] = t; Save(); Render(); win.Close(); };
         win.ShowDialog();
+    }
+
+    private void FreezeAddress(bool frozen)
+    {
+        if (_addrGrid.SelectedItem == null) { _status.Text = "Select an address."; return; }
+        var addr = PropOf(_addrGrid.SelectedItem, "Address");
+        int n = 0;
+        foreach (var u in _w.Utxos.Where(u => AddressForKey(u.KeyChain, u.KeyIndex) == addr)) { u.Frozen = frozen; n++; }
+        Save(); Render();
+        _status.Text = $"{(frozen ? "Froze" : "Unfroze")} {n} coin(s) on {addr}.";
     }
 
     private void SetAddrLabel(string address)
