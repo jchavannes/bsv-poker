@@ -96,6 +96,26 @@ public sealed class ElectrumXClient : IDisposable
         return Convert.ToHexString(h).ToLowerInvariant();
     }
 
+    /// <summary>Fetch a transaction's raw bytes by txid (light — no full-block download).</summary>
+    public async Task<byte[]> GetTransactionAsync(string txidDisplay, int timeoutMs = 9000)
+    {
+        var res = await CallAsync("blockchain.transaction.get", timeoutMs, txidDisplay, false);
+        return Convert.FromHexString(res.GetString() ?? "");
+    }
+
+    /// <summary>The confirmed height of a txid via the address history of its first output (so we can fetch its
+    /// merkle proof). Returns 0 if unknown/unconfirmed.</summary>
+    public async Task<int> HeightOfTxAsync(string txidDisplay, byte[] anOutputScript, int timeoutMs = 9000)
+    {
+        var sh = ScriptHashOf(anOutputScript);
+        var res = await CallAsync("blockchain.scripthash.get_history", timeoutMs, sh);
+        if (res.ValueKind == JsonValueKind.Array)
+            foreach (var h in res.EnumerateArray())
+                if ((h.GetProperty("tx_hash").GetString() ?? "") == txidDisplay)
+                    return h.TryGetProperty("height", out var ht) ? ht.GetInt32() : 0;
+        return 0;
+    }
+
     public async Task<List<Utxo>> ListUnspentAsync(string scriptHash, int timeoutMs = 7000)
     {
         var res = await CallAsync("blockchain.scripthash.listunspent", timeoutMs, scriptHash);

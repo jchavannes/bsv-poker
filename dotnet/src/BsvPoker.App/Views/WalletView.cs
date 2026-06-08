@@ -207,6 +207,12 @@ public sealed class WalletView : UserControl
             if (AccountCount() > 1) AccountsDialog();
             if (_freshWallet) { _freshWallet = false; AccountWizard(); }
             else if (!_locked && !IsRegistered) { WizardWelcome(); RegisterDialog(); }
+            // Auto-surface funds: a few seconds after load, pull + SPV-verify this wallet's coins via the ElectrumX
+            // backup (and refresh periodically), so an already-funded address shows without the user clicking anything.
+            if (!_locked && IsRegistered) _ = RefreshViaElectrumX();
+            var fundTick = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(90) };
+            fundTick.Tick += async (_, _) => { if (!_locked && IsRegistered) await RefreshViaElectrumX(); };
+            fundTick.Start();
         };
     }
 
@@ -854,7 +860,7 @@ public sealed class WalletView : UserControl
         var importBtn = Btn("Import funding (SPV envelope)…"); importBtn.Click += (_, _) => { if (Guard()) ImportFunding(); };
         var makeEnv = Btn("Create funding envelope…"); makeEnv.Click += async (_, _) => { if (Guard()) await CreateEnvelope(); };
         var findTx = Btn("Find a payment by txid…"); findTx.Click += async (_, _) => { if (Guard()) await FindByTxid(); };
-        var rescan = Btn("Rescan now"); rescan.Click += (_, _) => { if (Guard()) { _status.Text = "Rescanning the chain for payments…"; RescanRequested?.Invoke(); } };
+        var rescan = Btn("Rescan now"); rescan.Click += async (_, _) => { if (Guard()) { _status.Text = "Rescanning the chain for payments…"; RescanRequested?.Invoke(); await RefreshViaElectrumX(); } };
         var claim = Btn("Claim a payment to my identity…"); claim.Click += (_, _) => { if (Guard()) ClaimIdentityPayment(); };
         var ex = Btn("Refresh balance (ElectrumX backup)"); ex.Background = new SolidColorBrush(Color.FromRgb(0x2E, 0x7D, 0x32)); ex.Foreground = Brushes.White; ex.Click += async (_, _) => { if (Guard()) await RefreshViaElectrumX(); };
         fund.Children.Add(importBtn); fund.Children.Add(makeEnv); fund.Children.Add(findTx); fund.Children.Add(rescan); fund.Children.Add(claim); fund.Children.Add(ex);
@@ -1739,52 +1745,49 @@ public sealed class WalletView : UserControl
     /// </summary>
     private async System.Threading.Tasks.Task FindByTxid()
     {
-        var txidBox = new TextBox { Width = 520, FontFamily = new FontFamily("Consolas") };
-        var blkBox = new TextBox { Width = 520, FontFamily = new FontFamily("Consolas") };
+        var txidBox = new TextBox { Width = 520, FontFamily = new FontFamily("Consolas") }; ThemeOne(txidBox);
+        var hBox = new TextBox { Width = 160, Text = "" }; ThemeOne(hBox);
         var go = new Button { Content = "Fetch & credit", Margin = new Thickness(0, 10, 0, 0), Padding = new Thickness(12, 6, 12, 6) };
         var sp = new StackPanel { Margin = new Thickness(12) };
-        sp.Children.Add(new TextBlock { Text = "Payment transaction id (txid):", Foreground = Brushes.Gray }); sp.Children.Add(txidBox);
-        sp.Children.Add(new TextBlock { Text = "Hash of the block that confirmed it:", Foreground = Brushes.Gray, Margin = new Thickness(0, 8, 0, 0) }); sp.Children.Add(blkBox);
+        sp.Children.Add(new TextBlock { Text = "Payment transaction id (txid):", Foreground = Ink }); sp.Children.Add(txidBox);
+        sp.Children.Add(new TextBlock { Text = "Block height that confirmed it (optional — left blank, we look it up):", Foreground = Ink, Margin = new Thickness(0, 8, 0, 0) }); sp.Children.Add(hBox);
         sp.Children.Add(go);
-        var win = new Window { Title = "Find a payment by txid", Width = 580, Height = 240, Owner = Window.GetWindow(this), Content = new ScrollViewer { Content = sp } };
+        var win = new Window { Title = "Find a payment by txid", Width = 580, Height = 240, Owner = Window.GetWindow(this), Background = WinBg, Content = new ScrollViewer { Content = sp } };
         go.Click += async (_, _) =>
         {
             try
             {
-                var node = _node();
-                if (node == null || node.PeerCount == 0) { MessageBox.Show("No BSV peers connected yet — wait for peers, then retry.", "No peers"); return; }
                 var wantTxid = txidBox.Text.Trim().ToLowerInvariant();
-                var wantBlock = blkBox.Text.Trim().ToLowerInvariant();
-                go.IsEnabled = false; _status.Text = "Fetching the block from a peer…";
-                var raw = await node.GetBlockAsync(wantBlock);
-                go.IsEnabled = true;
-                if (raw == null) { MessageBox.Show("That block was not served by any peer — check the block hash.", "Not found"); return; }
-                var parsed = BsvBlock.Parse(raw);                                  // validates the merkle root vs the header
-                // SPV verification WITHOUT a fully-synced chain: the served block must have REAL proof-of-work and be
-                // exactly the block you named. Forging a PoW-valid block is infeasible, so a PoW-valid block whose
-                // merkle root commits to this tx is genuine on-chain proof the coin exists.
-                if (!parsed.Header.MeetsPow()) { MessageBox.Show("That block does not meet proof-of-work — rejected.", "Invalid block"); return; }
-                if (parsed.Header.HashHex() != wantBlock) { MessageBox.Show("The served block's hash does not match the hash you entered — rejected.", "Mismatch"); return; }
-                int idx = parsed.Txs.FindIndex(t => Chain.Txid(t) == wantTxid);
-                if (idx < 0) { MessageBox.Show("That txid is not in that block — wrong block hash?", "Not in block"); return; }
-                var tx = parsed.Txs[idx];
-                int credited = 0; long total = 0;
-                uint gap = (uint)_w.RecvIndex + 50;
-                for (uint v = 0; v < (uint)tx.Outs.Count; v++)
-                    for (uint c = 0; c <= 2; c++)
-                        for (uint i = 0; i <= gap; i++)
-                            if (tx.Outs[(int)v].Script.AsSpan().SequenceEqual(Chain.P2pkhLockForPub(WalletKeys.Account(_seed, c, i).Pub)))
-                            {
-                                if (!_w.Utxos.Any(u => u.Txid == wantTxid && u.Vout == v))
-                                { _w.Utxos.Add(new UtxoRec { Txid = wantTxid, Vout = v, Value = tx.Outs[(int)v].Value, KeyChain = c, KeyIndex = i, Confirmed = true }); credited++; total += tx.Outs[(int)v].Value; }
-                                c = 3; break;
-                            }
-                if (credited > 0)
+                if (wantTxid.Length != 64) { MessageBox.Show("Enter a 64-hex-character txid.", "Find by txid"); return; }
+                go.IsEnabled = false; _status.Text = "Looking up the transaction via ElectrumX…";
+                var servers = ElectrumXClient.ServersFor(_net().Network);
+                var seed = _seed; uint gap = (uint)_w.RecvIndex + 50; int.TryParse(hBox.Text.Trim(), out var givenHeight);
+                var (credited, total, err) = await System.Threading.Tasks.Task.Run(async () =>
                 {
-                    Save(); Render(); Notify($"Credited {total:N0} sat from txid {wantTxid[..12]}… (PoW-verified block).");
-                    _status.Text = $"Found and credited {credited} output(s), {total:N0} sat — PoW-verified on-chain."; win.Close();
-                }
-                else MessageBox.Show("The transaction is in that PoW-valid block, but none of its outputs pay an address of THIS wallet. Check you sent to your receive address (and the right account).", "Nothing to credit");
+                    using var ex = new ElectrumXClient();
+                    if (!await ex.ConnectAnyAsync(servers, 8000)) return (0, 0L, "No ElectrumX server reachable.");
+                    byte[] rawTx; try { rawTx = await ex.GetTransactionAsync(wantTxid); } catch (Exception e) { return (0, 0L, "Transaction not found: " + e.Message); }
+                    var tx = Chain.Deserialize(rawTx);
+                    // find which output pays one of our keys (and remember the key)
+                    var pays = new List<(uint Vout, long Value, uint Chain, uint Index)>();
+                    for (uint v = 0; v < (uint)tx.Outs.Count; v++)
+                        for (uint c = 0; c <= 2; c++)
+                            for (uint i = 0; i <= gap; i++)
+                                if (tx.Outs[(int)v].Script.AsSpan().SequenceEqual(Chain.P2pkhLockForPub(WalletKeys.Account(seed, c, i).Pub)))
+                                { pays.Add((v, tx.Outs[(int)v].Value, c, i)); c = 3; break; }
+                    if (pays.Count == 0) return (0, 0L, "That transaction pays no address of this wallet/account.");
+                    int height = givenHeight > 0 ? givenHeight : await ex.HeightOfTxAsync(wantTxid, tx.Outs[(int)pays[0].Vout].Script);
+                    if (height <= 0) return (0, 0L, "Could not determine the confirming block height (unconfirmed?). Enter the height manually.");
+                    if (!await ex.VerifyUtxoAsync(wantTxid, height)) return (0, 0L, "SPV merkle proof did not verify — rejected.");
+                    int cr = 0; long tot = 0;
+                    foreach (var p in pays)
+                        await Dispatcher.InvokeAsync(() => { if (!_w.Utxos.Any(u => u.Txid == wantTxid && u.Vout == p.Vout)) { _w.Utxos.Add(new UtxoRec { Txid = wantTxid, Vout = p.Vout, Value = p.Value, KeyChain = p.Chain, KeyIndex = p.Index, Confirmed = true }); cr++; tot += p.Value; } });
+                    return (cr, tot, "");
+                });
+                go.IsEnabled = true;
+                if (err.Length > 0) { MessageBox.Show(err, "Find by txid"); return; }
+                Save(); Render(); Notify($"Credited {total:N0} sat from {wantTxid[..12]}… (SPV-verified).");
+                _status.Text = $"Found and credited {credited} output(s), {total:N0} sat (SPV-verified)."; win.Close();
             }
             catch (Exception ex) { go.IsEnabled = true; MessageBox.Show("Could not find the payment: " + ex.Message, "Error"); }
         };
