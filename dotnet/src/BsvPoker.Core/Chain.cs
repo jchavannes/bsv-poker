@@ -223,6 +223,71 @@ public static class Chain
         var b = new List<byte> { 0xa9, 0x14 }; b.AddRange(hash20); b.Add(0x87); return b.ToArray();
     }
 
+    private static void PushScriptNum(List<byte> b, long n)
+    {
+        if (n == 0) { b.Add(0x00); return; }
+        var bytes = new List<byte>(); long v = Math.Abs(n); bool neg = n < 0;
+        while (v > 0) { bytes.Add((byte)(v & 0xff)); v >>= 8; }
+        if ((bytes[^1] & 0x80) != 0) bytes.Add(neg ? (byte)0x80 : (byte)0x00); else if (neg) bytes[^1] |= 0x80;
+        b.Add((byte)bytes.Count); b.AddRange(bytes);
+    }
+
+    /// <summary>
+    /// A 2-of-2 vault redeem script WITH unilateral nLockTime recovery (so funds can NEVER be locked if a
+    /// cosigner vanishes — the absolute recovery rule):
+    /// <code>OP_IF  OP_2 &lt;A&gt; &lt;B&gt; OP_2 OP_CHECKMULTISIG  OP_ELSE  &lt;lockHeight&gt; OP_CHECKLOCKTIMEVERIFY OP_DROP &lt;recoveryPub&gt; OP_CHECKSIG  OP_ENDIF</code>
+    /// Cooperative spend uses the IF branch (both sigs); after lockHeight the owner can unilaterally recover via
+    /// the ELSE branch with a single signature.
+    /// </summary>
+    public static byte[] MultisigVaultRedeem(byte[] pubA, byte[] pubB, byte[] recoveryPub, long lockHeight)
+    {
+        if (pubA.Length != 33 || pubB.Length != 33 || recoveryPub.Length != 33) throw new ArgumentException("pubkeys must be 33-byte compressed");
+        var b = new List<byte> { 0x63 };                 // OP_IF
+        b.Add(0x52); b.Add(33); b.AddRange(pubA); b.Add(33); b.AddRange(pubB); b.Add(0x52); b.Add(0xae); // 2 A B 2 CHECKMULTISIG
+        b.Add(0x67);                                     // OP_ELSE
+        PushScriptNum(b, lockHeight); b.Add(0xb1); b.Add(0x75); // <lockHeight> CLTV DROP
+        b.Add(33); b.AddRange(recoveryPub); b.Add(0xac); // <recoveryPub> CHECKSIG
+        b.Add(0x68);                                     // OP_ENDIF
+        return b.ToArray();
+    }
+
+    /// <summary>A signature over a vault input (FORKID sighash, scriptCode = the full redeem script). LOW-S.</summary>
+    public static byte[] VaultSign(Tx tx, int index, byte[] redeemScript, long amount, byte[] signerPriv)
+    {
+        var digest = SighashForkId(tx, index, redeemScript, amount);
+        var sig = Secp256k1.SignDigest(signerPriv, digest);
+        return Secp256k1.ToDer(sig).Concat(new byte[] { SighashAllForkId }).ToArray();
+    }
+
+    private static void PushData(List<byte> b, byte[] data)
+    {
+        if (data.Length <= 75) b.Add((byte)data.Length);
+        else if (data.Length <= 255) { b.Add(0x4c); b.Add((byte)data.Length); }
+        else { b.Add(0x4d); b.Add((byte)(data.Length & 0xff)); b.Add((byte)(data.Length >> 8)); }
+        b.AddRange(data);
+    }
+
+    /// <summary>Cooperative P2SH vault spend scriptSig (IF branch): OP_0 &lt;sigA&gt; &lt;sigB&gt; OP_1 &lt;redeem&gt;.</summary>
+    public static byte[] VaultCoopScriptSig(byte[] sigA, byte[] sigB, byte[] redeemScript)
+    {
+        var b = new List<byte> { 0x00 };                 // OP_0 multisig dummy
+        PushData(b, sigA); PushData(b, sigB);
+        b.Add(0x51);                                     // OP_1 → take the IF (cooperative) branch
+        PushData(b, redeemScript);
+        return b.ToArray();
+    }
+
+    /// <summary>Unilateral recovery P2SH vault spend scriptSig (ELSE branch): &lt;sig&gt; OP_0 &lt;redeem&gt;. The spend tx
+    /// must set nLockTime &gt;= the vault's lockHeight and a non-final sequence for CLTV to pass.</summary>
+    public static byte[] VaultRecoveryScriptSig(byte[] sig, byte[] redeemScript)
+    {
+        var b = new List<byte>();
+        PushData(b, sig);
+        b.Add(0x00);                                     // OP_0 (false) → take the ELSE (recovery) branch
+        PushData(b, redeemScript);
+        return b.ToArray();
+    }
+
     public static byte[] MultisigLock2of2(byte[] pubA, byte[] pubB)
     {
         if (pubA.Length != 33 || pubB.Length != 33) throw new ArgumentException("pubkeys must be 33-byte compressed");

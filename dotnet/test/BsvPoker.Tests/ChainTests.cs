@@ -1,4 +1,5 @@
 using BsvPoker.Core;
+using BsvPoker.Core.Script;
 using BsvPoker.Crypto;
 
 namespace BsvPoker.Tests;
@@ -30,6 +31,29 @@ public static class ChainTests
             var ss = Chain.P2shMultisigScriptSig(new byte[] { 1, 2, 3 }, new byte[] { 4, 5, 6 }, redeem);
             T.Eq(ss[0], (byte)0x00, "leading OP_0 dummy");
             T.True(ss[^redeem.Length..].AsSpan().SequenceEqual(redeem), "redeem script is the final push");
+        });
+
+        T.Run("vault: cooperative 2-of-2 spend AND unilateral nLockTime recovery both verify on the interpreter", () =>
+        {
+            var A = Secp256k1.GenerateKeyPair(); var B = Secp256k1.GenerateKeyPair();
+            long lockH = 800000; long amt = 100000; var fund = "aa".PadRight(64, '1');
+            var redeem = Chain.MultisigVaultRedeem(A.Pub, B.Pub, A.Pub, lockH);   // recovery to A
+            static byte[] Push(byte[] d) { var b = new List<byte> { (byte)d.Length }; b.AddRange(d); return b.ToArray(); }
+            byte[] Coop(byte[] sa, byte[] sb) { var b = new List<byte> { 0x00 }; b.AddRange(Push(sa)); b.AddRange(Push(sb)); b.Add(0x51); return b.ToArray(); }
+            byte[] Rec(byte[] s) { var b = new List<byte>(); b.AddRange(Push(s)); b.Add(0x00); return b.ToArray(); }
+
+            var ctx = new Chain.Tx(2, new() { new(fund, 0, Array.Empty<byte>(), 0xffffffff) }, new() { new(amt - 500, Chain.P2pkhLockForPub(B.Pub)) }, 0);
+            var sigA = TxScriptChecker.Sign(ctx, 0, redeem, amt, A.Priv);
+            var sigB = TxScriptChecker.Sign(ctx, 0, redeem, amt, B.Priv);
+            T.True(ScriptEngine.Verify(Coop(sigA, sigB), redeem, new TxScriptChecker(ctx, 0, redeem, amt)), "cooperative 2-of-2 spends the vault");
+
+            var rtx = new Chain.Tx(2, new() { new(fund, 0, Array.Empty<byte>(), 0xfffffffe) }, new() { new(amt - 500, Chain.P2pkhLockForPub(A.Pub)) }, (uint)lockH + 1);
+            var rsig = TxScriptChecker.Sign(rtx, 0, redeem, amt, A.Priv);
+            T.True(ScriptEngine.Verify(Rec(rsig), redeem, new TxScriptChecker(rtx, 0, redeem, amt)), "owner recovers unilaterally AFTER locktime");
+
+            var etx = new Chain.Tx(2, new() { new(fund, 0, Array.Empty<byte>(), 0xfffffffe) }, new() { new(amt - 500, Chain.P2pkhLockForPub(A.Pub)) }, (uint)lockH - 10);
+            var esig = TxScriptChecker.Sign(etx, 0, redeem, amt, A.Priv);
+            T.False(ScriptEngine.Verify(Rec(esig), redeem, new TxScriptChecker(etx, 0, redeem, amt)), "NO recovery before locktime");
         });
         const string fundTxid = "a1b2c3d4e5f6071829303132333435363738393a3b3c3d3e3f4041424344454f";
 
