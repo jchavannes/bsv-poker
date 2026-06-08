@@ -215,6 +215,14 @@ public static class Chain
     /// <summary>The 20-byte script hash (hash160) of a redeem script — the payload of its P2SH address.</summary>
     public static byte[] ScriptHash160(byte[] redeemScript) => Hashes.Hash160(redeemScript);
 
+    /// <summary>A P2SH locking script built directly from a 20-byte script hash (e.g. decoded from a P2SH
+    /// address): OP_HASH160 &lt;hash&gt; OP_EQUAL. Lets the wallet PAY any P2SH/multisig address.</summary>
+    public static byte[] P2shLockFromHash(byte[] hash20)
+    {
+        if (hash20.Length != 20) throw new ArgumentException("script hash must be 20 bytes");
+        var b = new List<byte> { 0xa9, 0x14 }; b.AddRange(hash20); b.Add(0x87); return b.ToArray();
+    }
+
     public static byte[] MultisigLock2of2(byte[] pubA, byte[] pubB)
     {
         if (pubA.Length != 33 || pubB.Length != 33) throw new ArgumentException("pubkeys must be 33-byte compressed");

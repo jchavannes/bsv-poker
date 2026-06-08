@@ -1691,13 +1691,14 @@ public sealed class WalletView : UserControl
             catch { }
         }
 
-        // a Base58 address
+        // a Base58 address — P2PKH (AddressVersion) or P2SH/multisig vault (ScriptVersion)
         try
         {
             var payload = Base58.CheckDecode(raw);
             if (payload.Length != 21) { _sendStatus.Text = "Invalid address length."; return null; }
-            if (payload[0] != _net().AddressVersion) { _sendStatus.Text = $"Address is for a different network (0x{payload[0]:x2}); current network expects 0x{_net().AddressVersion:x2}."; return null; }
-            return (Chain.P2pkhLock(payload[1..]), raw, null, null);
+            if (payload[0] == _net().AddressVersion) return (Chain.P2pkhLock(payload[1..]), raw, null, null);
+            if (payload[0] == _net().ScriptVersion) return (Chain.P2shLockFromHash(payload[1..]), raw + " (P2SH)", null, null);
+            _sendStatus.Text = $"Address is for a different network (0x{payload[0]:x2}); current network expects 0x{_net().AddressVersion:x2} / 0x{_net().ScriptVersion:x2}."; return null;
         }
         catch { _sendStatus.Text = "Could not parse 'pay to' — not an address, identity, handle, or URI."; return null; }
     }
