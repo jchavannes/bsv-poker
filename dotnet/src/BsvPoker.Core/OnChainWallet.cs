@@ -88,6 +88,32 @@ public sealed class OnChainWallet
     }
 
     /// <summary>
+    /// Fund MANY outputs at once (e.g. a BIP270 merchant invoice whose payment request lists several outputs),
+    /// paying the fee and returning change. Coin selection is largest-first; change pays a fresh change key.
+    /// Every input is signed (secp256k1, low-S, FORKID). Throws on insufficient funds.
+    /// </summary>
+    public Spend BuildActionMany(IReadOnlyList<(byte[] Script, long Value)> outputs, long fee)
+    {
+        if (fee < 0 || outputs.Any(o => o.Value < 0)) throw new ArgumentException("bad value/fee");
+        long outValue = outputs.Sum(o => o.Value);
+        long need = outValue + fee;
+        var chosen = new List<Utxo>(); long sum = 0;
+        foreach (var u in _utxos.OrderByDescending(u => u.Value)) { chosen.Add(u); sum += u.Value; if (sum >= need) break; }
+        if (sum < need) throw new InvalidOperationException($"insufficient funds: have {sum}, need {need}");
+        long change = sum - need;
+        var ins = chosen.Select(u => new Chain.TxIn(u.Txid, u.Vout, Array.Empty<byte>(), 0xffffffff)).ToList();
+        var outs = outputs.Select(o => new Chain.TxOut(o.Value, o.Script)).ToList();
+        if (change > 0) outs.Add(new Chain.TxOut(change, Chain.P2pkhLockForPub(WalletKeys.Account(_seed, 1, _nextChange++).Pub)));
+        var tx = new Chain.Tx(2, ins, outs, 0);
+        for (int i = 0; i < chosen.Count; i++)
+        {
+            var k = WalletKeys.Account(_seed, chosen[i].KeyChain, chosen[i].KeyIndex);
+            tx = Chain.SignP2pkhInput(tx, i, k.Priv, k.Pub, chosen[i].Value);
+        }
+        return new Spend(tx, chosen, fee, change);
+    }
+
+    /// <summary>
     /// Build a typed/contract-output spend AND advance the wallet's own state: remove the spent inputs and
     /// re-absorb the change output as a fresh UTXO, so the NEXT call spends the change. This is what lets a
     /// single hand emit MANY on-chain transactions in sequence (every action its own tx) from one starting

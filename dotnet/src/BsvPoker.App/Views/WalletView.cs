@@ -171,10 +171,11 @@ public sealed class WalletView : UserControl
         var btns = new WrapPanel { Margin = new Thickness(0, 12, 0, 0) };
         var preview = Btn("Preview…"); preview.Click += (_, _) => { if (Guard()) PreviewSend(); };
         var paste = Btn("Paste URI / invoice…"); paste.Click += (_, _) => PasteUri();
+        var invoice = Btn("Pay an invoice (BIP270)…"); invoice.Click += async (_, _) => { if (Guard()) await PayInvoice(); };
         var sendBtn = Btn("Send"); sendBtn.Background = new SolidColorBrush(Color.FromRgb(0x2E, 0x7D, 0x32)); sendBtn.Foreground = Brushes.White;
         sendBtn.Click += async (_, _) => { if (Guard()) await SendPayment(); };
         var clear = Btn("Clear"); clear.Click += (_, _) => { _sendPayTo.Clear(); _sendLabel.Clear(); _amount.Text = "0"; _sendStatus.Text = ""; };
-        btns.Children.Add(sendBtn); btns.Children.Add(preview); btns.Children.Add(paste); btns.Children.Add(clear);
+        btns.Children.Add(sendBtn); btns.Children.Add(preview); btns.Children.Add(paste); btns.Children.Add(invoice); btns.Children.Add(clear);
         sp.Children.Add(btns);
         sp.Children.Add(_sendStatus);
         return Scroll(sp);
@@ -1176,6 +1177,54 @@ public sealed class WalletView : UserControl
     {
         try { var t = Clipboard.GetText(); if (!string.IsNullOrWhiteSpace(t)) { _sendPayTo.Text = t.Trim(); _tabs.SelectedIndex = 0; _sendStatus.Text = "Pasted from clipboard — review and Send."; } }
         catch { _sendStatus.Text = "Nothing to paste."; }
+    }
+
+    // ============================ BIP270 invoice paying (Anypay, Centi) ============================
+
+    private async System.Threading.Tasks.Task PayInvoice()
+    {
+        // get the payment URL: prefer what's in "Pay to", else prompt
+        string? url = Bip270.ExtractRequestUrl(_sendPayTo.Text);
+        if (url == null)
+        {
+            var box = new TextBox { Width = 520, FontFamily = new FontFamily("Consolas") };
+            var ok = new Button { Content = "Fetch invoice", Margin = new Thickness(0, 10, 0, 0), Padding = new Thickness(12, 6, 12, 6) };
+            var sp = new StackPanel { Margin = new Thickness(12) };
+            sp.Children.Add(new TextBlock { Text = "Paste a BIP270 payment URL or invoice (Anypay, Centi, …):", Foreground = Brushes.Gray });
+            sp.Children.Add(box); sp.Children.Add(ok);
+            var win = new Window { Title = "Pay an invoice (BIP270)", Width = 580, Height = 180, Owner = Window.GetWindow(this), Content = sp };
+            ok.Click += (_, _) => { url = Bip270.ExtractRequestUrl(box.Text) ?? box.Text.Trim(); win.Close(); };
+            win.ShowDialog();
+            if (string.IsNullOrWhiteSpace(url)) return;
+        }
+        var node = _node();
+        if (node == null || node.PeerCount == 0) { _sendStatus.Text = "No BSV peers connected yet — cannot pay an invoice."; return; }
+        try
+        {
+            _sendStatus.Text = "Fetching invoice…";
+            var pr = await Bip270.FetchAsync(url!);
+            long fee = EstimateFee(pr.Outputs.Count + 1);
+            if (pr.Total + fee > Balance) { _sendStatus.Text = $"Invoice is {pr.Total:N0} sat (+fee {fee:N0}); balance {Balance:N0} sat is too low."; return; }
+            var confirm = MessageBox.Show($"Invoice from: {url}\nMemo: {pr.Memo}\nOutputs: {pr.Outputs.Count}\nTotal: {pr.Total:N0} sat\nFee: {fee:N0} sat\n\nPay now?", "Pay invoice (BIP270)", MessageBoxButton.YesNo, MessageBoxImage.Question);
+            if (confirm != MessageBoxResult.Yes) { _sendStatus.Text = "Invoice cancelled."; return; }
+
+            var w = new OnChainWallet(_seed);
+            foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.Frozen && u.Confirmed)) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
+            var spend = w.BuildActionMany(pr.Outputs.Select(o => (o.Script, o.Amount)).ToList(), fee);
+            if (!w.VerifySpend(spend)) { _sendStatus.Text = "Built invoice tx failed self-verification — not sent."; return; }
+            var rawHex = Convert.ToHexString(Chain.Serialize(spend.Tx)).ToLowerInvariant();
+
+            node.Broadcast(Chain.Serialize(spend.Tx));                       // put the money on-chain
+            var txid = Chain.Txid(spend.Tx);
+            var ack = await Bip270.SubmitAsync(pr, rawHex, ReceiveAddress(), pr.Memo);   // hand the merchant the payment
+
+            foreach (var inp in spend.Inputs) foreach (var u in _w.Utxos.Where(u => u.Txid == inp.Txid && u.Vout == inp.Vout)) u.Spent = true;
+            DetectSelfOutputs(spend.Tx, txid);
+            _w.Sends.Add(new SendRec { Txid = txid, Amount = pr.Total, Fee = fee, To = $"invoice: {pr.Memo}", Time = DateTime.Now.ToString("yyyy-MM-dd HH:mm") });
+            Save(); Render();
+            _sendStatus.Text = ack.Ok ? $"Invoice paid — tx {txid}. Merchant ACK: {ack.Memo}" : $"Paid on-chain (tx {txid}) but the merchant ACK failed: {ack.Raw}";
+        }
+        catch (Exception ex) { _sendStatus.Text = "Invoice payment failed: " + ex.Message; }
     }
 
     // ============================ Receive: requests + QR ============================
