@@ -1461,6 +1461,8 @@ public sealed class WalletView : UserControl
         if (_ring == null && _seed.Length == 32) _ring = new KeyRing(_seed, Math.Max(1, _w.RecvIndex));
         _bal.Text = Balance.ToString("N0") + " sat" + (Pending > 0 ? $"   (+{Pending:N0} pending)" : "");
         _recv.Text = ReceiveAddress() + $"   (#{_w.RecvIndex})";
+        // always show a scannable QR of the current receiving address (or the active payment-request URI)
+        try { _reqQr.Source = RenderQr(_reqUri.Text.Length > 0 ? _reqUri.Text : "bitcoin:" + ReceiveAddress()); } catch { }
 
         ApplyHistoryFilter();
         _coinsGrid.ItemsSource = _w.Utxos.Select(u => new {
