@@ -24,7 +24,7 @@ namespace BsvPoker.App.Views;
 public sealed class WalletView : UserControl
 {
     private sealed class Tx { public string Time { get; set; } = ""; public string Type { get; set; } = ""; public long Amount { get; set; } public long Balance { get; set; } public string Memo { get; set; } = ""; }
-    private sealed class UtxoRec { public string Txid { get; set; } = ""; public uint Vout { get; set; } public long Value { get; set; } public uint KeyChain { get; set; } public uint KeyIndex { get; set; } public bool Spent { get; set; } public bool Confirmed { get; set; } public bool Frozen { get; set; } }
+    private sealed class UtxoRec { public string Txid { get; set; } = ""; public uint Vout { get; set; } public long Value { get; set; } public uint KeyChain { get; set; } public uint KeyIndex { get; set; } public bool Spent { get; set; } public bool Confirmed { get; set; } public bool Frozen { get; set; } public bool WatchOnly { get; set; } }
     private sealed class SendRec { public string Txid { get; set; } = ""; public long Amount { get; set; } public long Fee { get; set; } public string To { get; set; } = ""; public string Time { get; set; } = ""; public string RawHex { get; set; } = ""; }
     private sealed class Contact { public string Handle { get; set; } = ""; public string IdentityPub { get; set; } = ""; public string Note { get; set; } = ""; }
     private sealed class PayRequest { public string Address { get; set; } = ""; public long Amount { get; set; } public string Memo { get; set; } = ""; public string Time { get; set; } = ""; public string Expires { get; set; } = ""; }
@@ -44,6 +44,7 @@ public sealed class WalletView : UserControl
         public Dictionary<string, string> CoinLabels { get; set; } = new();// "txid:vout" -> user label
         public List<Vault> Vaults { get; set; } = new();                   // 2-of-2 multisig vaults (with recovery)
         public Dictionary<string, string> NftMints { get; set; } = new();  // sealedHex -> on-chain mint txid (provenance)
+        public List<string> WatchAddresses { get; set; } = new();          // watch-only addresses (balance only, never spendable)
     }
     private sealed class Vault
     {
@@ -1140,7 +1141,8 @@ public sealed class WalletView : UserControl
         sp.Children.Add(Lbl("Import"));
         var imp = new WrapPanel();
         var sweep = Btn("Sweep a private key (WIF)…"); sweep.Click += (_, _) => { if (Guard()) SweepWif(); };
-        imp.Children.Add(sweep);
+        var watch = Btn("Add a watch-only address…"); watch.Click += (_, _) => AddWatchAddress();
+        imp.Children.Add(sweep); imp.Children.Add(watch);
         sp.Children.Add(imp);
 
         sp.Children.Add(Lbl("Transactions"));
@@ -1196,8 +1198,9 @@ public sealed class WalletView : UserControl
 
     // Balance counts ONLY real, SPV-confirmed, unspent coins. Unconfirmed coins (detected-but-not-yet-mined
     // incoming, or our own in-flight change) are shown separately as PENDING and never counted as spendable.
-    private long Balance => _w.Utxos.Where(u => !u.Spent && u.Confirmed).Sum(u => u.Value);
-    private long Pending => _w.Utxos.Where(u => !u.Spent && !u.Confirmed).Sum(u => u.Value);
+    private long Balance => _w.Utxos.Where(u => !u.Spent && u.Confirmed && !u.WatchOnly).Sum(u => u.Value);
+    private long Pending => _w.Utxos.Where(u => !u.Spent && !u.Confirmed && !u.WatchOnly).Sum(u => u.Value);
+    private long WatchedBalance => _w.Utxos.Where(u => !u.Spent && u.Confirmed && u.WatchOnly).Sum(u => u.Value);
 
     /// <summary>
     /// Detect an INCOMING payment: scan a transaction's outputs for any that pay one of our receive keys and,
@@ -1268,6 +1271,8 @@ public sealed class WalletView : UserControl
             try { var pub = Secp256k1.PublicKeyCompressed(Convert.FromHexString(hex)); elems.Add(Hashes.Hash160(pub)); elems.Add(pub); } catch { }
         foreach (var v in _w.Vaults)                         // watch each 2-of-2 vault's P2SH script hash
             try { elems.Add(Chain.ScriptHash160(Convert.FromHexString(v.RedeemHex))); } catch { }
+        foreach (var addr in _w.WatchAddresses)              // watch-only external addresses (balance only)
+            try { var p = Base58.CheckDecode(addr); if (p.Length == 21) elems.Add(p[1..]); } catch { }
         return elems;
     }
 
@@ -1304,6 +1309,18 @@ public sealed class WalletView : UserControl
                         { u.Confirmed = true; changed = true; AppendTx("confirmed", u.Value, $"{u.Txid[..12]}…:{u.Vout} mined"); }
                     break;
                 }
+        // watch-only: credit (as unspendable, balance-only) any output paying a watched address, proven by SPV
+        foreach (var addr in _w.WatchAddresses)
+        {
+            byte[] h160; try { var p = Base58.CheckDecode(addr); if (p.Length != 21) continue; h160 = p[1..]; } catch { continue; }
+            for (uint v = 0; v < (uint)tx.Outs.Count; v++)
+            {
+                var wu = SpvFunding.VerifyWatchFromMerkleBlock(tx, v, merkleBlockPayload, chain, h160);
+                if (wu == null) continue;
+                if (!_w.Utxos.Any(u => u.Txid == wu.Txid && u.Vout == wu.Vout))
+                { _w.Utxos.Add(new UtxoRec { Txid = wu.Txid, Vout = wu.Vout, Value = wu.Value, Confirmed = true, WatchOnly = true }); changed = true; Notify($"Watch-only: {wu.Value:N0} sat seen on {addr}."); }
+            }
+        }
         // sweep: if an output of this proven tx pays an external key we're sweeping, move it into THIS wallet now
         SweepFromProvenTx(tx);
         if (changed) { Save(); Render(); }
@@ -1383,7 +1400,7 @@ public sealed class WalletView : UserControl
     {
         if (_locked) return (null, "🔒 Unlock the wallet first.");
         var w = new OnChainWallet(_seed);
-        foreach (var u in _w.Utxos.Where(u => !u.Spent)) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
+        foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.WatchOnly)) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
         if (w.Balance < value + fee) return (null, $"Insufficient sats: have {w.Balance:N0}, need {value + fee:N0}. Fund your wallet first.");
         try
         {
@@ -1600,7 +1617,7 @@ public sealed class WalletView : UserControl
         try
         {
             var wallet = new OnChainWallet(_seed);
-            foreach (var u in _w.Utxos.Where(u => !u.Spent)) wallet.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
+            foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.WatchOnly)) wallet.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
             var lockScript = Chain.P2pkhLock(destPayload[1..]);            // pay the destination's hash160
             var spend = wallet.BuildAction(lockScript, a, fee);
             if (!wallet.VerifySpend(spend)) { _status.Text = "Internal error: built transaction failed self-verification — not broadcast."; return; }
@@ -1874,7 +1891,7 @@ public sealed class WalletView : UserControl
             Outpoint = $"{u.Txid[..Math.Min(12, u.Txid.Length)]}…:{u.Vout}",
             Address = AddressForKey(u.KeyChain, u.KeyIndex),
             Value = u.Value.ToString("N0"),
-            Status = u.Spent ? "spent" : (u.Confirmed ? "confirmed" : "pending"),
+            Status = u.WatchOnly ? "watch-only" : (u.Spent ? "spent" : (u.Confirmed ? "confirmed" : "pending")),
             Frozen = u.Frozen ? "❄" : "",
             Label = _w.CoinLabels.TryGetValue($"{u.Txid}:{u.Vout}", out var cl) ? cl : "",
             FullOutpoint = $"{u.Txid}:{u.Vout}",
@@ -1914,7 +1931,7 @@ public sealed class WalletView : UserControl
     {
         if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(new Action(UpdateStatusBar)); return; }
         if (_locked) { _sbBalance.Text = "🔒 locked"; _sbLock.Text = "🔒 locked"; _sbNetwork.Text = $"{_net().Network}"; return; }
-        _sbBalance.Text = $"{Balance:N0} sat" + (Pending > 0 ? $"  (+{Pending:N0} pending)" : "");
+        _sbBalance.Text = $"{Balance:N0} sat" + (Pending > 0 ? $"  (+{Pending:N0} pending)" : "") + (WatchedBalance > 0 ? $"  [watch {WatchedBalance:N0}]" : "");
         _sbLock.Text = "🔓 unlocked";
         var node = _node();
         _sbNetwork.Text = $"{_net().Network}  ·  SPV peers: {(node?.PeerCount ?? 0)}";
@@ -2067,7 +2084,7 @@ public sealed class WalletView : UserControl
         try
         {
             var w = new OnChainWallet(_seed);
-            foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.Frozen && u.Confirmed)) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
+            foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.Frozen && u.Confirmed && !u.WatchOnly)) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
             var spend = w.BuildActionMany(outputs.Select(o => (o.Lock, o.Value)).ToList(), fee);
             if (!w.VerifySpend(spend)) { _sendStatus.Text = "Built transaction failed self-verification — not broadcast."; return; }
             node.Broadcast(Chain.Serialize(spend.Tx));
@@ -2102,7 +2119,7 @@ public sealed class WalletView : UserControl
         try
         {
             var w = new OnChainWallet(_seed);
-            foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.Frozen && u.Confirmed)) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
+            foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.Frozen && u.Confirmed && !u.WatchOnly)) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
             var spend = w.BuildAction(resolved.Value.Lock, amount, fee);
             rawHex = Convert.ToHexString(Chain.Serialize(spend.Tx)).ToLowerInvariant();
         }
@@ -2256,6 +2273,27 @@ public sealed class WalletView : UserControl
 
     // ============================ Sweep an external private key (WIF) ============================
 
+    private void AddWatchAddress()
+    {
+        var box = new TextBox { Width = 380, FontFamily = new FontFamily("Consolas") }; ThemeOne(box);
+        var ok = new Button { Content = "Watch", Margin = new Thickness(0, 8, 0, 0), Padding = new Thickness(10, 6, 10, 6) };
+        var win = new Window { Title = "Add a watch-only address", Width = 440, Height = 160, Owner = Window.GetWindow(this), Background = WinBg, Content = new StackPanel { Margin = new Thickness(12), Children = { new TextBlock { Text = "Address to watch (balance only, never spendable):", Foreground = Ink }, box, ok } } };
+        ok.Click += (_, _) =>
+        {
+            try
+            {
+                var a = box.Text.Trim(); var p = Base58.CheckDecode(a);
+                if (p.Length != 21) { MessageBox.Show("Invalid address."); return; }
+                if (!_w.WatchAddresses.Contains(a)) _w.WatchAddresses.Add(a);
+                Save(); RescanRequested?.Invoke(); Render();
+                _status.Text = $"Watching {a} (rescanning).";
+                win.Close();
+            }
+            catch (Exception ex) { MessageBox.Show("Bad address: " + ex.Message); }
+        };
+        win.ShowDialog();
+    }
+
     private void SweepWif()
     {
         var box = new TextBox { Width = 420, FontFamily = new FontFamily("Consolas") };
@@ -2315,7 +2353,7 @@ public sealed class WalletView : UserControl
             if (confirm != MessageBoxResult.Yes) { _sendStatus.Text = "Invoice cancelled."; return; }
 
             var w = new OnChainWallet(_seed);
-            foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.Frozen && u.Confirmed)) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
+            foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.Frozen && u.Confirmed && !u.WatchOnly)) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
             var spend = w.BuildActionMany(pr.Outputs.Select(o => (o.Script, o.Amount)).ToList(), fee);
             if (!w.VerifySpend(spend)) { _sendStatus.Text = "Built invoice tx failed self-verification — not sent."; return; }
             var rawHex = Convert.ToHexString(Chain.Serialize(spend.Tx)).ToLowerInvariant();

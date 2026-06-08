@@ -47,6 +47,18 @@ public static class SpvFunding
     /// </summary>
     public static OnChainWallet.Utxo? VerifyFromMerkleBlock(Chain.Tx fundTx, uint vout, byte[] merkleBlockPayload,
         HeadersChain chain, byte[] myPub33, uint keyChain, uint keyIndex)
+        => VerifyByScript(fundTx, vout, merkleBlockPayload, chain, Chain.P2pkhLockForPub(myPub33), keyChain, keyIndex);
+
+    /// <summary>
+    /// Verify a payment to a WATCH-ONLY address (we hold only its hash160, no key): same proof check, but the
+    /// output must pay P2PKH(hash160). Returns the UTXO (caller flags it watch-only / unspendable) or null.
+    /// </summary>
+    public static OnChainWallet.Utxo? VerifyWatchFromMerkleBlock(Chain.Tx fundTx, uint vout, byte[] merkleBlockPayload,
+        HeadersChain chain, byte[] hash160)
+        => VerifyByScript(fundTx, vout, merkleBlockPayload, chain, Chain.P2pkhLock(hash160), 0, 0);
+
+    private static OnChainWallet.Utxo? VerifyByScript(Chain.Tx fundTx, uint vout, byte[] merkleBlockPayload,
+        HeadersChain chain, byte[] expectedScript, uint keyChain, uint keyIndex)
     {
         try
         {
@@ -59,8 +71,7 @@ public static class SpvFunding
             // the funding tx must be one of the proven (matched) leaves
             var txid = Hashes.Sha256d(Chain.Serialize(fundTx)); // internal byte order
             if (!parsed.Matched.Any(m => m.Txid.AsSpan().SequenceEqual(txid))) return null;
-            var expected = Chain.P2pkhLockForPub(myPub33);
-            if (!fundTx.Outs[(int)vout].Script.AsSpan().SequenceEqual(expected)) return null; // must pay our key
+            if (!fundTx.Outs[(int)vout].Script.AsSpan().SequenceEqual(expectedScript)) return null; // must pay the expected script
             return new OnChainWallet.Utxo(Chain.Txid(fundTx), vout, fundTx.Outs[(int)vout].Value, keyChain, keyIndex);
         }
         catch { return null; }
