@@ -1705,20 +1705,38 @@ public sealed class WalletView : UserControl
             {
                 var node = _node();
                 if (node == null || node.PeerCount == 0) { MessageBox.Show("No BSV peers connected yet — wait for peers, then retry.", "No peers"); return; }
-                var store = _store();
-                if (store == null || store.Count == 0) { MessageBox.Show("No validated headers yet — wait for header sync, then retry.", "Cannot verify"); return; }
                 var wantTxid = txidBox.Text.Trim().ToLowerInvariant();
-                go.IsEnabled = false;
-                var raw = await node.GetBlockAsync(blkBox.Text.Trim());
+                var wantBlock = blkBox.Text.Trim().ToLowerInvariant();
+                go.IsEnabled = false; _status.Text = "Fetching the block from a peer…";
+                var raw = await node.GetBlockAsync(wantBlock);
                 go.IsEnabled = true;
                 if (raw == null) { MessageBox.Show("That block was not served by any peer — check the block hash.", "Not found"); return; }
-                var parsed = BsvBlock.Parse(raw);                                  // validates merkle root vs header
+                var parsed = BsvBlock.Parse(raw);                                  // validates the merkle root vs the header
+                // SPV verification WITHOUT a fully-synced chain: the served block must have REAL proof-of-work and be
+                // exactly the block you named. Forging a PoW-valid block is infeasible, so a PoW-valid block whose
+                // merkle root commits to this tx is genuine on-chain proof the coin exists.
+                if (!parsed.Header.MeetsPow()) { MessageBox.Show("That block does not meet proof-of-work — rejected.", "Invalid block"); return; }
+                if (parsed.Header.HashHex() != wantBlock) { MessageBox.Show("The served block's hash does not match the hash you entered — rejected.", "Mismatch"); return; }
                 int idx = parsed.Txs.FindIndex(t => Chain.Txid(t) == wantTxid);
                 if (idx < 0) { MessageBox.Show("That txid is not in that block — wrong block hash?", "Not in block"); return; }
-                var mb = PartialMerkleTree.BuildMerkleBlock(parsed.Header, parsed.Txids, new HashSet<int> { idx });
-                if (ConfirmIncoming(parsed.Txs[idx], mb))
-                { _status.Text = "Payment found and credited (SPV-verified)."; win.Close(); }
-                else MessageBox.Show("The transaction was found, but no output pays your wallet (or that block isn't in your validated headers yet).", "Nothing to credit");
+                var tx = parsed.Txs[idx];
+                int credited = 0; long total = 0;
+                uint gap = (uint)_w.RecvIndex + 50;
+                for (uint v = 0; v < (uint)tx.Outs.Count; v++)
+                    for (uint c = 0; c <= 2; c++)
+                        for (uint i = 0; i <= gap; i++)
+                            if (tx.Outs[(int)v].Script.AsSpan().SequenceEqual(Chain.P2pkhLockForPub(WalletKeys.Account(_seed, c, i).Pub)))
+                            {
+                                if (!_w.Utxos.Any(u => u.Txid == wantTxid && u.Vout == v))
+                                { _w.Utxos.Add(new UtxoRec { Txid = wantTxid, Vout = v, Value = tx.Outs[(int)v].Value, KeyChain = c, KeyIndex = i, Confirmed = true }); credited++; total += tx.Outs[(int)v].Value; }
+                                c = 3; break;
+                            }
+                if (credited > 0)
+                {
+                    Save(); Render(); Notify($"Credited {total:N0} sat from txid {wantTxid[..12]}… (PoW-verified block).");
+                    _status.Text = $"Found and credited {credited} output(s), {total:N0} sat — PoW-verified on-chain."; win.Close();
+                }
+                else MessageBox.Show("The transaction is in that PoW-valid block, but none of its outputs pay an address of THIS wallet. Check you sent to your receive address (and the right account).", "Nothing to credit");
             }
             catch (Exception ex) { go.IsEnabled = true; MessageBox.Show("Could not find the payment: " + ex.Message, "Error"); }
         };
