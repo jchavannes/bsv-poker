@@ -1741,7 +1741,23 @@ public sealed class WalletView : UserControl
         if (resolved == null) return;
         if (!long.TryParse(_amount.Text, out var amount) || amount <= 0) { _sendStatus.Text = "Enter a positive amount (sat)."; return; }
         long fee = EstimateFee(1);
-        MessageBox.Show($"Pay to: {resolved.Value.Dest}\nAmount: {amount:N0} sat\nFee: {fee:N0} sat\nTotal: {amount + fee:N0} sat\nFrom balance: {Balance:N0} sat\n\nLabel: {_sendLabel.Text}", "Preview payment");
+        // build the REAL signed transaction (without broadcasting) so the user can inspect and copy it
+        string rawHex = "(built on Send)";
+        try
+        {
+            var w = new OnChainWallet(_seed);
+            foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.Frozen && u.Confirmed)) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
+            var spend = w.BuildAction(resolved.Value.Lock, amount, fee);
+            rawHex = Convert.ToHexString(Chain.Serialize(spend.Tx)).ToLowerInvariant();
+        }
+        catch (Exception ex) { rawHex = "(could not build: " + ex.Message + ")"; }
+
+        var info = new TextBox { IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, FontFamily = new FontFamily("Consolas"), Background = FieldBg, Foreground = Ink, BorderThickness = new Thickness(0),
+            Text = $"Pay to: {resolved.Value.Dest}\nAmount: {amount:N0} sat\nFee: {fee:N0} sat\nTotal: {amount + fee:N0} sat\nFrom balance: {Balance:N0} sat\nLabel: {_sendLabel.Text}\n\nRaw transaction (hex):\n{rawHex}" };
+        var copy = new Button { Content = "Copy raw tx", Margin = new Thickness(0, 8, 8, 0), Padding = new Thickness(10, 6, 10, 6) };
+        copy.Click += (_, _) => CopyToClipboard(rawHex, "Raw transaction copied.");
+        var sp = new StackPanel { Margin = new Thickness(12) }; sp.Children.Add(info); sp.Children.Add(copy);
+        new Window { Title = "Preview payment", Width = 560, Height = 360, Owner = Window.GetWindow(this), Background = WinBg, Content = new ScrollViewer { Content = sp } }.ShowDialog();
     }
 
     private void PasteUri()
