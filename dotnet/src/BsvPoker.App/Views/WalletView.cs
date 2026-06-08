@@ -713,9 +713,11 @@ public sealed class WalletView : UserControl
         add.Children.Add(addBtn);
         sp.Children.Add(add);
         var ops = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
-        var pay = Btn("Pay this contact…"); pay.Click += (_, _) => { if (_contactsGrid.SelectedItem != null) { _sendPayTo.Text = "@" + PropOf(_contactsGrid.SelectedItem, "Handle"); _tabs.SelectedIndex = 0; } };
+        var pay = Btn("Pay this contact…"); pay.Click += (_, _) => { if (_contactsGrid.SelectedItem != null) { _sendPayTo.Text = "@" + PropOf(_contactsGrid.SelectedItem, "Handle"); SelectTab("Send"); _amount.Focus(); } };
+        var msg = Btn("Message (encrypt)…"); msg.Click += (_, _) => { if (Guard() && _contactsGrid.SelectedItem != null) EncryptMessageDialog("@" + PropOf(_contactsGrid.SelectedItem, "Handle")); };
+        var copyKey = Btn("Copy identity key"); copyKey.Click += (_, _) => { if (_contactsGrid.SelectedItem != null) CopyToClipboard(PropOf(_contactsGrid.SelectedItem, "IdentityPub"), "Identity key copied."); };
         var del = Btn("Delete"); del.Click += (_, _) => { if (_contactsGrid.SelectedItem != null) { var h = PropOf(_contactsGrid.SelectedItem, "Handle"); _w.Contacts.RemoveAll(c => c.Handle == h); Save(); Render(); } };
-        ops.Children.Add(pay); ops.Children.Add(del);
+        ops.Children.Add(pay); ops.Children.Add(msg); ops.Children.Add(copyKey); ops.Children.Add(del);
         sp.Children.Add(ops);
         return Scroll(sp);
     }
@@ -799,6 +801,7 @@ public sealed class WalletView : UserControl
     }
 
     private static string PropOf(object o, string p) => o.GetType().GetProperty(p)!.GetValue(o)?.ToString() ?? "";
+    private void SelectTab(string header) { foreach (var it in _tabs.Items) if (it is TabItem ti && (string)ti.Header == header) { _tabs.SelectedItem = ti; return; } }
 
     // ---- real on-chain funding & spending ----
 
@@ -1687,15 +1690,15 @@ public sealed class WalletView : UserControl
 
     private void PasteUri()
     {
-        try { var t = Clipboard.GetText(); if (!string.IsNullOrWhiteSpace(t)) { _sendPayTo.Text = t.Trim(); _tabs.SelectedIndex = 0; _sendStatus.Text = "Pasted from clipboard — review and Send."; } }
+        try { var t = Clipboard.GetText(); if (!string.IsNullOrWhiteSpace(t)) { _sendPayTo.Text = t.Trim(); SelectTab("Send"); _sendStatus.Text = "Pasted from clipboard — review and Send."; } }
         catch { _sendStatus.Text = "Nothing to paste."; }
     }
 
     // ============================ Encrypt / decrypt a message (ECIES to an identity) ============================
 
-    private void EncryptMessageDialog()
+    private void EncryptMessageDialog(string prefillTo = "")
     {
-        var to = new TextBox { Width = 520, FontFamily = new FontFamily("Consolas") };
+        var to = new TextBox { Width = 520, FontFamily = new FontFamily("Consolas"), Text = prefillTo };
         var msg = new TextBox { Width = 520, Height = 80, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap };
         var outp = new TextBox { Width = 520, Height = 90, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, IsReadOnly = true, FontFamily = new FontFamily("Consolas") };
         var go = new Button { Content = "Encrypt", Margin = new Thickness(0, 8, 0, 0), Padding = new Thickness(10, 6, 10, 6) };
@@ -1933,7 +1936,7 @@ public sealed class WalletView : UserControl
                 picked.AddRange(_w.Utxos.Where(u => u.Txid == parts[0] && u.Vout == vout && !u.Spent));
         }
         if (picked.Count == 0) { _status.Text = "Select one or more coins to spend."; return; }
-        _tabs.SelectedIndex = 0;
+        SelectTab("Send");
         _amount.Text = Math.Max(0, picked.Sum(u => u.Value) - EstimateFee(1)).ToString();
         _sendStatus.Text = $"{picked.Count} coin(s) selected ({picked.Sum(u => u.Value):N0} sat). Enter who to pay and Send.";
     }
