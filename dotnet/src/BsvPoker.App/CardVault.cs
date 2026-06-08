@@ -32,7 +32,14 @@ public sealed class CardVault
         return s;
     }
 
-    public void AddSealed(string sealedHex) { _sealed.Add(sealedHex); Save(); }
+    public void AddSealed(string sealedHex) { if (!_sealed.Contains(sealedHex)) { _sealed.Add(sealedHex); Save(); } }
+
+    /// <summary>Remove a sealed NFT blob (e.g. after transferring its ownership to someone else).</summary>
+    public bool Remove(string sealedHex) { var ok = _sealed.Remove(sealedHex); if (ok) Save(); return ok; }
+
+    /// <summary>My identity public/private key — NFTs are sealed to the identity; used for transfer.</summary>
+    public byte[] IdentityPub => _pub;
+    public byte[] IdentityPriv => _priv;
 
     /// <summary>The cards I currently own as NFTs (decrypted with my key for display).</summary>
     public IReadOnlyList<(Card Card, string Sealed)> Owned()

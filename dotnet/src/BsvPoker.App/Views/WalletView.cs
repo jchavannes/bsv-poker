@@ -768,7 +768,68 @@ public sealed class WalletView : UserControl
         sp.Children.Add(H("NFTs / tokens"));
         sp.Children.Add(_cardsLabel);
         sp.Children.Add(_cards);
+        var row = new WrapPanel { Margin = new Thickness(0, 10, 0, 0) };
+        var transfer = Btn("Transfer an NFT to an identity…"); transfer.Click += (_, _) => { if (Guard()) TransferNft(); };
+        var import = Btn("Import an NFT (sealed blob)…"); import.Click += (_, _) => { if (Guard()) ImportNft(); };
+        row.Children.Add(transfer); row.Children.Add(import);
+        sp.Children.Add(row);
         return Scroll(sp);
+    }
+
+    private void TransferNft()
+    {
+        var owned = _vault.Owned();
+        if (owned.Count == 0) { _status.Text = "You hold no NFTs to transfer."; return; }
+        var pick = new ComboBox { Width = 200 }; foreach (var (c, _) in owned) pick.Items.Add(c.ToString()); pick.SelectedIndex = 0;
+        pick.Background = FieldBg; pick.Foreground = Ink;
+        var to = new TextBox { Width = 520, FontFamily = new FontFamily("Consolas") }; ThemeOne(to);
+        var outp = new TextBox { Width = 520, Height = 70, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, FontFamily = new FontFamily("Consolas"), Background = FieldBg, Foreground = Accent, BorderBrush = Line, BorderThickness = new Thickness(1) };
+        var go = new Button { Content = "Transfer", Margin = new Thickness(0, 8, 0, 0), Padding = new Thickness(10, 6, 10, 6) };
+        var sp = new StackPanel { Margin = new Thickness(12) };
+        sp.Children.Add(new TextBlock { Text = "NFT to transfer:", Foreground = Ink }); sp.Children.Add(pick);
+        sp.Children.Add(new TextBlock { Text = "Recipient identity (@handle or identity pubkey hex):", Foreground = Ink, Margin = new Thickness(0, 8, 0, 0) }); sp.Children.Add(to);
+        sp.Children.Add(go);
+        sp.Children.Add(new TextBlock { Text = "Transferred NFT blob — give it to the recipient to import:", Foreground = SubInk, Margin = new Thickness(0, 8, 0, 0) }); sp.Children.Add(outp);
+        var win = new Window { Title = "Transfer NFT", Width = 580, Height = 360, Owner = Window.GetWindow(this), Background = WinBg, Content = new ScrollViewer { Content = sp } };
+        go.Click += (_, _) =>
+        {
+            try
+            {
+                var raw = to.Text.Trim();
+                if (raw.StartsWith("@")) { var c = _w.Contacts.FirstOrDefault(x => string.Equals(x.Handle, raw[1..], StringComparison.OrdinalIgnoreCase)); if (c == null) { MessageBox.Show("Unknown contact."); return; } raw = c.IdentityPub; }
+                var toPub = Convert.FromHexString(raw);
+                if (!Secp256k1.IsValidPoint(toPub)) { MessageBox.Show("Bad recipient key."); return; }
+                var (_, sealedHex) = owned[pick.SelectedIndex];
+                var transferred = CardNft.Transfer(sealedHex, _identityPriv, toPub);   // re-seal to the recipient
+                _vault.Remove(sealedHex);                                                // ownership leaves our vault
+                RefreshCards();
+                outp.Text = transferred;
+                CopyToClipboard(transferred, "Transferred NFT blob copied — give it to the recipient.");
+            }
+            catch (Exception ex) { MessageBox.Show("Transfer failed: " + ex.Message); }
+        };
+        win.ShowDialog();
+    }
+
+    private void ImportNft()
+    {
+        var box = new TextBox { Width = 520, Height = 70, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, FontFamily = new FontFamily("Consolas") }; ThemeOne(box);
+        var go = new Button { Content = "Import", Margin = new Thickness(0, 8, 0, 0), Padding = new Thickness(10, 6, 10, 6) };
+        var sp = new StackPanel { Margin = new Thickness(12) };
+        sp.Children.Add(new TextBlock { Text = "Paste a sealed NFT blob addressed to your identity:", Foreground = Ink }); sp.Children.Add(box); sp.Children.Add(go);
+        var win = new Window { Title = "Import NFT", Width = 580, Height = 220, Owner = Window.GetWindow(this), Background = WinBg, Content = new ScrollViewer { Content = sp } };
+        go.Click += (_, _) =>
+        {
+            try
+            {
+                var blob = box.Text.Trim();
+                if (!CardNft.CanOpen(blob, _identityPriv)) { MessageBox.Show("That NFT is not sealed to your identity (you can't open it)."); return; }
+                _vault.AddSealed(blob); RefreshCards();
+                _status.Text = "NFT imported."; win.Close();
+            }
+            catch (Exception ex) { MessageBox.Show("Import failed: " + ex.Message); }
+        };
+        win.ShowDialog();
     }
 
     // ---- IDENTITY: your Base ID key (login/handle), master public key, what it is ----
