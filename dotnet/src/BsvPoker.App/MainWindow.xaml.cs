@@ -140,6 +140,7 @@ public partial class MainWindow : Window
         var myHex = Convert.ToHexString(_profile.IdentityPub).ToLowerInvariant();
         bot.AddPeer(myHex, MyEndpoint());                  // the bot knows how to reach us
         _gossip?.AddSeed(bot.PubHex, bot.Endpoint);        // we know how to reach the bot
+        _wallet.ImportContact(bot.Name, bot.PubHex);       // add the bot to the address book so it's named everywhere
         var win = new BotWindow(bot) { Owner = this };
         _bots.Add(bot); _botWindows.Add(win);
         win.Closed += (_, _) => { _bots.Remove(bot); _botWindows.Remove(win); UpdateNetInfo(); };
