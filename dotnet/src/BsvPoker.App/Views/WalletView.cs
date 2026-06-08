@@ -57,20 +57,21 @@ public sealed class WalletView : UserControl
     private readonly Func<HeaderStore?> _store;     // current network's validated header store (for SPV verification)
     private readonly Func<NetworkParams> _net;      // current network parameters (address version, etc.)
 
-    private readonly TextBlock _bal = new() { Foreground = Brushes.White, FontSize = 28, FontWeight = FontWeights.Bold };
+    private readonly TextBlock _bal = new() { Foreground = new SolidColorBrush(Color.FromRgb(0x7C, 0xE0, 0x7C)), FontSize = 16, FontWeight = FontWeights.Bold };
     // a read-only, SELECTABLE text box (not a TextBlock) so the address can be clicked, selected, and Ctrl+C'd
-    private readonly TextBox _recv = new() { IsReadOnly = true, IsReadOnlyCaretVisible = true, Foreground = Brushes.LightGreen, Background = Brushes.Transparent, BorderThickness = new Thickness(0), FontFamily = new FontFamily("Consolas"), TextWrapping = TextWrapping.Wrap, HorizontalAlignment = HorizontalAlignment.Left, Width = 580 };
-    private readonly ListView _history = new() { Background = new SolidColorBrush(Color.FromRgb(0x0F, 0x0F, 0x0F)), Foreground = Brushes.White, BorderThickness = new Thickness(0), Height = 200 };
-    private readonly TextBox _amount = new() { Width = 110, Text = "10000" };
-    private readonly TextBox _fee = new() { Width = 70, Text = "500" };
+    private readonly TextBox _recv = new() { IsReadOnly = true, IsReadOnlyCaretVisible = true, Foreground = new SolidColorBrush(Color.FromRgb(0x7C, 0xE0, 0x7C)), Background = new SolidColorBrush(Color.FromRgb(0x1E, 0x1E, 0x1E)), BorderBrush = new SolidColorBrush(Color.FromRgb(0x3A, 0x3A, 0x3A)), BorderThickness = new Thickness(1), Padding = new Thickness(4, 3, 4, 3), FontFamily = new FontFamily("Consolas"), TextWrapping = TextWrapping.Wrap, HorizontalAlignment = HorizontalAlignment.Left, Width = 560 };
+    private readonly ListView _history = new() { Height = 200 };
+    private readonly TextBox _amount = new() { Width = 150, Text = "0" };
+    private readonly TextBox _fee = new() { Width = 90, Text = "500" };
     private readonly TextBox _dest = new() { Width = 300 };
-    private readonly TextBlock _status = new() { Foreground = Brushes.Gray, Margin = new Thickness(0, 6, 0, 0), TextWrapping = TextWrapping.Wrap };
+    private readonly TextBlock _status = new() { Foreground = new SolidColorBrush(Color.FromRgb(0x33, 0x33, 0x33)), Margin = new Thickness(0, 6, 0, 0), TextWrapping = TextWrapping.Wrap };
     private readonly CardVault _vault;
     private readonly WrapPanel _cards = new() { Margin = new Thickness(0, 4, 0, 0) };
     private readonly TextBlock _cardsLabel = new() { Foreground = Brushes.Gray, Margin = new Thickness(0, 14, 0, 2), Text = "My cards (NFTs)" };
 
     // ---- ElectrumSV-style tabbed UI state ----
     private KeyRing _ring = null!;                                  // hash-chained Type-42 key ring over the master seed
+    private bool _freshWallet;                                      // true when Load() had to create a brand-new wallet
     private readonly TabControl _tabs = new() { Background = new SolidColorBrush(Color.FromRgb(0x12, 0x12, 0x12)), Foreground = Brushes.White, BorderThickness = new Thickness(0) };
     private readonly TextBox _sendPayTo = new() { Width = 520, FontFamily = new FontFamily("Consolas"), AcceptsReturn = true, Height = 56, TextWrapping = TextWrapping.Wrap, ToolTip = "An address, an identity handle (@bob), an identity pubkey (hex), or a bitcoin:/pay: URI" };
     private readonly TextBox _sendLabel = new() { Width = 520 };
@@ -78,73 +79,226 @@ public sealed class WalletView : UserControl
     private readonly TextBlock _sendStatus = new() { Foreground = Brushes.Gray, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 8, 0, 0) };
     private readonly TextBox _reqAmount = new() { Width = 160, Text = "0" };
     private readonly TextBox _reqMemo = new() { Width = 320 };
-    private readonly TextBox _reqUri = new() { Width = 520, IsReadOnly = true, FontFamily = new FontFamily("Consolas"), TextWrapping = TextWrapping.Wrap, Background = Brushes.Transparent, Foreground = Brushes.LightGreen, BorderThickness = new Thickness(0) };
+    private readonly TextBox _reqUri = new() { Width = 520, IsReadOnly = true, FontFamily = new FontFamily("Consolas"), TextWrapping = TextWrapping.Wrap, Background = new SolidColorBrush(Color.FromRgb(0x1E, 0x1E, 0x1E)), Foreground = new SolidColorBrush(Color.FromRgb(0x7C, 0xE0, 0x7C)), BorderBrush = new SolidColorBrush(Color.FromRgb(0x3A, 0x3A, 0x3A)), BorderThickness = new Thickness(1), Padding = new Thickness(4, 3, 4, 3) };
     private readonly System.Windows.Controls.Image _reqQr = new() { Width = 220, Height = 220, Margin = new Thickness(0, 8, 0, 0), HorizontalAlignment = HorizontalAlignment.Left, Stretch = Stretch.None };
     private readonly DataGrid _historyGrid = NewGrid();
     private readonly DataGrid _coinsGrid = NewGrid();
     private readonly DataGrid _addrGrid = NewGrid();
     private readonly DataGrid _contactsGrid = NewGrid();
     private readonly DataGrid _requestsGrid = NewGrid();
-    private readonly TextBlock _idPub = new() { Foreground = Brushes.LightGreen, FontFamily = new FontFamily("Consolas"), TextWrapping = TextWrapping.Wrap };
+    private readonly TextBlock _idPub = new() { Foreground = new SolidColorBrush(Color.FromRgb(0x7C, 0xE0, 0x7C)), FontFamily = new FontFamily("Consolas"), TextWrapping = TextWrapping.Wrap };
     private readonly TextBox _idHandle = new() { Width = 240 };
 
     private static DataGrid NewGrid() => new()
     {
-        AutoGenerateColumns = false, IsReadOnly = false, CanUserAddRows = false, CanUserDeleteRows = false,
-        Background = new SolidColorBrush(Color.FromRgb(0x0F, 0x0F, 0x0F)), Foreground = Brushes.White,
-        RowBackground = new SolidColorBrush(Color.FromRgb(0x16, 0x16, 0x16)), AlternatingRowBackground = new SolidColorBrush(Color.FromRgb(0x1C, 0x1C, 0x1C)),
+        AutoGenerateColumns = false, IsReadOnly = true, CanUserAddRows = false, CanUserDeleteRows = false, CanUserSortColumns = true,
+        Background = new SolidColorBrush(Color.FromRgb(0x14, 0x14, 0x14)), Foreground = new SolidColorBrush(Color.FromRgb(0xEC, 0xEC, 0xEC)),
+        RowBackground = new SolidColorBrush(Color.FromRgb(0x18, 0x18, 0x18)), AlternatingRowBackground = new SolidColorBrush(Color.FromRgb(0x20, 0x20, 0x20)),
         GridLinesVisibility = DataGridGridLinesVisibility.Horizontal, HeadersVisibility = DataGridHeadersVisibility.Column,
-        BorderThickness = new Thickness(0), FontFamily = new FontFamily("Consolas"), FontSize = 12, SelectionMode = DataGridSelectionMode.Extended,
+        BorderBrush = new SolidColorBrush(Color.FromRgb(0x3A, 0x3A, 0x3A)), BorderThickness = new Thickness(1),
+        FontFamily = new FontFamily("Consolas"), FontSize = 12, SelectionMode = DataGridSelectionMode.Extended, RowHeaderWidth = 0,
     };
 
     public WalletView(string dataDir, CardVault vault, Func<BsvNode?> node, Func<HeaderStore?> store, Func<NetworkParams> net)
     {
         _vault = vault; _node = node; _store = store; _net = net;
-        Background = new SolidColorBrush(Color.FromRgb(0x0D, 0x0D, 0x0D)); // dark behind light text (no white-on-white)
-        Foreground = Brushes.White;
+        Background = WinBg;                                  // ElectrumSVP-style LIGHT theme (not dark)
+        Foreground = Ink;
         Directory.CreateDirectory(dataDir);
         _path = Path.Combine(dataDir, "wallet.json");
         Load();
 
         if (_seed.Length == 32) _ring = new KeyRing(_seed, Math.Max(1, _w.RecvIndex));
 
-        // Top bar: title + live balance, then a TabControl that IS the wallet (ElectrumSV-style sub-tabs).
-        var titleBar = new DockPanel { Margin = new Thickness(14, 12, 14, 4), LastChildFill = false };
-        var title = new TextBlock { Text = "Wallet", FontSize = 20, FontWeight = FontWeights.Bold, Foreground = Brushes.White, VerticalAlignment = VerticalAlignment.Center };
-        DockPanel.SetDock(title, Dock.Left); titleBar.Children.Add(title);
-        var balPanel = new StackPanel { Orientation = Orientation.Horizontal };
-        balPanel.Children.Add(new TextBlock { Text = "Balance: ", Foreground = Brushes.Gray, VerticalAlignment = VerticalAlignment.Center, FontSize = 16 });
-        _bal.FontSize = 20; balPanel.Children.Add(_bal);
-        DockPanel.SetDock(balPanel, Dock.Right); titleBar.Children.Add(balPanel);
+        // Menu bar (ElectrumSVP: File / Wallet / Account / View / Tools / Help)
+        var menu = BuildMenuBar();
 
+        // Tabs in ElectrumSVP order: History | Transactions | Send | Receive | Notifications | Destinations |
+        // Coins (UTXOs) | Console — plus our Contacts / Identity (kept for the identity-payment features).
+        _tabs.Items.Add(new TabItem { Header = "History", Content = BuildHistoryTab() });
+        _tabs.Items.Add(new TabItem { Header = "Transactions", Content = BuildTransactionsTab() });
         _tabs.Items.Add(new TabItem { Header = "Send", Content = BuildSendTab() });
         _tabs.Items.Add(new TabItem { Header = "Receive", Content = BuildReceiveTab() });
-        _tabs.Items.Add(new TabItem { Header = "History", Content = BuildHistoryTab() });
-        _tabs.Items.Add(new TabItem { Header = "Coins", Content = BuildCoinsTab() });
-        _tabs.Items.Add(new TabItem { Header = "Addresses", Content = BuildAddressesTab() });
+        _tabs.Items.Add(new TabItem { Header = "Notifications", Content = BuildNotificationsTab() });
+        _tabs.Items.Add(new TabItem { Header = "Destinations", Content = BuildAddressesTab() });
+        _tabs.Items.Add(new TabItem { Header = "Coins (UTXOs)", Content = BuildCoinsTab() });
         _tabs.Items.Add(new TabItem { Header = "Contacts", Content = BuildContactsTab() });
-        _tabs.Items.Add(new TabItem { Header = "NFTs", Content = BuildNftTab() });
         _tabs.Items.Add(new TabItem { Header = "Identity", Content = BuildIdentityTab() });
-        _tabs.Items.Add(new TabItem { Header = "Tools", Content = BuildToolsTab() });
+        _tabs.Items.Add(new TabItem { Header = "NFTs", Content = BuildNftTab() });
+        _tabs.Items.Add(new TabItem { Header = "Console", Content = BuildToolsTab() });
+        _tabs.SelectedIndex = 2; // open on Send like ElectrumSVP shows the wallet ready to use
         _tabs.SelectionChanged += (_, _) => Render();
 
         var rootGrid = new Grid();
-        rootGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        rootGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        rootGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        Grid.SetRow(titleBar, 0); rootGrid.Children.Add(titleBar);
+        rootGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // menu
+        rootGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); // tabs
+        rootGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // status bar
+        Grid.SetRow(menu, 0); rootGrid.Children.Add(menu);
         Grid.SetRow(_tabs, 1); rootGrid.Children.Add(_tabs);
-        var statusBar = new Border { Background = new SolidColorBrush(Color.FromRgb(0x16, 0x16, 0x16)), Padding = new Thickness(12, 4, 12, 4), Child = _status };
-        _status.Margin = new Thickness(0); Grid.SetRow(statusBar, 2); rootGrid.Children.Add(statusBar);
+        Grid.SetRow(BuildStatusBar(), 2); rootGrid.Children.Add(BuildStatusBar());
         Content = rootGrid;
         Render();
+
+        // First run: walk the user through the ElectrumSVP-style account wizard (create / restore / import).
+        if (_freshWallet) Loaded += (_, _) => { if (_freshWallet) { _freshWallet = false; AccountWizard(); } };
     }
 
-    // ============================ ElectrumSV-style tabs ============================
+    // ---- DARK theme palette (matches the poker app; ElectrumSVP STRUCTURE on a dark skin) ----
+    private static readonly SolidColorBrush WinBg = new(Color.FromRgb(0x0D, 0x0D, 0x0D));   // window
+    private static readonly SolidColorBrush PanelBg = new(Color.FromRgb(0x16, 0x16, 0x16)); // panels
+    private static readonly SolidColorBrush FieldBg = new(Color.FromRgb(0x1E, 0x1E, 0x1E)); // inputs
+    private static readonly SolidColorBrush Ink = new(Color.FromRgb(0xEC, 0xEC, 0xEC));     // text
+    private static readonly SolidColorBrush SubInk = new(Color.FromRgb(0xAA, 0xAA, 0xAA));  // labels
+    private static readonly SolidColorBrush Line = new(Color.FromRgb(0x3A, 0x3A, 0x3A));    // borders
+    private static readonly SolidColorBrush Accent = new(Color.FromRgb(0x7C, 0xE0, 0x7C));  // money green
+    static WalletView() { WinBg.Freeze(); PanelBg.Freeze(); FieldBg.Freeze(); Ink.Freeze(); SubInk.Freeze(); Line.Freeze(); Accent.Freeze(); }
 
-    private static TextBlock Lbl(string t) => new() { Text = t, Foreground = Brushes.Gray, Margin = new Thickness(0, 8, 0, 2) };
-    private static TextBlock H(string t) => new() { Text = t, Foreground = Brushes.White, FontSize = 16, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 0, 8) };
-    private static ScrollViewer Scroll(UIElement e) => new() { Content = e, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
+    // ============================ ElectrumSVP-style tabs ============================
+
+    private static TextBlock Lbl(string t) => new() { Text = t, Foreground = SubInk, Margin = new Thickness(0, 8, 0, 2), VerticalAlignment = VerticalAlignment.Center };
+    private static TextBlock H(string t) => new() { Text = t, Foreground = Ink, FontSize = 16, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 0, 0, 8) };
+    private static ScrollViewer Scroll(UIElement e) => new() { Content = e, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Background = WinBg };
+
+    // A two-column aligned form row (label | field) — the ElectrumSVP grid-form look.
+    private static void FormRow(Grid g, int row, string label, UIElement field)
+    {
+        g.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        var l = new TextBlock { Text = label, Foreground = SubInk, Margin = new Thickness(0, 8, 12, 4), HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top };
+        Grid.SetRow(l, row); Grid.SetColumn(l, 0); g.Children.Add(l);
+        Grid.SetRow(field, row); Grid.SetColumn(field, 1); g.Children.Add(field);
+    }
+    private static Grid FormGrid()
+    {
+        var g = new Grid { Margin = new Thickness(0, 4, 0, 8) };
+        g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
+        g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        return g;
+    }
+
+    // ---- the ElectrumSVP menu bar (File / Wallet / Account / View / Tools / Help) ----
+    private UIElement BuildMenuBar()
+    {
+        var menu = new Menu { Background = new SolidColorBrush(Color.FromRgb(0x16, 0x16, 0x16)) };
+        MenuItem M(string h) => new() { Header = h, Foreground = Ink, Background = new SolidColorBrush(Color.FromRgb(0x16, 0x16, 0x16)) };
+        MenuItem I(string h, Action a) { var mi = new MenuItem { Header = h, Foreground = Brushes.Black }; mi.Click += (_, _) => { try { a(); } catch (Exception ex) { _status.Text = ex.Message; } }; return mi; }
+
+        var file = M("_File");
+        file.Items.Add(I("_New / Restore…", () => AccountWizard()));
+        file.Items.Add(I("_Open (restore from seed)…", Restore));
+        file.Items.Add(I("_Save a copy of the seed backup…", BackupSeedToFile));
+        file.Items.Add(new Separator());
+        file.Items.Add(I("_Quit", () => Window.GetWindow(this)?.Close()));
+        menu.Items.Add(file);
+
+        var wallet = M("_Wallet");
+        wallet.Items.Add(I("_Information (master public key)…", () => { if (Guard()) MessageBox.Show(Convert.ToHexString(_ring.IdentityPub()).ToLowerInvariant(), "Wallet information — identity / master public key"); }));
+        wallet.Items.Add(I("_Password (encrypt keys)…", SetPassword));
+        wallet.Items.Add(I("_Unlock…", () => { Unlock(); Render(); }));
+        wallet.Items.Add(I("_Find / rescan for payments", () => { if (Guard()) RescanRequested?.Invoke(); }));
+        menu.Items.Add(wallet);
+
+        var account = M("_Account");
+        account.Items.Add(I("Show _seed backup…", () => { if (Guard()) MessageBox.Show(WalletKeys.SeedToBackup(_seed), "Wallet seed — write it down"); }));
+        account.Items.Add(I("New _receiving address", () => { if (Guard()) { _w.RecvIndex++; Save(); Render(); } }));
+        menu.Items.Add(account);
+
+        var view = M("_View");
+        foreach (var name in new[] { "History", "Transactions", "Send", "Receive", "Notifications", "Destinations", "Coins (UTXOs)", "Contacts", "Identity", "NFTs", "Console" })
+        { var nm = name; view.Items.Add(I(nm, () => { foreach (var it in _tabs.Items) if (it is TabItem ti && (string)ti.Header == nm) _tabs.SelectedItem = ti; })); }
+        menu.Items.Add(view);
+
+        var tools = M("_Tools");
+        tools.Items.Add(I("_Sign message…", () => { if (Guard()) SignMessageDialog(); }));
+        tools.Items.Add(I("_Verify message…", VerifyMessageDialog));
+        tools.Items.Add(I("_Encrypt message to identity…", () => { if (Guard()) EncryptMessageDialog(); }));
+        tools.Items.Add(I("_Decrypt message…", () => { if (Guard()) DecryptMessageDialog(); }));
+        tools.Items.Add(new Separator());
+        tools.Items.Add(I("_Pay to many…", () => { _tabs.SelectedIndex = 2; _sendPayTo.Focus(); _sendStatus.Text = "Pay-to-many: one  payee,amount  per line."; }));
+        tools.Items.Add(I("_Sweep private key (WIF)…", () => { if (Guard()) SweepWif(); }));
+        tools.Items.Add(I("_Load / broadcast a transaction…", () => { if (Guard()) LoadBroadcastTx(); }));
+        tools.Items.Add(I("Pay an _invoice (BIP270)…", async () => { if (Guard()) await PayInvoice(); }));
+        menu.Items.Add(tools);
+
+        var help = M("_Help");
+        help.Items.Add(I("_About this wallet", () => MessageBox.Show("BSV wallet — a full SPV, IP-to-IP, on-chain wallet with identity (Base ID + Type-42), modelled on ElectrumSVP. No server.", "About")));
+        menu.Items.Add(help);
+        return menu;
+    }
+
+    // ---- the ElectrumSVP status bar (balance | network | lock | notifications) ----
+    private readonly TextBlock _sbBalance = new() { Foreground = new SolidColorBrush(Color.FromRgb(0x7C, 0xE0, 0x7C)), FontWeight = FontWeights.Bold, VerticalAlignment = VerticalAlignment.Center };
+    private readonly TextBlock _sbNetwork = new() { Foreground = new SolidColorBrush(Color.FromRgb(0xAA, 0xAA, 0xAA)), VerticalAlignment = VerticalAlignment.Center };
+    private readonly TextBlock _sbLock = new() { Foreground = new SolidColorBrush(Color.FromRgb(0xAA, 0xAA, 0xAA)), VerticalAlignment = VerticalAlignment.Center };
+    private Border BuildStatusBar()
+    {
+        var bar = new DockPanel { LastChildFill = false };
+        var left = new StackPanel { Orientation = Orientation.Horizontal };
+        left.Children.Add(new TextBlock { Text = "Balance:  ", Foreground = SubInk, VerticalAlignment = VerticalAlignment.Center });
+        left.Children.Add(_sbBalance);
+        DockPanel.SetDock(left, Dock.Left); bar.Children.Add(left);
+        var right = new StackPanel { Orientation = Orientation.Horizontal };
+        right.Children.Add(_sbLock); right.Children.Add(new TextBlock { Text = "    ", VerticalAlignment = VerticalAlignment.Center }); right.Children.Add(_sbNetwork);
+        DockPanel.SetDock(right, Dock.Right); bar.Children.Add(right);
+        return new Border { Background = new SolidColorBrush(Color.FromRgb(0x16, 0x16, 0x16)), BorderBrush = Line, BorderThickness = new Thickness(0, 1, 0, 0), Padding = new Thickness(10, 3, 10, 3), Child = bar };
+    }
+
+    // ---- Transactions tab: unpublished / pending (mirrors ElectrumSVP's split of History vs Transactions) ----
+    private readonly DataGrid _pendingGrid = NewGrid();
+    private UIElement BuildTransactionsTab()
+    {
+        var sp = new StackPanel { Margin = new Thickness(16) };
+        sp.Children.Add(H("Transactions (pending / unconfirmed)"));
+        _pendingGrid.Columns.Clear();
+        _pendingGrid.Columns.Add(new DataGridTextColumn { Header = "Status", Binding = new System.Windows.Data.Binding("Status"), Width = 110 });
+        _pendingGrid.Columns.Add(new DataGridTextColumn { Header = "Amount (sat)", Binding = new System.Windows.Data.Binding("Amount"), Width = 130 });
+        _pendingGrid.Columns.Add(new DataGridTextColumn { Header = "Txid / address", Binding = new System.Windows.Data.Binding("Memo"), Width = 560 });
+        _pendingGrid.Height = 440;
+        sp.Children.Add(_pendingGrid);
+        return Scroll(sp);
+    }
+
+    // ---- Notifications tab ----
+    private readonly System.Collections.ObjectModel.ObservableCollection<string> _notes = new();
+    private UIElement BuildNotificationsTab()
+    {
+        var sp = new StackPanel { Margin = new Thickness(16) };
+        sp.Children.Add(H("Notifications"));
+        var list = new ListBox { ItemsSource = _notes, Height = 440, Background = new SolidColorBrush(Color.FromRgb(0x14, 0x14, 0x14)), Foreground = Ink, BorderBrush = Line, BorderThickness = new Thickness(1) };
+        sp.Children.Add(list);
+        return Scroll(sp);
+    }
+    private void Notify(string m) { if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(new Action(() => Notify(m))); return; } _notes.Insert(0, $"[{DateTime.Now:HH:mm:ss}] {m}"); }
+
+    // ---- the ElectrumSVP-style account wizard (Standard / Restore / Import) ----
+    private void AccountWizard()
+    {
+        var sp = new StackPanel { Margin = new Thickness(20) };
+        sp.Children.Add(new TextBlock { Text = "Add an account", FontSize = 18, FontWeight = FontWeights.Bold, Foreground = Ink, Margin = new Thickness(0, 0, 0, 6) });
+        sp.Children.Add(new TextBlock { Text = "How would you like to set up this wallet? Your keys are kept encrypted and password-protected.", TextWrapping = TextWrapping.Wrap, Foreground = SubInk, Margin = new Thickness(0, 0, 0, 12), MaxWidth = 420 });
+        var win = new Window { Title = "BSV wallet — account wizard", Width = 480, Height = 320, WindowStartupLocation = WindowStartupLocation.CenterOwner, Owner = Window.GetWindow(this), Background = WinBg };
+        Button Opt(string t, string sub)
+        {
+            var b = new Button { Margin = new Thickness(0, 0, 0, 8), Padding = new Thickness(12, 8, 12, 8), HorizontalContentAlignment = HorizontalAlignment.Left };
+            b.Content = new StackPanel { Children = { new TextBlock { Text = t, FontWeight = FontWeights.Bold }, new TextBlock { Text = sub, Foreground = SubInk, TextWrapping = TextWrapping.Wrap } } };
+            return b;
+        }
+        var standard = Opt("Standard wallet (recommended)", "Create a brand-new wallet with a fresh BSV-native seed.");
+        var restore = Opt("Restore from a seed backup", "I already have a wallet seed and want to restore it.");
+        var import = Opt("Import a private key (WIF)", "Sweep coins controlled by an existing private key into this wallet.");
+        standard.Click += (_, _) => { win.Close(); MessageBox.Show("Your new wallet is ready. Back up your seed (Account → Show seed backup) and set a password (Wallet → Password).", "Wallet created"); SetPassword(); Render(); };
+        restore.Click += (_, _) => { win.Close(); Restore(); };
+        import.Click += (_, _) => { win.Close(); SweepWif(); };
+        sp.Children.Add(standard); sp.Children.Add(restore); sp.Children.Add(import);
+        win.Content = new ScrollViewer { Content = sp };
+        win.ShowDialog();
+    }
+
+    private void BackupSeedToFile()
+    {
+        if (!Guard()) return;
+        var dlg = new Microsoft.Win32.SaveFileDialog { Filter = "Text (*.txt)|*.txt", FileName = "bsv-wallet-seed-backup.txt" };
+        if (dlg.ShowDialog() == true) { File.WriteAllText(dlg.FileName, WalletKeys.SeedToBackup(_seed)); _status.Text = "Seed backup saved (keep it secret)."; }
+    }
 
     // ---- SEND: pay an address, an identity/handle, a pubkey, a raw tx, or a BIP270/bitcoin: URI ----
     private UIElement BuildSendTab()
@@ -921,6 +1075,7 @@ public sealed class WalletView : UserControl
             // brand-new wallet: a fresh seed, and EMPTY — no play money, no opening balance, no UTXOs.
             _seed = WalletKeys.NewSeed();
             _w = new File_ { Seed = WalletKeys.SeedToBackup(_seed), RecvIndex = 0 };
+            _freshWallet = true;     // first run → run the ElectrumSVP-style account wizard
             Save();
         }
     }
@@ -1051,7 +1206,8 @@ public sealed class WalletView : UserControl
         if (_locked)
         {
             _bal.Text = "🔒 locked";
-            _recv.Text = "Wallet is encrypted — press “Unlock…” to enter your password.";
+            _sbBalance.Text = "🔒 locked"; _sbLock.Text = "🔒 locked"; _sbNetwork.Text = $"{_net().Network}";
+            _recv.Text = "Wallet is encrypted — press “Unlock…” (Wallet menu) to enter your password.";
             _historyGrid.ItemsSource = null; _coinsGrid.ItemsSource = null; _addrGrid.ItemsSource = null;
             return;
         }
@@ -1083,8 +1239,19 @@ public sealed class WalletView : UserControl
         _contactsGrid.ItemsSource = _w.Contacts.ToList();
         _requestsGrid.ItemsSource = _w.Requests.AsEnumerable().Reverse().ToList();
 
+        // Transactions tab: pending / unconfirmed coins only
+        _pendingGrid.ItemsSource = _w.Utxos.Where(u => !u.Confirmed && !u.Spent).Select(u => new {
+            Status = "unconfirmed", Amount = u.Value.ToString("N0"), Memo = $"{u.Txid} :{u.Vout}",
+        }).ToList();
+
         if (_ring != null) _idPub.Text = Convert.ToHexString(_ring.IdentityPub()).ToLowerInvariant();
         if (string.IsNullOrEmpty(_idHandle.Text)) _idHandle.Text = _w.Handle;
+
+        // status bar
+        _sbBalance.Text = $"{Balance:N0} sat" + (Pending > 0 ? $"  (+{Pending:N0} pending)" : "");
+        _sbLock.Text = _locked ? "🔒 locked" : "🔓 unlocked";
+        var node = _node();
+        _sbNetwork.Text = $"{_net().Network}  ·  SPV peers: {(node?.PeerCount ?? 0)}";
 
         RefreshCards();
     }
