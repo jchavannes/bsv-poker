@@ -104,7 +104,16 @@ public sealed class BotPlayer : IDisposable
             if (_deal != null && _deal.PeerPub.AsSpan().SequenceEqual(msg.SenderPub)) _deal.Deliver(msg.Text["DEAL:".Length..]);
             return;
         }
-        Log($"chat from {senderHex[..12]}…: {msg.Text}");
+        // the bot only converses with its OWNER; it replies (a real funded chat tx) so chat is visibly two-way
+        if (!msg.SenderPub.AsSpan().SequenceEqual(_ownerPub)) { Log($"ignored a chat from a non-owner {senderHex[..12]}…"); return; }
+        Log($"owner: {msg.Text}");
+        var peer = Gossip.Peers.FirstOrDefault(p => p.PubHex == senderHex);
+        if (peer != null)
+        {
+            var reply = $"🤖 {Name}: got \"{(msg.Text.Length > 40 ? msg.Text[..40] + "…" : msg.Text)}\"" + (Balance < 1500 ? " (fund me to chat/play)" : "");
+            var err = SendChat(senderHex, peer.Endpoint, reply);
+            if (err.Length > 0) Log("reply not sent: " + err);
+        }
     }
 
     private void StartHand(byte[] peerPub, string peerHex)
