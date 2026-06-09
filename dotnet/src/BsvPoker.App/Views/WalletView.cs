@@ -1838,11 +1838,20 @@ public sealed class WalletView : UserControl
         if (_locked) return (null, "🔒 Unlock the wallet first.");
         var w = new OnChainWallet(_seed);
         foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.WatchOnly)) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
-        if (w.Balance < value + fee) return (null, $"Insufficient sats: have {w.Balance:N0}, need {value + fee:N0}. Fund your wallet first.");
+        if (w.Balance < value + fee)
+        {
+            long watch = _w.Utxos.Where(u => !u.Spent && u.WatchOnly).Sum(u => u.Value);
+            if (watch >= value + fee)
+                return (null, $"Your {watch:N0} sat is WATCH-ONLY — it's on an external address this wallet doesn't hold the private key for, so it can't be SPENT (and an identity is a signed on-chain tx). Import that address's private key (Coins → Sweep a private key) to spend it.");
+            return (null, $"Insufficient SPENDABLE sats: have {w.Balance:N0}, need {value + fee:N0}.");
+        }
         try
         {
             var spend = w.SpendAction(outputScript, value, fee);
-            _w.Utxos = w.Coins.Select(u => new UtxoRec { Txid = u.Txid, Vout = u.Vout, Value = u.Value, KeyChain = u.KeyChain, KeyIndex = u.KeyIndex }).ToList();
+            // preserve watch-only and already-spent records; replace only the SPENDABLE set with what remains.
+            var keep = _w.Utxos.Where(u => u.WatchOnly || u.Spent).ToList();
+            var remaining = w.Coins.Select(u => new UtxoRec { Txid = u.Txid, Vout = u.Vout, Value = u.Value, KeyChain = u.KeyChain, KeyIndex = u.KeyIndex, Confirmed = true }).ToList();
+            _w.Utxos = keep.Concat(remaining.Where(r => !keep.Any(k => k.Txid == r.Txid && k.Vout == r.Vout))).ToList();
             AppendTx("message", -(value + fee), $"on-chain tx {Chain.Txid(spend.Tx)[..12]}…");
             Save(); Render();
             return (Chain.Serialize(spend.Tx), "");
