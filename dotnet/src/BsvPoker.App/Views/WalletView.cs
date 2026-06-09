@@ -59,6 +59,8 @@ public sealed class WalletView : UserControl
         public string IdentityPub { get; set; } = "";
         public string Signature { get; set; } = "";    // identityPriv over the canonical fields
         public string CreatedAt { get; set; } = "";
+        public string OnChainTxid { get; set; } = "";   // the identity NFT transaction; EMPTY = draft only (NOT a real identity)
+        public bool IsOnChain => !string.IsNullOrEmpty(OnChainTxid);
         // every field is signed (v2) so the whole profile is verifiable, not just name/email.
         public string Canonical() => $"bsvpoker-identity-v2|{DisplayName}|{Pseudonym}|{Email}|{Country}|{Website}|{Bio}|{IdentityPub}|{CreatedAt}";
     }
@@ -88,6 +90,10 @@ public sealed class WalletView : UserControl
 
     /// <summary>True once the seed is in memory and the wallet can derive keys (needed before the SPV filter is built).</summary>
     public bool IsUnlocked => !_locked;
+    /// <summary>True when the wallet holds spendable confirmed coin — nothing (play / on-chain identity) happens until funded.</summary>
+    public bool IsFunded => !_locked && Balance > 0;
+    /// <summary>True once the identity has been written on-chain (a confirmed NFT tx) — a draft is not an identity.</summary>
+    public bool HasOnChainIdentity => _w.Identity is { IsOnChain: true };
     /// <summary>Raised the moment the wallet becomes usable (fresh, unlocked, or restored) so the node can load our SPV filter.</summary>
     public event Action? OnUnlocked;
 
@@ -588,8 +594,21 @@ public sealed class WalletView : UserControl
                     CreatedAt = DateTime.UtcNow.ToString("o"),
                 };
                 reg.Signature = WalletExtras.SignMessage(_identityPriv, reg.Canonical());   // self-signed identity certificate
+                // AN IDENTITY IS ONLY REAL ON-CHAIN: write it as a funded Bitcoin transaction (an NFT). Without
+                // funds there is no identity — we never persist an off-chain identity as if it were real.
+                var attPriv = Type42.UniqueKey(_seed, "bsvpoker/identity/attestation");
+                var idScript = OnChainIdentity.BuildScript(_identityPub, attPriv, reg.Pseudonym, reg.Email);
+                var (raw, status) = FundTx(idScript, 1, 500);
+                if (raw == null)
+                {
+                    MessageBox.Show("Your identity must be written on-chain (it is an NFT), which needs a funded wallet. " +
+                        "Fund this wallet first, then register.\n\n" + status, "Identity requires funding");
+                    return;   // NO off-chain identity is saved
+                }
+                _node()?.Broadcast(raw);
+                reg.OnChainTxid = Chain.Txid(Chain.Deserialize(raw));
                 _w.Identity = reg; _w.Handle = reg.Pseudonym; Save(); Render();
-                _status.Text = $"Registered as {reg.DisplayName} (@{reg.Pseudonym}). Identity certificate signed.";
+                _status.Text = $"Identity broadcast on-chain as {reg.DisplayName} (@{reg.Pseudonym}) — tx {reg.OnChainTxid[..12]}… (confirms shortly).";
                 win.Close();
             }
             catch (Exception ex) { MessageBox.Show("Registration failed: " + ex.Message); }
@@ -1998,6 +2017,9 @@ public sealed class WalletView : UserControl
     private void Load()
     {
         try { if (File.Exists(_path)) _w = JsonSerializer.Deserialize<File_>(File.ReadAllText(_path)) ?? new File_(); } catch { _w = new File_(); }
+        // AN IDENTITY IS ONLY REAL ON-CHAIN: a registration that was never broadcast (no OnChainTxid) is a DRAFT
+        // and does not survive a restart — drop it so it is never treated as an identity.
+        if (_w.Identity is { IsOnChain: false }) _w.Identity = null;
         // LOAD IS READ-ONLY AND NON-DESTRUCTIVE: we keep EVERY coin and every record exactly as stored. We do
         // NOT prune, clear, or re-save the wallet on load — destroying a user's coin/history cache (even a
         // "pending" one) is data loss and is forbidden. The balance computation already counts confirmed-unspent

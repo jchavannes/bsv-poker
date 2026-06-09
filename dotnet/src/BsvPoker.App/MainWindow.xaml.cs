@@ -46,7 +46,7 @@ public partial class MainWindow : Window
         // The lobby: pick a variant + seat count (2–6), host/join a real table, or play your own bot at the chosen
         // variant. Joining a table or pressing "Play a bot" jumps to the game board.
         _lobby = new LobbyView(_node, _profile.IdentityPub, JoinTable,
-            variant => { _game!.StartBot(variant); Tabs.SelectedIndex = 2; });
+            variant => { if (CanPlay()) { _game!.StartBot(variant); Tabs.SelectedIndex = 2; } });
         LobbyHost.Content = _lobby;
         InitNetworkSelector();
 
@@ -136,8 +136,20 @@ public partial class MainWindow : Window
     /// <summary>Join (or host) a real table on the lobby node and jump to the board.</summary>
     private void JoinTable(string tableId, string tableName)
     {
+        if (!CanPlay()) return;
         _game?.StartNetworked(tableId, tableName);
         Tabs.SelectedIndex = 2; // Game
+    }
+
+    /// <summary>FUNDED-GATE: nothing (play / a table) happens until this wallet is funded — except on regtest,
+    /// which can self-fund. Until then the user goes nowhere.</summary>
+    private bool CanPlay()
+    {
+        if (_currentNet.Network == BsvNetwork.Regtest) return true;   // regtest self-funds
+        if (_wallet.IsFunded) return true;
+        MessageBox.Show("You can't play until this wallet is funded with real BSV (or switch to Regtest). Fund your wallet on the Receive tab first.",
+            "Wallet not funded");
+        return false;
     }
 
     private void PlayBot()
