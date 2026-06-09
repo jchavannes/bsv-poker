@@ -127,7 +127,6 @@ public sealed class WalletView : UserControl
     private readonly DataGrid _requestsGrid = NewGrid();
     private readonly DataGrid _vaultsGrid = NewGrid();
     private readonly TextBlock _fundInfo = new() { Foreground = new SolidColorBrush(Color.FromRgb(0xCC, 0xCC, 0xCC)), TextWrapping = TextWrapping.Wrap, MaxWidth = 640, HorizontalAlignment = HorizontalAlignment.Left };
-    private string _elxStatus = "ElectrumSVP: connecting…";
     private readonly TextBlock _idPub = new() { Foreground = new SolidColorBrush(Color.FromRgb(0x7C, 0xE0, 0x7C)), FontFamily = new FontFamily("Consolas"), TextWrapping = TextWrapping.Wrap };
     private readonly TextBox _idHandle = new() { Width = 240 };
 
@@ -210,9 +209,9 @@ public sealed class WalletView : UserControl
             else if (!_locked && !IsRegistered) { WizardWelcome(); RegisterDialog(); }
             // Auto-surface funds: a few seconds after load, pull + SPV-verify this wallet's coins via the ElectrumSVP
             // backup (and refresh periodically), so an already-funded address shows without the user clicking anything.
-            if (!_locked && IsRegistered) _ = RefreshViaElectrumSVP();
-            var fundTick = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(90) };
-            fundTick.Tick += async (_, _) => { if (!_locked && IsRegistered) await RefreshViaElectrumSVP(); };
+            if (!_locked && IsRegistered) RescanRequested?.Invoke();
+            var fundTick = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(60) };
+            fundTick.Tick += (_, _) => { if (!_locked && IsRegistered) RescanRequested?.Invoke(); };
             fundTick.Start();
         };
     }
@@ -669,46 +668,18 @@ public sealed class WalletView : UserControl
         sp.Children.Add(addrLine);
         var btns = new WrapPanel { Margin = new Thickness(0, 6, 0, 0) };
         var refresh = Btn("Refresh"); refresh.Click += (_, _) => Refresh();
-        var testElx = Btn("Test ElectrumSVP backup"); testElx.Click += async (_, _) =>
+        var addPeer = Btn("Connect to a public node…"); addPeer.Click += (_, _) =>
         {
-            elx.Text = "ElectrumSVP: connecting…";
-            var servers = ElectrumSvpClient.ServersFor(_net().Network);
-            var (ok, host, err) = await System.Threading.Tasks.Task.Run(async () => { using var ex = new ElectrumSvpClient(); var c = await ex.ConnectAnyAsync(servers, 8000); return (c, ex.Host ?? "", c ? "" : "no server reachable"); });
-            elx.Text = ok ? $"ElectrumSVP: CONNECTED to {host} ✓ (balance backup works)" : $"ElectrumSVP: FAILED — {err} (your machine cannot reach the BSV network/ports)";
-        };
-        var addPeer = Btn("Connect to a node…"); addPeer.Click += (_, _) =>
-        {
-            var box = new TextBox { Width = 260, Text = "electrumx.gorillapool.io:8333" }; ThemeOne(box);
+            var box = new TextBox { Width = 260, Text = "host:8333" }; ThemeOne(box);
             var ok2 = new Button { Content = "Connect", Margin = new Thickness(0, 8, 0, 0), Padding = new Thickness(10, 6, 10, 6) };
-            var w2 = new Window { Title = "Connect to a node", Width = 320, Height = 150, Owner = Window.GetWindow(this), Background = WinBg, Content = new StackPanel { Margin = new Thickness(12), Children = { new TextBlock { Text = "host:port", Foreground = Ink }, box, ok2 } } };
+            var w2 = new Window { Title = "Connect to a public BSV node", Width = 320, Height = 150, Owner = Window.GetWindow(this), Background = WinBg, Content = new StackPanel { Margin = new Thickness(12), Children = { new TextBlock { Text = "host:port (a public internet BSV node)", Foreground = Ink }, box, ok2 } } };
             ok2.Click += (_, _) => { var parts = box.Text.Trim().Split(':'); if (parts.Length == 2 && int.TryParse(parts[1], out var p)) _node()?.AddManualPeer(parts[0], p); w2.Close(); Refresh(); };
             w2.ShowDialog();
         };
-        var refundsApply = Btn("Refresh balance (ElectrumSVP)"); refundsApply.Click += async (_, _) => { if (Guard()) await RefreshViaElectrumSVP(); };
-        btns.Children.Add(refresh); btns.Children.Add(testElx); btns.Children.Add(addPeer); btns.Children.Add(refundsApply);
+        var rescanP2p = Btn("Rescan for my coins (P2P)"); rescanP2p.Click += (_, _) => { if (Guard()) { RescanRequested?.Invoke(); elx.Text = "Rescanning via the P2P node (bloom filter + merkleblock)…"; } };
+        btns.Children.Add(refresh); btns.Children.Add(addPeer); btns.Children.Add(rescanP2p);
         sp.Children.Add(btns);
         sp.Children.Add(elx);
-        // Check ANY address's balance via ElectrumSVP — paste the address you funded to prove the network + coin,
-        // and whether it's one of THIS wallet's derived addresses.
-        var chkRow = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
-        var chkBox = new TextBox { Width = 360, Text = "1BH5Uf3tbfNSBjCmVJYWB5nTCRXVVBQXuR" }; ThemeOne(chkBox);
-        var chkBtn = Btn("Check address balance");
-        var chkRes = new TextBlock { Foreground = SubInk, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 4, 0, 0) };
-        chkBtn.Click += async (_, _) =>
-        {
-            var addr = chkBox.Text.Trim();
-            byte[] payload; try { payload = Base58.CheckDecode(addr); if (payload.Length != 21) throw new Exception(); } catch { chkRes.Text = "Invalid address."; return; }
-            bool mine = false; uint gap = (uint)_w.RecvIndex + 50;
-            for (uint c = 0; c <= 2 && !mine; c++) for (uint i = 0; i <= gap; i++) if (Hashes.Hash160(WalletKeys.Account(_seed, c, i).Pub).AsSpan().SequenceEqual(payload[1..])) { mine = true; break; }
-            chkRes.Text = "Querying ElectrumSVP…";
-            var script = payload[0] == _net().ScriptVersion ? Chain.P2shLockFromHash(payload[1..]) : Chain.P2pkhLock(payload[1..]);
-            var (bal, host, err) = await System.Threading.Tasks.Task.Run(async () => { using var ex = new ElectrumSvpClient(); if (!await ex.ConnectAnyAsync(ElectrumSvpClient.ServersFor(_net().Network), 8000)) return (0L, "", "unreachable"); try { var us = await ex.ListUnspentAsync(ElectrumSvpClient.ScriptHashOf(script)); return (us.Sum(u => u.Value), ex.Host ?? "", ""); } catch (Exception e) { return (0L, ex.Host ?? "", e.Message); } });
-            chkRes.Text = err.Length > 0 ? $"ElectrumSVP error: {err}" :
-                $"{addr}\nbalance = {bal:N0} sat (via {host}). " + (mine ? "✓ THIS is one of your wallet's addresses — use 'Refresh balance' to credit it." : "✖ This is NOT a current address of this wallet/account — the coin is on a different seed; restore that wallet's seed (Tools → Restore).");
-            chkRes.Foreground = bal > 0 ? Accent : SubInk;
-        };
-        chkRow.Children.Add(chkBox); chkRow.Children.Add(chkBtn);
-        sp.Children.Add(chkRow); sp.Children.Add(chkRes);
         sp.Children.Add(new TextBlock { Text = "Connection log:", Foreground = SubInk, Margin = new Thickness(0, 8, 0, 2) });
         sp.Children.Add(log);
         Refresh();
@@ -934,10 +905,9 @@ public sealed class WalletView : UserControl
         var importBtn = Btn("Import funding (SPV envelope)…"); importBtn.Click += (_, _) => { if (Guard()) ImportFunding(); };
         var makeEnv = Btn("Create funding envelope…"); makeEnv.Click += async (_, _) => { if (Guard()) await CreateEnvelope(); };
         var findTx = Btn("Find a payment by txid…"); findTx.Click += async (_, _) => { if (Guard()) await FindByTxid(); };
-        var rescan = Btn("Rescan now"); rescan.Click += async (_, _) => { if (Guard()) { _status.Text = "Rescanning the chain for payments…"; RescanRequested?.Invoke(); await RefreshViaElectrumSVP(); } };
+        var rescan = Btn("Rescan now"); rescan.Click += (_, _) => { if (Guard()) { _status.Text = "Rescanning via the P2P node (bloom filter + merkleblock) for payments…"; RescanRequested?.Invoke(); } };
         var claim = Btn("Claim a payment to my identity…"); claim.Click += (_, _) => { if (Guard()) ClaimIdentityPayment(); };
-        var ex = Btn("Refresh balance (ElectrumSVP backup)"); ex.Background = new SolidColorBrush(Color.FromRgb(0x2E, 0x7D, 0x32)); ex.Foreground = Brushes.White; ex.Click += async (_, _) => { if (Guard()) await RefreshViaElectrumSVP(); };
-        fund.Children.Add(importBtn); fund.Children.Add(makeEnv); fund.Children.Add(findTx); fund.Children.Add(rescan); fund.Children.Add(claim); fund.Children.Add(ex);
+        fund.Children.Add(importBtn); fund.Children.Add(makeEnv); fund.Children.Add(findTx); fund.Children.Add(rescan); fund.Children.Add(claim);
         sp.Children.Add(fund);
         return Scroll(sp);
     }
@@ -1706,72 +1676,15 @@ public sealed class WalletView : UserControl
         return $"minted {minted} card NFT(s) on-chain";
     }
 
-    /// <summary>
-    /// BACKUP funding path (authorized): query the public ElectrumSVP servers ElectrumSVP uses for this wallet's
-    /// unspent coins, and SPV-verify each (merkle proof folds to the block header's root + the header meets PoW —
-    /// the server cannot forge proof-of-work). Verified coins are credited. Use when P2P discovery/bloom is not
-    /// surfacing an already-funded address. Never shows fake coins: only PoW-proven, merkle-proven UTXOs.
-    /// </summary>
-    private async System.Threading.Tasks.Task RefreshViaElectrumSVP()
-    {
-        var servers = ElectrumSvpClient.ServersFor(_net().Network);
-        if (servers.Length == 0) { _status.Text = "ElectrumSVP backup is available on mainnet/testnet only."; return; }
-        _status.Text = "ElectrumSVP backup: connecting to a server…";
-        var seed = _seed; uint gap = (uint)_w.RecvIndex + 20;
-        await System.Threading.Tasks.Task.Run(async () =>
-        {
-            using var ex = new ElectrumSvpClient();
-            void Log(string m) => Dispatcher.BeginInvoke(new Action(() => _status.Text = m));
-            if (!await ex.ConnectAnyAsync(servers, 8000, Log)) { _elxStatus = "ElectrumSVP: ✖ unreachable"; Log("ElectrumSVP backup: no server reachable."); await Dispatcher.InvokeAsync(UpdateStatusBar); return; }
-            _elxStatus = $"ElectrumSVP: ✓ {ex.Host}"; await Dispatcher.InvokeAsync(UpdateStatusBar);
-            int found = 0; long total = 0;
-            for (uint chain = 0; chain <= 2; chain++)
-                for (uint i = 0; i <= gap; i++)
-                {
-                    byte[] pub; try { pub = WalletKeys.Account(seed, chain, i).Pub; } catch { continue; }
-                    var sh = ElectrumSvpClient.ScriptHashOf(Chain.P2pkhLockForPub(pub));
-                    List<ElectrumSvpClient.Utxo> us; try { us = await ex.ListUnspentAsync(sh); } catch { continue; }
-                    foreach (var u in us)
-                    {
-                        if (u.Height <= 0) continue;                        // unconfirmed: cannot merkle-prove yet
-                        bool ok; try { ok = await ex.VerifyUtxoAsync(u.TxHashDisplay, u.Height); } catch { ok = false; }
-                        if (!ok) continue;                                   // SPV proof must check out, else skip
-                        uint fchain = chain, fi = i; var fu = u;
-                        await Dispatcher.InvokeAsync(() =>
-                        {
-                            if (!_w.Utxos.Any(x => x.Txid == fu.TxHashDisplay && x.Vout == fu.Vout))
-                                _w.Utxos.Add(new UtxoRec { Txid = fu.TxHashDisplay, Vout = fu.Vout, Value = fu.Value, KeyChain = fchain, KeyIndex = fi, Confirmed = true });
-                        });
-                        found++; total += u.Value;
-                    }
-                }
-            await Dispatcher.InvokeAsync(() =>
-            {
-                Save(); Render();
-                _status.Text = found > 0 ? $"ElectrumSVP backup ({ex.Host}): credited {found} SPV-verified coin(s), {total:N0} sat." : $"ElectrumSVP backup ({ex.Host}): no coins found for this wallet's addresses.";
-                if (found > 0) Notify($"ElectrumSVP backup credited {total:N0} sat (SPV-verified).");
-            });
-        });
-    }
-
-    /// <summary>Broadcast a raw tx the reliable way ElectrumSVP does — via an ElectrumSVP server — in addition to our
-    /// own P2P peers. Returns (ok, info). Used by Send so a transaction actually propagates even if P2P is weak.</summary>
+    /// <summary>Broadcast a raw tx over our own P2P node to the public BSV peers (and to miners' nodes). Pure
+    /// peer-to-peer — no third-party server. Returns (ok, info).</summary>
     private async System.Threading.Tasks.Task<(bool Ok, string Info)> BroadcastEverywhere(byte[] raw)
     {
-        var hex = Convert.ToHexString(raw).ToLowerInvariant();
-        try { _node()?.Broadcast(raw); } catch { }                       // P2P peers (best effort)
-        try
-        {
-            var (ok, info) = await System.Threading.Tasks.Task.Run(async () =>
-            {
-                using var ex = new ElectrumSvpClient();
-                if (!await ex.ConnectAnyAsync(ElectrumSvpClient.ServersFor(_net().Network), 8000)) return (false, "no ElectrumSVP server reachable");
-                try { var txid = await ex.BroadcastAsync(hex); return (true, txid); }
-                catch (Exception e) { return (false, e.Message); }
-            });
-            return (ok, info);
-        }
-        catch (Exception e) { return (false, e.Message); }
+        var node = _node();
+        if (node == null || node.PeerCount == 0) return (false, "no BSV peers connected yet — the SPV node is still finding public peers");
+        try { node.Broadcast(raw); } catch (Exception e) { return (false, e.Message); }
+        await System.Threading.Tasks.Task.CompletedTask;
+        return (true, Chain.Txid(Chain.Deserialize(raw)));
     }
 
     /// <summary>The receive key for the given receive index (chain 0).</summary>
@@ -1840,51 +1753,23 @@ public sealed class WalletView : UserControl
     /// </summary>
     private async System.Threading.Tasks.Task FindByTxid()
     {
-        var txidBox = new TextBox { Width = 520, FontFamily = new FontFamily("Consolas") }; ThemeOne(txidBox);
-        var hBox = new TextBox { Width = 160, Text = "" }; ThemeOne(hBox);
-        var go = new Button { Content = "Fetch & credit", Margin = new Thickness(0, 10, 0, 0), Padding = new Thickness(12, 6, 12, 6) };
+        var blkBox = new TextBox { Width = 520, FontFamily = new FontFamily("Consolas") }; ThemeOne(blkBox);
+        var go = new Button { Content = "Request SPV proof from peers", Margin = new Thickness(0, 10, 0, 0), Padding = new Thickness(12, 6, 12, 6) };
         var sp = new StackPanel { Margin = new Thickness(12) };
-        sp.Children.Add(new TextBlock { Text = "Payment transaction id (txid):", Foreground = Ink }); sp.Children.Add(txidBox);
-        sp.Children.Add(new TextBlock { Text = "Block height that confirmed it (optional — left blank, we look it up):", Foreground = Ink, Margin = new Thickness(0, 8, 0, 0) }); sp.Children.Add(hBox);
+        sp.Children.Add(new TextBlock { Text = "Hash of the block that confirmed your payment:", Foreground = Ink }); sp.Children.Add(blkBox);
+        sp.Children.Add(new TextBlock { Text = "We ask our connected public BSV node(s) for a merkleblock (compact SPV proof) of that block, matching your addresses. The coin is credited when the proof arrives and verifies — pure peer-to-peer, no server. (No block hash? Use 'Import funding (SPV envelope)'.)", Foreground = SubInk, TextWrapping = TextWrapping.Wrap, MaxWidth = 520, Margin = new Thickness(0, 6, 0, 6) });
         sp.Children.Add(go);
-        var win = new Window { Title = "Find a payment by txid", Width = 580, Height = 240, Owner = Window.GetWindow(this), Background = WinBg, Content = new ScrollViewer { Content = sp } };
-        go.Click += async (_, _) =>
+        var win = new Window { Title = "Find a payment (SPV proof from peers)", Width = 580, Height = 300, Owner = Window.GetWindow(this), Background = WinBg, Content = new ScrollViewer { Content = sp } };
+        go.Click += (_, _) =>
         {
-            try
-            {
-                var wantTxid = txidBox.Text.Trim().ToLowerInvariant();
-                if (wantTxid.Length != 64) { MessageBox.Show("Enter a 64-hex-character txid.", "Find by txid"); return; }
-                go.IsEnabled = false; _status.Text = "Looking up the transaction via ElectrumSVP…";
-                var servers = ElectrumSvpClient.ServersFor(_net().Network);
-                var seed = _seed; uint gap = (uint)_w.RecvIndex + 50; int.TryParse(hBox.Text.Trim(), out var givenHeight);
-                var (credited, total, err) = await System.Threading.Tasks.Task.Run(async () =>
-                {
-                    using var ex = new ElectrumSvpClient();
-                    if (!await ex.ConnectAnyAsync(servers, 8000)) return (0, 0L, "No ElectrumSVP server reachable.");
-                    byte[] rawTx; try { rawTx = await ex.GetTransactionAsync(wantTxid); } catch (Exception e) { return (0, 0L, "Transaction not found: " + e.Message); }
-                    var tx = Chain.Deserialize(rawTx);
-                    // find which output pays one of our keys (and remember the key)
-                    var pays = new List<(uint Vout, long Value, uint Chain, uint Index)>();
-                    for (uint v = 0; v < (uint)tx.Outs.Count; v++)
-                        for (uint c = 0; c <= 2; c++)
-                            for (uint i = 0; i <= gap; i++)
-                                if (tx.Outs[(int)v].Script.AsSpan().SequenceEqual(Chain.P2pkhLockForPub(WalletKeys.Account(seed, c, i).Pub)))
-                                { pays.Add((v, tx.Outs[(int)v].Value, c, i)); c = 3; break; }
-                    if (pays.Count == 0) return (0, 0L, "That transaction pays no address of this wallet/account.");
-                    int height = givenHeight > 0 ? givenHeight : await ex.HeightOfTxAsync(wantTxid, tx.Outs[(int)pays[0].Vout].Script);
-                    if (height <= 0) return (0, 0L, "Could not determine the confirming block height (unconfirmed?). Enter the height manually.");
-                    if (!await ex.VerifyUtxoAsync(wantTxid, height)) return (0, 0L, "SPV merkle proof did not verify — rejected.");
-                    int cr = 0; long tot = 0;
-                    foreach (var p in pays)
-                        await Dispatcher.InvokeAsync(() => { if (!_w.Utxos.Any(u => u.Txid == wantTxid && u.Vout == p.Vout)) { _w.Utxos.Add(new UtxoRec { Txid = wantTxid, Vout = p.Vout, Value = p.Value, KeyChain = p.Chain, KeyIndex = p.Index, Confirmed = true }); cr++; tot += p.Value; } });
-                    return (cr, tot, "");
-                });
-                go.IsEnabled = true;
-                if (err.Length > 0) { MessageBox.Show(err, "Find by txid"); return; }
-                Save(); Render(); Notify($"Credited {total:N0} sat from {wantTxid[..12]}… (SPV-verified).");
-                _status.Text = $"Found and credited {credited} output(s), {total:N0} sat (SPV-verified)."; win.Close();
-            }
-            catch (Exception ex) { go.IsEnabled = true; MessageBox.Show("Could not find the payment: " + ex.Message, "Error"); }
+            var blk = blkBox.Text.Trim().ToLowerInvariant();
+            if (blk.Length != 64) { MessageBox.Show("Enter a 64-hex-character block hash.", "Find payment"); return; }
+            var node = _node();
+            if (node == null || node.PeerCount == 0) { MessageBox.Show("No BSV peers connected yet — wait for the SPV node to connect, then retry.", "No peers"); return; }
+            RescanRequested?.Invoke();                                    // ensure our bloom filter is loaded on peers
+            node.RequestFilteredBlocks(new[] { blk });                    // ask peers for the merkleblock of that block
+            _status.Text = "Requested the SPV proof for that block from peers — your coin will appear when the merkleblock arrives and verifies.";
+            win.Close();
         };
         win.ShowDialog();
         await System.Threading.Tasks.Task.CompletedTask;
@@ -2350,7 +2235,7 @@ public sealed class WalletView : UserControl
         _sbLock.Text = "🔓 unlocked";
         var node = _node();
         var who = string.IsNullOrWhiteSpace(_w.Handle) ? "" : $"@{_w.Handle} · ";
-        _sbNetwork.Text = $"{who}acct #{_accountIndex} · {_net().Network} · SPV peers: {(node?.PeerCount ?? 0)} · {_elxStatus}";
+        _sbNetwork.Text = $"{who}acct #{_accountIndex} · {_net().Network} · SPV node peers: {(node?.PeerCount ?? 0)} · tip {(node?.BestHeight ?? 0):N0}";
     }
 
     /// <summary>Resolve a peer's identity public key (hex) to a saved contact handle, or null. Lets the chat /
@@ -2512,7 +2397,7 @@ public sealed class WalletView : UserControl
             var spend = w.BuildActionMany(outputs.Select(o => (o.Lock, o.Value)).ToList(), fee);
             if (!w.VerifySpend(spend)) { _sendStatus.Text = "Built transaction failed self-verification — not broadcast."; return; }
             _sendStatus.Text = "Broadcasting…";
-            var (bok, binfo) = await BroadcastEverywhere(Chain.Serialize(spend.Tx));  // P2P peers + ElectrumSVP server (reliable)
+            var (bok, binfo) = await BroadcastEverywhere(Chain.Serialize(spend.Tx));  // broadcast over our own P2P node to public BSV peers + miners
             if (!bok) { _sendStatus.Text = "Broadcast rejected: " + binfo + " (not spent)."; return; }
             var txid = Chain.Txid(spend.Tx);
             foreach (var inp in spend.Inputs) foreach (var u in _w.Utxos.Where(u => u.Txid == inp.Txid && u.Vout == inp.Vout)) u.Spent = true;
