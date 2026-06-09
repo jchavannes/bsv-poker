@@ -35,6 +35,16 @@ public sealed class BsvNode : IDisposable
     /// <summary>Manually-added peers (host:port) the user pointed us at — tried in addition to the DNS seeds.</summary>
     private readonly List<IPEndPoint> _manual = new();
 
+    /// <summary>
+    /// Peers learned from the network itself via <c>addr</c> gossip (we send <c>getaddr</c> to every peer we
+    /// complete a handshake with). This is how the node expands from a single live peer to the whole live
+    /// network — the DNS seeds only need to yield ONE working node, then the address graph does the rest.
+    /// Keyed by "ip:port" so each address is held once.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, IPEndPoint> _discovered = new();
+    /// <summary>Count of peers discovered via addr gossip (diagnostics for the Network panel).</summary>
+    public int DiscoveredCount => _discovered.Count;
+
     /// <summary>Resolve the network's DNS seeds to candidate peer endpoints (empty for regtest).</summary>
     public async Task<List<IPEndPoint>> ResolveSeedsAsync()
     {
@@ -67,7 +77,7 @@ public sealed class BsvNode : IDisposable
             var inFlight = new HashSet<string>();
             while (!_cts.IsCancellationRequested)
             {
-                var candidates = _manual.Concat(seeds).ToList();
+                var candidates = _manual.Concat(seeds).Concat(_discovered.Values).ToList();
                 long now = Environment.TickCount64;
                 if (_peers.Count < maxPeers && candidates.Count > 0)
                 {
@@ -99,11 +109,17 @@ public sealed class BsvNode : IDisposable
             await c.ConnectAsync(host, port).WaitAsync(TimeSpan.FromSeconds(6), _cts.Token);
             var peer = new BsvPeer(_net, c);
             await peer.HandshakeAsync(startHeight: BestHeight, ct: _cts.Token);
+            // BSV and BCH/BTC share the e3e1f3e8/f9beb4d9 message-start lineage; a node sharing our magic may be
+            // on the WRONG chain (Bitcoin Cash, BTC). Peering with it would feed us a foreign header/UTXO set.
+            // Reject any peer whose user-agent identifies it as non-BSV before we trust a single byte of its chain.
+            var ua = peer.RemoteVersion?.UserAgent ?? "";
+            if (IsNonBsvPeer(ua)) { peer.Dispose(); Log($"rejected {key}: not a BSV node (ua {ua})"); return false; }
             _peers[key] = peer;
             peer.OnMessage += m => HandleRelay(peer, m);   // receive relayed transactions (announce/chat/etc.) from the network
             // give this fresh peer our SPV filter so it relays our own transactions back to us
             if (_filter is { } f) { try { peer.Send("filterload", f.ToFilterLoad()); peer.Send("mempool", Array.Empty<byte>()); } catch { } }
             if (peer.RemoteVersion is { } v && v.StartHeight > BestHeight) BestHeight = v.StartHeight;
+            try { peer.Send("getaddr", Array.Empty<byte>()); } catch { } // learn the rest of the live network from this peer
             Log($"connected to {key} (height {peer.RemoteVersion?.StartHeight ?? 0}); peers={_peers.Count}");
             return true;
         }
@@ -178,6 +194,31 @@ public sealed class BsvNode : IDisposable
                     var gd = new List<byte>(); BsvVersion.WriteVarInt(gd, txCount); gd.AddRange(want);
                     peer.Send("getdata", gd.ToArray());
                 }
+            }
+            else if (m.Command == "addr")
+            {
+                // network address gossip: count × (time u32, services u64, ip[16], port u16 BE). We add every
+                // routable IPv4-mapped address to the discovery pool so the dial loop can expand past the seeds.
+                int o = 0; ulong count = BsvVersion.ReadVarInt(m.Payload, ref o);
+                int added = 0;
+                for (ulong i = 0; i < count && o + 30 <= m.Payload.Length; i++)
+                {
+                    o += 4;                                              // timestamp
+                    o += 8;                                              // services
+                    var ip = m.Payload.AsSpan(o, 16); o += 16;
+                    int port = (m.Payload[o] << 8) | m.Payload[o + 1]; o += 2; // big-endian
+                    // IPv4-mapped IPv6 (::ffff:a.b.c.d): bytes 10-11 == 0xffff
+                    if (ip[10] == 0xff && ip[11] == 0xff && port > 0)
+                    {
+                        var v4 = new IPAddress(new[] { ip[12], ip[13], ip[14], ip[15] });
+                        if (!v4.Equals(IPAddress.Any) && !v4.Equals(IPAddress.Loopback))
+                        {
+                            var ep = new IPEndPoint(v4, port);
+                            if (_discovered.TryAdd($"{v4}:{port}", ep)) added++;
+                        }
+                    }
+                }
+                if (added > 0) Log($"discovered {added} peer(s) via addr gossip (pool now {_discovered.Count})");
             }
             else if (m.Command == "merkleblock")
             {
@@ -343,6 +384,21 @@ public sealed class BsvNode : IDisposable
         var t = new byte[4]; BinaryPrimitives.WriteUInt32LittleEndian(t, invType);
         foreach (var h in hashesInternal) { b.AddRange(t); b.AddRange(h); }
         return b.ToArray();
+    }
+
+    /// <summary>
+    /// True if a peer's user-agent identifies it as a NON-BSV node (Bitcoin Cash / BTC) that merely shares our
+    /// network magic. We allow-list nothing (BSV nodes use many user-agents) and instead reject the known
+    /// foreign-chain clients, so an honest BSV node with an unusual agent is still accepted.
+    /// </summary>
+    public static bool IsNonBsvPeer(string ua)
+    {
+        if (string.IsNullOrEmpty(ua)) return false;
+        var u = ua.ToLowerInvariant();
+        string[] foreign = { "cash", "bchn", "bch unlimited", "/abc", "bitcoin abc", "/satoshi", "knots",
+                             "/bcd", "/bsc", "btcd", "/classic", "/xt:", "bu:" };
+        foreach (var f in foreign) if (u.Contains(f)) return true;
+        return false;
     }
 
     private static byte[] InternalHash(string displayHex) { var b = Convert.FromHexString(displayHex); Array.Reverse(b); return b; }

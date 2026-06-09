@@ -76,6 +76,20 @@ public static class BsvProtocolTests
             listener.Stop();
         });
 
+        T.Run("BSV-only peer guard: foreign-chain user-agents (BCH/BTC) are rejected, real BSV accepted", () =>
+        {
+            // BCH and BTC share our message-start lineage; peering with them would feed us a foreign chain.
+            T.True(BsvNode.IsNonBsvPeer("/Bitcoin Cash Node:29.0.0(EB32.0)/"), "BCHN rejected");
+            T.True(BsvNode.IsNonBsvPeer("/BCH Unlimited:1.10.0/"), "BU rejected");
+            T.True(BsvNode.IsNonBsvPeer("/Bitcoin ABC:0.21.0/"), "ABC rejected");
+            T.True(BsvNode.IsNonBsvPeer("/Satoshi:27.0.0/"), "BTC Core rejected");
+            // genuine BSV agents (and our own) must NOT be rejected
+            T.True(!BsvNode.IsNonBsvPeer("/Bitcoin SV:1.1.0/"), "Bitcoin SV accepted");
+            T.True(!BsvNode.IsNonBsvPeer("/Teranode:1.0/"), "Teranode accepted");
+            T.True(!BsvNode.IsNonBsvPeer("/BsvPoker:0.1/"), "our own node accepted");
+            T.True(!BsvNode.IsNonBsvPeer(""), "empty UA not rejected (unknown is allowed)");
+        });
+
         T.Run("two peers complete the version/verack handshake over the real wire protocol", () =>
         {
             var net = NetworkParams.For(BsvNetwork.Regtest);
