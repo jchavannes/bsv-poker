@@ -1754,6 +1754,26 @@ public sealed class WalletView : UserControl
         });
     }
 
+    /// <summary>Broadcast a raw tx the reliable way ElectrumSVP does — via an ElectrumX server — in addition to our
+    /// own P2P peers. Returns (ok, info). Used by Send so a transaction actually propagates even if P2P is weak.</summary>
+    private async System.Threading.Tasks.Task<(bool Ok, string Info)> BroadcastEverywhere(byte[] raw)
+    {
+        var hex = Convert.ToHexString(raw).ToLowerInvariant();
+        try { _node()?.Broadcast(raw); } catch { }                       // P2P peers (best effort)
+        try
+        {
+            var (ok, info) = await System.Threading.Tasks.Task.Run(async () =>
+            {
+                using var ex = new ElectrumXClient();
+                if (!await ex.ConnectAnyAsync(ElectrumXClient.ServersFor(_net().Network), 8000)) return (false, "no ElectrumX server reachable");
+                try { var txid = await ex.BroadcastAsync(hex); return (true, txid); }
+                catch (Exception e) { return (false, e.Message); }
+            });
+            return (ok, info);
+        }
+        catch (Exception e) { return (false, e.Message); }
+    }
+
     /// <summary>The receive key for the given receive index (chain 0).</summary>
     private WalletKeys RecvKey(uint index) => WalletKeys.Account(_seed, 0, index);
 
@@ -2485,15 +2505,15 @@ public sealed class WalletView : UserControl
         long total = outputs.Sum(o => o.Value);
         long fee = EstimateFee(outputs.Count + 1);
         if (total + fee > Balance) { _sendStatus.Text = $"Insufficient funds: have {Balance:N0}, need {total + fee:N0} sat (incl. fee {fee:N0})."; return; }
-        var node = _node();
-        if (node == null || node.PeerCount == 0) { _sendStatus.Text = "No BSV peers connected yet — cannot broadcast. Wait for peers, then retry."; return; }
         try
         {
             var w = new OnChainWallet(_seed);
             foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.Frozen && u.Confirmed && !u.WatchOnly)) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
             var spend = w.BuildActionMany(outputs.Select(o => (o.Lock, o.Value)).ToList(), fee);
             if (!w.VerifySpend(spend)) { _sendStatus.Text = "Built transaction failed self-verification — not broadcast."; return; }
-            node.Broadcast(Chain.Serialize(spend.Tx));
+            _sendStatus.Text = "Broadcasting…";
+            var (bok, binfo) = await BroadcastEverywhere(Chain.Serialize(spend.Tx));  // P2P peers + ElectrumX server (reliable)
+            if (!bok) { _sendStatus.Text = "Broadcast rejected: " + binfo + " (not spent)."; return; }
             var txid = Chain.Txid(spend.Tx);
             foreach (var inp in spend.Inputs) foreach (var u in _w.Utxos.Where(u => u.Txid == inp.Txid && u.Vout == inp.Vout)) u.Spent = true;
             DetectSelfOutputs(spend.Tx, txid);

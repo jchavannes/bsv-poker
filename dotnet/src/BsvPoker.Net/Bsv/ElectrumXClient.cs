@@ -96,6 +96,14 @@ public sealed class ElectrumXClient : IDisposable
         return Convert.ToHexString(h).ToLowerInvariant();
     }
 
+    /// <summary>Broadcast a raw transaction to the network via the server. Returns the txid, or throws with the
+    /// server's rejection reason (so a bad/underfunded tx tells you why).</summary>
+    public async Task<string> BroadcastAsync(string rawTxHex, int timeoutMs = 12000)
+    {
+        var res = await CallAsync("blockchain.transaction.broadcast", timeoutMs, rawTxHex);
+        return res.GetString() ?? "";
+    }
+
     /// <summary>Fetch a transaction's raw bytes by txid (light — no full-block download).</summary>
     public async Task<byte[]> GetTransactionAsync(string txidDisplay, int timeoutMs = 9000)
     {
