@@ -2052,6 +2052,9 @@ public sealed class WalletView : UserControl
         };
         pb.Loaded += (_, _) => pb.Focus();
         win.ShowDialog();
+        // NO WALLET, NO PROGRAM: if the wallet was not unlocked (cancelled / closed), the app ends — there is no
+        // application without an open wallet (ElectrumSVP model).
+        if (_locked) Application.Current?.Shutdown();
     }
 
     /// <summary>A small modal password entry (masked). Returns null if cancelled.</summary>
