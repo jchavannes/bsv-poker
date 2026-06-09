@@ -33,7 +33,7 @@ public partial class MainWindow : Window
         _idPriv = wallet.WalletIdentityPriv; _idPub = wallet.WalletIdentityPub;   // identity = the wallet you opened, not an auto-profile key
         _wallet.RescanRequested = SpvRescan;   // the wallet's "Rescan for my payments now" button
 
-        _game = new GameView(_node, _idPriv, _idPub, vault, wallet.RefreshCards);
+        _game = new GameView(_node, _idPriv, _idPub, wallet.WalletVault, wallet.RefreshCards);   // vault sealed to the OPENED wallet
         GameHost.Content = _game;
 
         // Chat: every message is a Bitcoin transaction; peers are auto-discovered from on-chain Announce txs

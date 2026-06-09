@@ -109,7 +109,9 @@ public sealed class WalletView : UserControl
     private readonly TextBox _fee = new() { Width = 90, Text = "500" };
     private readonly TextBox _dest = new() { Width = 300 };
     private readonly TextBlock _status = new() { Foreground = new SolidColorBrush(Color.FromRgb(0xCC, 0xCC, 0xCC)), VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
-    private readonly CardVault _vault;
+    private CardVault _vault;   // re-created from the OPENED wallet's seed after Load (sealed to the wallet's identity)
+    /// <summary>The card vault sealed to the OPENED wallet's identity — the rest of the app uses this, not a profile vault.</summary>
+    public CardVault WalletVault => _vault;
     private readonly WrapPanel _cards = new() { Margin = new Thickness(0, 4, 0, 0) };
     private readonly TextBlock _cardsLabel = new() { Foreground = Brushes.Gray, Margin = new Thickness(0, 14, 0, 2), Text = "My cards (NFTs)" };
 
@@ -776,6 +778,8 @@ public sealed class WalletView : UserControl
         }
         _path = chosen;
         Load();   // opens (or, if the chosen file is new, creates) the SELECTED wallet — never a default
+        // re-seal the card vault to the OPENED wallet's identity (NFTs belong to the wallet you opened, not a profile)
+        if (_seed.Length == 32) _vault = new CardVault(_dataDir, _identityPriv, _identityPub);
     }
 
     /// <summary>ElectrumSVP-style: open a wallet at an arbitrary FILE path the user chooses.</summary>
