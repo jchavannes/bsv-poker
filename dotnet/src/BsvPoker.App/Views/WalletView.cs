@@ -614,10 +614,13 @@ public sealed class WalletView : UserControl
                     return;   // NO off-chain identity is saved
                 }
                 var (bok, binfo) = await BroadcastEverywhere(raw);
-                if (!bok) { MessageBox.Show("Could not broadcast the identity transaction: " + binfo, "Identity"); return; }
+                if (!bok) { MessageBox.Show("Could not broadcast the identity transaction (no real tx = no identity): " + binfo, "Identity"); return; }
                 reg.OnChainTxid = binfo.Length >= 64 ? binfo : Chain.Txid(Chain.Deserialize(raw));
-                _w.Identity = reg; _w.Handle = reg.Pseudonym; Save(); Render();
-                _status.Text = $"Identity broadcast on-chain as {reg.DisplayName} (@{reg.Pseudonym}) — tx {reg.OnChainTxid[..12]}… (confirms shortly).";
+                _w.Identity = reg; _w.Handle = reg.Pseudonym;
+                AppendTx("identity", -(1 + 500), $"Identity NFT registered ON-CHAIN — tx {reg.OnChainTxid}");  // a REAL tx, in history
+                _w.NftMints[reg.OnChainTxid] = reg.OnChainTxid;                                                 // the identity NFT (its on-chain tx)
+                Save(); Render();
+                MessageBox.Show($"Identity is now ON-CHAIN as @{reg.Pseudonym}.\n\nReal transaction (an NFT) broadcast:\n{reg.OnChainTxid}\n\nIt is in your History and NFTs now and confirms shortly.", "Identity registered on-chain");
                 win.Close();
             }
             catch (Exception ex) { MessageBox.Show("Registration failed: " + ex.Message); }
