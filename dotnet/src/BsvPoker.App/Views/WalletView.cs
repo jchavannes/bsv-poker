@@ -1968,6 +1968,50 @@ public sealed class WalletView : UserControl
             _freshWallet = true;     // first run → run the ElectrumSVP-style account wizard
             Save();
         }
+        else
+        {
+            // SECURITY (no-login is fraud): an EXISTING wallet whose seed is stored in the clear must be
+            // password-protected before it can be used. Force a password now and encrypt the SAME seed in
+            // place — the seed, the addresses, and every coin are RETAINED; nothing is regenerated.
+            RequirePasswordForExistingWallet();
+        }
+    }
+
+    /// <summary>Mandatory at startup for an existing plaintext wallet: set a password and encrypt the EXISTING
+    /// seed in place (funds/keys retained). The user cannot reach the wallet without doing this; Cancel exits
+    /// the app rather than leaving an unprotected wallet open.</summary>
+    private void RequirePasswordForExistingWallet()
+    {
+        var pb = new PasswordBox { Width = 320 };
+        var pb2 = new PasswordBox { Width = 320 };
+        var err = new TextBlock { Foreground = Brushes.IndianRed, Margin = new Thickness(0, 6, 0, 0), TextWrapping = TextWrapping.Wrap };
+        var ok = new Button { Content = "Set password", Margin = new Thickness(0, 12, 8, 0), Padding = new Thickness(16, 6, 16, 6), IsDefault = true };
+        var cancel = new Button { Content = "Quit", Margin = new Thickness(0, 12, 0, 0), Padding = new Thickness(16, 6, 16, 6), IsCancel = true };
+        var sp = new StackPanel { Margin = new Thickness(16) };
+        sp.Children.Add(new TextBlock { Text = "🔒 Secure your wallet", FontSize = 16, FontWeight = FontWeights.Bold, Foreground = Ink });
+        sp.Children.Add(new TextBlock { Text = "Your wallet has no password. Set one now to encrypt your keys — your existing seed and all your funds are kept; nothing is lost. You'll enter this password each time you open the wallet.", Foreground = SubInk, TextWrapping = TextWrapping.Wrap, MaxWidth = 320, Margin = new Thickness(0, 4, 0, 8) });
+        sp.Children.Add(new TextBlock { Text = "new password", Foreground = SubInk, FontSize = 12 }); sp.Children.Add(pb);
+        sp.Children.Add(new TextBlock { Text = "confirm password", Foreground = SubInk, FontSize = 12 }); sp.Children.Add(pb2);
+        sp.Children.Add(err);
+        var row = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
+        row.Children.Add(ok); row.Children.Add(cancel); sp.Children.Add(row);
+        var win = new Window { Title = "Set wallet password", SizeToContent = SizeToContent.WidthAndHeight, ResizeMode = ResizeMode.NoResize, WindowStartupLocation = WindowStartupLocation.CenterScreen, Background = (Brush)FindResource("Bg"), Content = sp };
+        ok.Click += (_, _) =>
+        {
+            if (pb.Password.Length < 1) { err.Text = "enter a password"; return; }
+            if (pb.Password != pb2.Password) { err.Text = "passwords do not match"; return; }
+            // encrypt the EXISTING seed in place — same seed, same funds
+            _w.Seed = WalletExtras.EncryptSeed(WalletKeys.SeedToBackup(_seed), pb.Password);
+            Save();
+            win.DialogResult = true;
+        };
+        var result = win.ShowDialog();
+        if (result != true)
+        {
+            // refused to set a password → do NOT leave an unprotected wallet accessible
+            _locked = true; _seed = Array.Empty<byte>();
+            Application.Current?.Shutdown();
+        }
     }
 
     /// <summary>Prompt for the wallet password and decrypt the seed into memory. Loops until correct or cancelled.</summary>
