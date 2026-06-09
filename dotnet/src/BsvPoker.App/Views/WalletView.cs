@@ -127,6 +127,7 @@ public sealed class WalletView : UserControl
     private readonly DataGrid _requestsGrid = NewGrid();
     private readonly DataGrid _vaultsGrid = NewGrid();
     private readonly TextBlock _fundInfo = new() { Foreground = new SolidColorBrush(Color.FromRgb(0xCC, 0xCC, 0xCC)), TextWrapping = TextWrapping.Wrap, MaxWidth = 640, HorizontalAlignment = HorizontalAlignment.Left };
+    private string _elxStatus = "ElectrumX: connecting…";
     private readonly TextBlock _idPub = new() { Foreground = new SolidColorBrush(Color.FromRgb(0x7C, 0xE0, 0x7C)), FontFamily = new FontFamily("Consolas"), TextWrapping = TextWrapping.Wrap };
     private readonly TextBox _idHandle = new() { Width = 240 };
 
@@ -687,6 +688,27 @@ public sealed class WalletView : UserControl
         btns.Children.Add(refresh); btns.Children.Add(testElx); btns.Children.Add(addPeer); btns.Children.Add(refundsApply);
         sp.Children.Add(btns);
         sp.Children.Add(elx);
+        // Check ANY address's balance via ElectrumX — paste the address you funded to prove the network + coin,
+        // and whether it's one of THIS wallet's derived addresses.
+        var chkRow = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
+        var chkBox = new TextBox { Width = 360, Text = "1BH5Uf3tbfNSBjCmVJYWB5nTCRXVVBQXuR" }; ThemeOne(chkBox);
+        var chkBtn = Btn("Check address balance");
+        var chkRes = new TextBlock { Foreground = SubInk, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 4, 0, 0) };
+        chkBtn.Click += async (_, _) =>
+        {
+            var addr = chkBox.Text.Trim();
+            byte[] payload; try { payload = Base58.CheckDecode(addr); if (payload.Length != 21) throw new Exception(); } catch { chkRes.Text = "Invalid address."; return; }
+            bool mine = false; uint gap = (uint)_w.RecvIndex + 50;
+            for (uint c = 0; c <= 2 && !mine; c++) for (uint i = 0; i <= gap; i++) if (Hashes.Hash160(WalletKeys.Account(_seed, c, i).Pub).AsSpan().SequenceEqual(payload[1..])) { mine = true; break; }
+            chkRes.Text = "Querying ElectrumX…";
+            var script = payload[0] == _net().ScriptVersion ? Chain.P2shLockFromHash(payload[1..]) : Chain.P2pkhLock(payload[1..]);
+            var (bal, host, err) = await System.Threading.Tasks.Task.Run(async () => { using var ex = new ElectrumXClient(); if (!await ex.ConnectAnyAsync(ElectrumXClient.ServersFor(_net().Network), 8000)) return (0L, "", "unreachable"); try { var us = await ex.ListUnspentAsync(ElectrumXClient.ScriptHashOf(script)); return (us.Sum(u => u.Value), ex.Host ?? "", ""); } catch (Exception e) { return (0L, ex.Host ?? "", e.Message); } });
+            chkRes.Text = err.Length > 0 ? $"ElectrumX error: {err}" :
+                $"{addr}\nbalance = {bal:N0} sat (via {host}). " + (mine ? "✓ THIS is one of your wallet's addresses — use 'Refresh balance' to credit it." : "✖ This is NOT a current address of this wallet/account — the coin is on a different seed; restore that wallet's seed (Tools → Restore).");
+            chkRes.Foreground = bal > 0 ? Accent : SubInk;
+        };
+        chkRow.Children.Add(chkBox); chkRow.Children.Add(chkBtn);
+        sp.Children.Add(chkRow); sp.Children.Add(chkRes);
         sp.Children.Add(new TextBlock { Text = "Connection log:", Foreground = SubInk, Margin = new Thickness(0, 8, 0, 2) });
         sp.Children.Add(log);
         Refresh();
@@ -1700,7 +1722,8 @@ public sealed class WalletView : UserControl
         {
             using var ex = new ElectrumXClient();
             void Log(string m) => Dispatcher.BeginInvoke(new Action(() => _status.Text = m));
-            if (!await ex.ConnectAnyAsync(servers, 8000, Log)) { Log("ElectrumX backup: no server reachable."); return; }
+            if (!await ex.ConnectAnyAsync(servers, 8000, Log)) { _elxStatus = "ElectrumX: ✖ unreachable"; Log("ElectrumX backup: no server reachable."); await Dispatcher.InvokeAsync(UpdateStatusBar); return; }
+            _elxStatus = $"ElectrumX: ✓ {ex.Host}"; await Dispatcher.InvokeAsync(UpdateStatusBar);
             int found = 0; long total = 0;
             for (uint chain = 0; chain <= 2; chain++)
                 for (uint i = 0; i <= gap; i++)
@@ -2307,7 +2330,7 @@ public sealed class WalletView : UserControl
         _sbLock.Text = "🔓 unlocked";
         var node = _node();
         var who = string.IsNullOrWhiteSpace(_w.Handle) ? "" : $"@{_w.Handle} · ";
-        _sbNetwork.Text = $"{who}acct #{_accountIndex} · {_net().Network} · SPV peers: {(node?.PeerCount ?? 0)}";
+        _sbNetwork.Text = $"{who}acct #{_accountIndex} · {_net().Network} · SPV peers: {(node?.PeerCount ?? 0)} · {_elxStatus}";
     }
 
     /// <summary>Resolve a peer's identity public key (hex) to a saved contact handle, or null. Lets the chat /
