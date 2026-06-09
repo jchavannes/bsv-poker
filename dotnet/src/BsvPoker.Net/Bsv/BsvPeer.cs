@@ -19,8 +19,13 @@ public sealed class BsvPeer : IDisposable
     private volatile bool _closed;
 
     public bool Handshaked { get; private set; }
+    public bool Closed => _closed;
     public BsvVersion.Info? RemoteVersion { get; private set; }
     public event Action<BsvMessage>? OnMessage;
+    /// <summary>Raised once when the connection is torn down (read returned 0, error, or Dispose) so the
+    /// owning <see cref="BsvNode"/> can drop this peer from its live set instead of dialing a dead socket.</summary>
+    public event Action? OnClosed;
+    private int _closedFired;
 
     public BsvPeer(NetworkParams net, TcpClient sock)
     {
@@ -105,5 +110,11 @@ public sealed class BsvPeer : IDisposable
         finally { Dispose(); }
     }
 
-    public void Dispose() { _closed = true; try { _stream.Dispose(); } catch { } try { _sock.Dispose(); } catch { } }
+    public void Dispose()
+    {
+        _closed = true;
+        try { _stream.Dispose(); } catch { }
+        try { _sock.Dispose(); } catch { }
+        if (System.Threading.Interlocked.Exchange(ref _closedFired, 1) == 0) { try { OnClosed?.Invoke(); } catch { } }
+    }
 }

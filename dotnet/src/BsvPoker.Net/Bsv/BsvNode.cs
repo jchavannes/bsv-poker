@@ -87,13 +87,15 @@ public sealed class BsvNode : IDisposable
                         var key = $"{ep.Address}:{ep.Port}";
                         if (_peers.ContainsKey(key) || inFlight.Contains(key)) continue;
                         if (cooldown.TryGetValue(key, out var next) && now < next) continue;  // not yet — back off
-                        cooldown[key] = now + 60_000;            // don't re-dial this node for 60s (prevents greylisting)
+                        cooldown[key] = now + 20_000;            // re-dial window: public BSV nodes evict inbound fast,
+                                                                 // so we must re-establish peers briskly (still backed off
+                                                                 // enough to never hammer a single node into greylisting us)
                         inFlight.Add(key);
                         _ = ConnectAsync(ep.Address.ToString(), ep.Port).ContinueWith(_ => { lock (inFlight) inFlight.Remove(key); });
                     }
                 }
                 else if (candidates.Count == 0) Log("no candidate peers — DNS seeds returned nothing; add a node manually (Tools → Network).");
-                try { await Task.Delay(3000, _cts.Token); } catch { return; }
+                try { await Task.Delay(1200, _cts.Token); } catch { return; }
             }
         });
     }
@@ -115,6 +117,7 @@ public sealed class BsvNode : IDisposable
             var ua = peer.RemoteVersion?.UserAgent ?? "";
             if (IsNonBsvPeer(ua)) { peer.Dispose(); Log($"rejected {key}: not a BSV node (ua {ua})"); return false; }
             _peers[key] = peer;
+            peer.OnClosed += () => { if (_peers.TryRemove(key, out _)) Log($"peer {key} disconnected; peers={_peers.Count}"); };
             peer.OnMessage += m => HandleRelay(peer, m);   // receive relayed transactions (announce/chat/etc.) from the network
             // give this fresh peer our SPV filter so it relays our own transactions back to us
             if (_filter is { } f) { try { peer.Send("filterload", f.ToFilterLoad()); peer.Send("mempool", Array.Empty<byte>()); } catch { } }
@@ -312,18 +315,21 @@ public sealed class BsvNode : IDisposable
     /// </summary>
     public async Task<(int Appended, int StoreHeight)> SyncHeadersToStoreAsync(HeaderStore store, int maxBatches = 50, int waitMs = 8000)
     {
-        var peer = _peers.Values.FirstOrDefault();
         var genesis = InternalHash(_net.GenesisHashHex);
-        if (peer == null) return (0, store.Count);
         var prev = store.TipOrGenesis(genesis); // resume locator
         int appended = 0;
         for (int batch = 0; batch < maxBatches; batch++)
         {
+            // re-pick a live peer every batch — a long sync outlives individual connections; if the current
+            // peer drops mid-sync we transparently continue from another, resuming from the store's tip.
+            var peer = _peers.Values.FirstOrDefault(p => !p.Closed);
+            if (peer == null) break;
             var received = new List<BlockHeader>();
             var tcs = new TaskCompletionSource<bool>();
             void Handler(BsvMessage m) { if (m.Command == "headers") { try { ParseHeaders(m.Payload, received); } catch { } tcs.TrySetResult(true); } }
             peer.OnMessage += Handler;
             try { peer.Send("getheaders", BuildGetHeaders(new[] { prev })); await Task.WhenAny(tcs.Task, Task.Delay(waitMs)); }
+            catch { peer.OnMessage -= Handler; continue; }   // peer dropped mid-send → try the next live peer
             finally { peer.OnMessage -= Handler; }
             if (received.Count == 0) break;
             var batchValid = new List<BlockHeader>();
@@ -348,24 +354,26 @@ public sealed class BsvNode : IDisposable
     /// </summary>
     public async Task<byte[]?> GetBlockAsync(string blockHashDisplayHex, int waitMs = 20000)
     {
-        var peer = _peers.Values.FirstOrDefault();
-        if (peer == null) return null;
         var want = InternalHash(blockHashDisplayHex);
-        var tcs = new TaskCompletionSource<byte[]?>();
+        var tcs = new TaskCompletionSource<byte[]?>(TaskCreationOptions.RunContinuationsAsynchronously);
         void Handler(BsvMessage m)
         {
-            if (m.Command != "block") return;
+            if (m.Command != "block" || m.Payload.Length < 80) return;
             try { if (BlockHeader.Parse(m.Payload.AsSpan(0, 80)).Hash().AsSpan().SequenceEqual(want)) tcs.TrySetResult(m.Payload); }
             catch { }
         }
-        peer.OnMessage += Handler;
-        try
+        // ask every live peer and take whichever delivers the block first — resilient to the fast peer churn
+        // we see on public BSV nodes (a peer that drops mid-download simply loses the race to another).
+        var subscribed = new List<BsvPeer>();
+        var gd = BuildGetData(2 /* MSG_BLOCK */, want);
+        foreach (var p in _peers.Values.Where(p => !p.Closed))
         {
-            peer.Send("getdata", BuildGetData(2 /* MSG_BLOCK */, want));
-            await Task.WhenAny(tcs.Task, Task.Delay(waitMs));
-            return tcs.Task.IsCompleted ? tcs.Task.Result : null;
+            p.OnMessage += Handler; subscribed.Add(p);
+            try { p.Send("getdata", gd); } catch { }
         }
-        finally { peer.OnMessage -= Handler; }
+        if (subscribed.Count == 0) return null;
+        try { await Task.WhenAny(tcs.Task, Task.Delay(waitMs)); return tcs.Task.IsCompleted ? tcs.Task.Result : null; }
+        finally { foreach (var p in subscribed) p.OnMessage -= Handler; }
     }
 
     private static byte[] BuildGetData(uint invType, byte[] hashInternal)
