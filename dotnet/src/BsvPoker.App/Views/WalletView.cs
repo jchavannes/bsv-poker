@@ -1946,12 +1946,10 @@ public sealed class WalletView : UserControl
     private void Load()
     {
         try { if (File.Exists(_path)) _w = JsonSerializer.Deserialize<File_>(File.ReadAllText(_path)) ?? new File_(); } catch { _w = new File_(); }
-        // NO FAKE COINS / NO FAKE HISTORY: keep ONLY real, SPV-CONFIRMED coins (spent ones are kept so genuine
-        // history survives a restart; the balance counts confirmed-unspent only). Drop any not-yet-confirmed
-        // (pending) coins — they are re-discovered by the SPV rescan, never carried over as if real. The send
-        // log (_w.Sends) is real broadcasts this wallet made; labels/contacts/requests are user metadata.
-        _w.Utxos = _w.Utxos.Where(u => u.Confirmed).ToList();
-        _w.History.Clear();
+        // LOAD IS READ-ONLY AND NON-DESTRUCTIVE: we keep EVERY coin and every record exactly as stored. We do
+        // NOT prune, clear, or re-save the wallet on load — destroying a user's coin/history cache (even a
+        // "pending" one) is data loss and is forbidden. The balance computation already counts confirmed-unspent
+        // only; that is a display concern, never a reason to delete stored data.
         if (WalletExtras.IsEncryptedSeed(_w.Seed))
         {
             _locked = true;            // encrypted on disk — must be unlocked with the password before use
@@ -2180,6 +2178,18 @@ public sealed class WalletView : UserControl
 
     private void Save()
     {
+        // NEVER lose a wallet file. Before replacing the wallet, snapshot the existing one to a timestamped,
+        // append-only backup folder — so every prior version is preserved and a wallet can never be destroyed.
+        try
+        {
+            if (File.Exists(_path))
+            {
+                var bdir = Path.Combine(_dataDir, "wallet-backups");
+                Directory.CreateDirectory(bdir);
+                File.Copy(_path, Path.Combine(bdir, $"{Path.GetFileName(_path)}.{DateTime.UtcNow:yyyyMMdd-HHmmss-fff}.bak"), overwrite: false);
+            }
+        }
+        catch { /* a backup must never block a save, but we attempt it every time */ }
         var tmp = _path + ".tmp";
         File.WriteAllText(tmp, JsonSerializer.Serialize(_w, new JsonSerializerOptions { WriteIndented = true }));
         File.Move(tmp, _path, true);

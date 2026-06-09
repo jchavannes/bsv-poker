@@ -84,7 +84,7 @@ public static class NetGameStressTests
                     if (g.TableChips != expectChips) throw new Exception($"chips not conserved on a seat ({g.TableChips})");
                 ok++;
             }
-            catch (Exception ex) { fail++; if (firstErr.Length == 0) firstErr = $"iter {i} ({variant} p{players}): {ex.Message}"; }
+            catch (Exception ex) { fail++; Console.WriteLine($"  FAIL iter {i} {variant} p{players}: {ex.Message}"); if (firstErr.Length == 0) firstErr = $"iter {i} ({variant} p{players}): {ex.Message}"; }
             finally
             {
                 foreach (var g in games) { try { g?.Stop(); } catch { } }
