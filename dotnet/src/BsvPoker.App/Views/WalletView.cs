@@ -1691,9 +1691,23 @@ public sealed class WalletView : UserControl
     /// <summary>The receive key for the given receive index (chain 0).</summary>
     private WalletKeys RecvKey(uint index) => WalletKeys.Account(_seed, 0, index);
 
+    /// <summary>The lowest receive index (chain 0) that has NOT already received a coin — addresses are SINGLE-USE,
+    /// so a funded address is never shown or reused again.</summary>
+    private uint NextUnusedRecvIndex()
+    {
+        var used = new HashSet<uint>(_w.Utxos.Where(u => u.KeyChain == 0).Select(u => u.KeyIndex));
+        uint i = (uint)Math.Max(0, _w.RecvIndex);
+        while (used.Contains(i)) i++;
+        return i;
+    }
+
     private string ReceiveAddress()
     {
-        var pub = RecvKey((uint)_w.RecvIndex).Pub;
+        // single-use: if the current receive address has already been funded, advance to a fresh one (and persist
+        // that advance once — not on every render, because once advanced the new address is unused until funded).
+        uint idx = NextUnusedRecvIndex();
+        if (idx != (uint)_w.RecvIndex) { _w.RecvIndex = (int)idx; Save(); }
+        var pub = RecvKey(idx).Pub;
         var payload = new byte[21]; payload[0] = _net().AddressVersion; Hashes.Hash160(pub).CopyTo(payload, 1);
         return Base58.CheckEncode(payload);
     }
