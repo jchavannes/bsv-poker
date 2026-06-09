@@ -286,8 +286,11 @@ public sealed class WalletView : UserControl
         MenuItem I(string h, Action a) { var mi = new MenuItem { Header = h, Foreground = Brushes.Black }; mi.Click += (_, _) => { try { a(); } catch (Exception ex) { _status.Text = ex.Message; } }; return mi; }
 
         var file = M("_File");
+        file.Items.Add(I("_Open wallet file…", OpenWalletFileDialog));
+        file.Items.Add(I("New _wallet file…", NewWalletFileDialog));
+        file.Items.Add(new Separator());
         file.Items.Add(I("_New / Restore…", () => AccountWizard()));
-        file.Items.Add(I("_Open (restore from seed)…", Restore));
+        file.Items.Add(I("Open (restore from _seed)…", Restore));
         file.Items.Add(I("_Save a copy of the seed backup…", BackupSeedToFile));
         file.Items.Add(I("Save a copy of the _wallet file…", SaveWalletCopy));
         file.Items.Add(new Separator());
@@ -697,6 +700,40 @@ public sealed class WalletView : UserControl
 
     /// <summary>Switch the active account to a separate seed/wallet file (account 0 = the original wallet). Each
     /// account has its own seed, coins, and history; the identity (chat/game/NFT) stays the profile identity.</summary>
+    /// <summary>ElectrumSVP-style: open a wallet at an arbitrary FILE path the user chooses.</summary>
+    private void OpenWalletFileDialog()
+    {
+        var dlg = new Microsoft.Win32.OpenFileDialog { Title = "Open wallet file", Filter = "Wallet (*.json)|*.json|All files (*.*)|*.*" };
+        if (dlg.ShowDialog() == true) OpenWalletAtPath(dlg.FileName);
+    }
+
+    /// <summary>Create a NEW wallet at a file path the user chooses (never overwrites an existing file — funds
+    /// protection: if the chosen file already exists we OPEN it instead of clobbering it).</summary>
+    private void NewWalletFileDialog()
+    {
+        var dlg = new Microsoft.Win32.SaveFileDialog { Title = "Create new wallet file", Filter = "Wallet (*.json)|*.json", FileName = "poker-wallet.json", OverwritePrompt = false };
+        if (dlg.ShowDialog() == true) OpenWalletAtPath(dlg.FileName);   // Load() creates a fresh wallet if the file is new
+    }
+
+    /// <summary>Load the wallet at <paramref name="path"/> (creating a fresh one there if the file does not yet
+    /// exist). Mirrors SwitchAccount but for an arbitrary user-chosen file; never overwrites existing data.</summary>
+    private void OpenWalletAtPath(string path)
+    {
+        try
+        {
+            if (_seed.Length == 32) Save();      // persist the currently open wallet first (non-destructive + backed up)
+            _path = path;
+            _locked = false; _w = new File_(); _seed = Array.Empty<byte>();
+            Load();                               // opens (or creates) the chosen file; prompts unlock/wizard as needed
+            if (_seed.Length == 32) _ring = new KeyRing(_seed, Math.Max(1, _w.RecvIndex));
+            if (_freshWallet) { _freshWallet = false; AccountWizard(); }
+            Render();
+            OnUnlocked?.Invoke();
+            _status.Text = $"Opened wallet: {Path.GetFileName(path)}";
+        }
+        catch (Exception ex) { _status.Text = "Open failed: " + ex.Message; }
+    }
+
     private void SwitchAccount(int i)
     {
         try
