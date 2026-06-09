@@ -155,6 +155,7 @@ public sealed class WalletView : UserControl
         _dataDir = dataDir;
         _path = AccountPath(0);
         Load();
+        VaultBackup();   // EVERY RUN: a fresh immutable (read-only) backup in claude\backups
 
         if (_seed.Length == 32) _ring = new KeyRing(_seed, Math.Max(1, _w.RecvIndex));
         ThemeInputs();
@@ -2178,21 +2179,48 @@ public sealed class WalletView : UserControl
 
     private void Save()
     {
-        // NEVER lose a wallet file. Before replacing the wallet, snapshot the existing one to a timestamped,
-        // append-only backup folder — so every prior version is preserved and a wallet can never be destroyed.
-        try
-        {
-            if (File.Exists(_path))
-            {
-                var bdir = Path.Combine(_dataDir, "wallet-backups");
-                Directory.CreateDirectory(bdir);
-                File.Copy(_path, Path.Combine(bdir, $"{Path.GetFileName(_path)}.{DateTime.UtcNow:yyyyMMdd-HHmmss-fff}.bak"), overwrite: false);
-            }
-        }
-        catch { /* a backup must never block a save, but we attempt it every time */ }
         var tmp = _path + ".tmp";
         File.WriteAllText(tmp, JsonSerializer.Serialize(_w, new JsonSerializerOptions { WriteIndented = true }));
         File.Move(tmp, _path, true);
+        VaultBackup();   // EVERY write produces a new immutable (read-only) backup — never deleted
+    }
+
+    /// <summary>The claude\backups vault: the immutable wallet backup root. Walks up from the running location to
+    /// the directory named "claude"; falls back to D:\claude\backups.</summary>
+    internal static string VaultRoot()
+    {
+        try
+        {
+            var d = new DirectoryInfo(AppContext.BaseDirectory);
+            while (d != null) { if (string.Equals(d.Name, "claude", StringComparison.OrdinalIgnoreCase)) return Path.Combine(d.FullName, "backups"); d = d.Parent; }
+        }
+        catch { }
+        return @"D:\claude\backups";
+    }
+
+    private static string SafeName(string s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return "wallet";
+        foreach (var c in Path.GetInvalidFileNameChars()) s = s.Replace(c, '-');
+        return s;
+    }
+
+    /// <summary>Copy the current wallet file to the claude\backups vault as a NEW, READ-ONLY, named, never-deleted
+    /// file. Called on every write and every run. We would rather a million small files than lose one wallet, so
+    /// each backup is unique (100ns timestamp) and never overwritten or removed.</summary>
+    internal void VaultBackup()
+    {
+        try
+        {
+            if (!File.Exists(_path)) return;
+            var root = VaultRoot(); Directory.CreateDirectory(root);
+            var name = SafeName(string.IsNullOrWhiteSpace(_w.Handle) ? (_w.Identity?.Pseudonym ?? "wallet") : _w.Handle);
+            var dst = Path.Combine(root, $"poker-wallet-{name}-{DateTime.UtcNow:yyyyMMdd-HHmmss-fffffff}.dat");
+            if (File.Exists(dst)) return;                 // never touch an existing (read-only) backup
+            File.Copy(_path, dst, overwrite: false);
+            try { new FileInfo(dst).IsReadOnly = true; } catch { }   // immutable: never to be written or deleted again
+        }
+        catch { /* a backup attempt must never crash the wallet, but we attempt it on every write/run */ }
     }
 
     private bool IsRegistered => _w.Identity != null;
