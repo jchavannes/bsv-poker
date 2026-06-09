@@ -15,6 +15,8 @@ public partial class MainWindow : Window
     private PokerGossip? _gossip;   // the poker discovery overlay (announce/forward/query) on top of Bitcoin
     private readonly P2PNode _node = new(0, "127.0.0.1"); // table/lobby transport (loopback default; LAN is opt-in)
     private LobbyView? _lobby;
+    private byte[] _idPriv = Array.Empty<byte>();   // the OPENED wallet's identity (Base ID) — set after the wallet is selected
+    private byte[] _idPub = Array.Empty<byte>();
 
     public MainWindow()
     {
@@ -22,21 +24,22 @@ public partial class MainWindow : Window
         // PER-INSTANCE: each running copy gets its OWN profile (wallet + identity). A 2nd copy is a different player.
         Title = $"BSV Poker — {_profile.Name}";
 
-        var vault = new CardVault(_profile.Dir, _profile.IdentityPriv, _profile.IdentityPub);
+        var vault = new CardVault(_profile.Dir, _profile.IdentityPriv, _profile.IdentityPub); // (pre-wallet; re-sealed to the opened wallet's identity is a follow-up)
         // ONE identity across wallet + chat + game + NFTs: the wallet pays/encrypts/claims with the SAME Base ID
         // key the chat and game use, and NFTs are sealed to it. Fully integrated, not separate identities.
         var wallet = new WalletView(_profile.Dir, vault, () => _bsvNode, () => _headerStore, () => _currentNet, _profile.IdentityPriv, _profile.IdentityPub);
         WalletHost.Content = wallet;
         _wallet = wallet;
+        _idPriv = wallet.WalletIdentityPriv; _idPub = wallet.WalletIdentityPub;   // identity = the wallet you opened, not an auto-profile key
         _wallet.RescanRequested = SpvRescan;   // the wallet's "Rescan for my payments now" button
 
-        _game = new GameView(_node, _profile.IdentityPriv, _profile.IdentityPub, vault, wallet.RefreshCards);
+        _game = new GameView(_node, _idPriv, _idPub, vault, wallet.RefreshCards);
         GameHost.Content = _game;
 
         // Chat: every message is a Bitcoin transaction; peers are auto-discovered from on-chain Announce txs
         // (no manual key/IP exchange). Send = fund an encrypted ChatDirect tx, push it IP-to-IP to the peer
         // AND broadcast it to miners.
-        _chatView = new ChatView(_profile.IdentityPub,
+        _chatView = new ChatView(_idPub,
             () => (_gossip?.Peers ?? new List<PokerGossip.Peer>()).Select(p => (p.PubHex, p.Endpoint)).ToList(),
             SendChatTx);
         _chatView.SetHandleResolver(wallet.IdentityLabelFor);   // chat shows @handles from the wallet's Contacts
@@ -45,7 +48,7 @@ public partial class MainWindow : Window
 
         // The lobby: pick a variant + seat count (2–6), host/join a real table, or play your own bot at the chosen
         // variant. Joining a table or pressing "Play a bot" jumps to the game board.
-        _lobby = new LobbyView(_node, _profile.IdentityPub, JoinTable,
+        _lobby = new LobbyView(_node, _idPub, JoinTable,
             variant => { if (CanPlay()) { _game!.StartBot(variant); Tabs.SelectedIndex = 2; } });
         LobbyHost.Content = _lobby;
         InitNetworkSelector();
@@ -57,7 +60,7 @@ public partial class MainWindow : Window
             _wallet.Refresh();   // the receive address is network-aware; show it for the loaded network
             StartTxLink();       // listen for transactions pushed to us IP-to-IP by other players
             // bring up the table/lobby node so you can host/join a table or play your bot
-            try { _node.SetIdentity(_profile.IdentityPriv, _profile.IdentityPub); await _node.StartAsync(); _lobby?.OnNodeReady(_node.BoundPort); } catch { }
+            try { _node.SetIdentity(_idPriv, _idPub); await _node.StartAsync(); _lobby?.OnNodeReady(_node.BoundPort); } catch { }
             var netRefresh = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
             netRefresh.Tick += (_, _) => UpdateNetInfo();
             netRefresh.Start();
@@ -86,7 +89,7 @@ public partial class MainWindow : Window
             _link = new TxLink(_currentNet, 0); // loopback by default; expose to LAN/Internet is an explicit opt-in
             _link.OnTransaction += Ingest;      // transactions peers push to us directly, IP-to-IP
             _link.Start();
-            var myHex = Convert.ToHexString(_profile.IdentityPub).ToLowerInvariant();
+            var myHex = Convert.ToHexString(_idPub).ToLowerInvariant();
             _gossip = new PokerGossip(myHex, MyEndpoint(),
                 (peerPub, endpoint, msg) => SendEncrypted(peerPub, endpoint, "GOSSIP:" + msg)); // gossip rides on Bitcoin txs
             _gossip.OnPeersChanged += () => Dispatcher.BeginInvoke(new Action(UpdateNetInfo));
@@ -104,13 +107,13 @@ public partial class MainWindow : Window
         if (ann != null)
         {
             var hex = Convert.ToHexString(ann.Pub).ToLowerInvariant();
-            if (!hex.Equals(Convert.ToHexString(_profile.IdentityPub), StringComparison.OrdinalIgnoreCase))
+            if (!hex.Equals(Convert.ToHexString(_idPub), StringComparison.OrdinalIgnoreCase))
                 _gossip?.AddSeed(hex, ann.Endpoint);
             return;
         }
         // detect an incoming PAYMENT to one of our addresses (shows as pending until SPV-confirmed)
         _wallet.ConsiderIncoming(tx);
-        var msg = OnChainChat.TryReadTx(tx, _profile.IdentityPriv, _profile.IdentityPub);
+        var msg = OnChainChat.TryReadTx(tx, _idPriv, _idPub);
         if (msg == null) return;
         if (msg.Text.StartsWith("GOSSIP:", StringComparison.Ordinal))      // poker discovery overlay
             _gossip?.Receive(msg.Text["GOSSIP:".Length..]);
@@ -156,8 +159,8 @@ public partial class MainWindow : Window
     {
         // the bot is DERIVED from MY identity (Type-42) and named <my-handle>-Bot-NNN; it will only ever play me.
         var ownerHandle = string.IsNullOrWhiteSpace(_wallet.MyHandle) ? _profile.Name.Replace(" ", "") : _wallet.MyHandle;
-        var bot = new BotPlayer(_currentNet, LocalIp(), _profile.IdentityPriv, _profile.IdentityPub, ++_botCount, ownerHandle);
-        var myHex = Convert.ToHexString(_profile.IdentityPub).ToLowerInvariant();
+        var bot = new BotPlayer(_currentNet, LocalIp(), _idPriv, _idPub, ++_botCount, ownerHandle);
+        var myHex = Convert.ToHexString(_idPub).ToLowerInvariant();
         bot.AddPeer(myHex, MyEndpoint());                  // the bot knows how to reach us
         _gossip?.AddSeed(bot.PubHex, bot.Endpoint);        // we know how to reach the bot
         _wallet.ImportContact(bot.Name, bot.PubHex);       // add the bot to the address book so it's named everywhere
@@ -211,7 +214,7 @@ public partial class MainWindow : Window
         var peerHex = peer.PubHex;
         var ch = new TxDealChannel(peerPub, plaintext => SendEncrypted(peerHex, endpoint, "DEAL:" + plaintext));
         _activeDeal = ch;
-        bool initiator = string.CompareOrdinal(Convert.ToHexString(_profile.IdentityPub).ToLowerInvariant(), peerHex) < 0;
+        bool initiator = string.CompareOrdinal(Convert.ToHexString(_idPub).ToLowerInvariant(), peerHex) < 0;
         var s = seat.Value;
         System.Threading.Tasks.Task.Run(() =>
         {
@@ -250,7 +253,7 @@ public partial class MainWindow : Window
         byte[] rpub;
         try { rpub = Convert.FromHexString(recipientPubHex); } catch { return "Recipient public key must be 66 hex chars."; }
         if (rpub.Length != 33) return "Recipient public key must be a 33-byte compressed key.";
-        var script = OnChainChat.BuildScript(rpub, _profile.IdentityPub, text);
+        var script = OnChainChat.BuildScript(rpub, _idPub, text);
         var (raw, status) = _wallet.FundTx(script, 1000, 500);
         if (raw == null) return status;
         var (host, port) = ParseHostPort(endpoint);
@@ -268,7 +271,7 @@ public partial class MainWindow : Window
     {
         try
         {
-            var script = OnChainAnnounce.BuildScript(_profile.IdentityPub, MyEndpoint());
+            var script = OnChainAnnounce.BuildScript(_idPub, MyEndpoint());
             var (raw, _) = _wallet.FundTx(script, 1000, 500);   // a bootstrap announcement is a real funded tx
             if (raw != null) _bsvNode?.Broadcast(raw);
         }

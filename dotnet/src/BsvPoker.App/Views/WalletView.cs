@@ -146,15 +146,19 @@ public sealed class WalletView : UserControl
         FontFamily = new FontFamily("Consolas"), FontSize = 12, SelectionMode = DataGridSelectionMode.Extended, RowHeaderWidth = 0,
     };
 
-    // The ONE identity (Base ID) shared across wallet, chat, game, and NFT sealing — passed in from the profile
-    // so paying an identity, encrypting to an identity, the chat key, and NFT ownership are all the SAME key.
-    private readonly byte[] _identityPriv;
-    private readonly byte[] _identityPub;
+    // The identity (Base ID) is DERIVED FROM THE SELECTED WALLET'S SEED — never assumed/injected. Whatever wallet
+    // you open IS your identity (Type-42 "bsvpoker/identity" sub-key of that wallet's seed). Empty until a wallet
+    // is opened. Exposed so the rest of the app uses the OPENED wallet's identity, not an auto-profile key.
+    private byte[] _identityPriv => _seed.Length == 32 ? Type42.UniqueKey(_seed, "bsvpoker/identity") : Array.Empty<byte>();
+    private byte[] _identityPub => _seed.Length == 32 ? Secp256k1.PublicKeyCompressed(_identityPriv) : Array.Empty<byte>();
+    /// <summary>The opened wallet's identity (Base ID) — for the rest of the app to use instead of any profile key.</summary>
+    public byte[] WalletIdentityPriv => _identityPriv;
+    public byte[] WalletIdentityPub => _identityPub;
 
     public WalletView(string dataDir, CardVault vault, Func<BsvNode?> node, Func<HeaderStore?> store, Func<NetworkParams> net, byte[] identityPriv, byte[] identityPub)
     {
         _vault = vault; _node = node; _store = store; _net = net;
-        _identityPriv = identityPriv; _identityPub = identityPub;
+        // identityPriv/identityPub args are IGNORED — identity now comes from the selected wallet's seed (above).
         Background = WinBg;                                  // ElectrumSVP-style LIGHT theme (not dark)
         Foreground = Ink;
         Directory.CreateDirectory(dataDir);
