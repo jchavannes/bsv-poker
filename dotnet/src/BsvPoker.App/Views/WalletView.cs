@@ -23,7 +23,7 @@ namespace BsvPoker.App.Views;
 /// </summary>
 public sealed class WalletView : UserControl
 {
-    private sealed class Tx { public string Time { get; set; } = ""; public string Type { get; set; } = ""; public long Amount { get; set; } public long Balance { get; set; } public string Memo { get; set; } = ""; }
+    private sealed class Tx { public string Time { get; set; } = ""; public string Type { get; set; } = ""; public long Amount { get; set; } public long Balance { get; set; } public string Memo { get; set; } = ""; public int Height { get; set; } }
     private sealed class PendingRow { public string Status { get; set; } = ""; public string Amount { get; set; } = ""; public string Memo { get; set; } = ""; public string Txid { get; set; } = ""; }
     // A wallet coin. The SPV proof is SAVED WITH THE COIN (no side files): the raw funding tx plus the
     // merkle proof (branch + index + block hash) to the block that mined it. STATE is derived, never a
@@ -234,9 +234,9 @@ public sealed class WalletView : UserControl
             // GUARD: only with a loaded seed — before a wallet is selected (deferred to MainWindow.Loaded) there is
             // no seed, and deriving addresses from a 0-byte seed throws ("seed must be 32 bytes").
             bool Ready() => !_locked && _seed.Length == 32;
-            if (Ready()) { _ = SpvServerDiscoverAsync(); RescanRequested?.Invoke(); }
+            if (Ready()) { _ = SpvServerDiscoverAsync(); _ = FetchServerHistoryAsync(); RescanRequested?.Invoke(); }
             var spvTick = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(15) };
-            spvTick.Tick += (_, _) => { if (Ready()) _ = SpvServerDiscoverAsync(); };   // fast SPV every 15s
+            spvTick.Tick += (_, _) => { if (Ready()) { _ = SpvServerDiscoverAsync(); _ = FetchServerHistoryAsync(); } };   // fast SPV + full history every 15s
             spvTick.Start();
             var fundTick = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(90) };
             fundTick.Tick += (_, _) => { if (Ready()) RescanRequested?.Invoke(); };      // P2P backup, slower
@@ -1876,6 +1876,7 @@ public sealed class WalletView : UserControl
         for (uint c = 0; c <= 1; c++) for (uint i = 0; i <= gap; i++) targets.Add((Core.Chain.P2pkhLockForPub(WalletKeys.Account(_seed, c, i).Pub), c, i, false));
         foreach (var addr in _w.WatchAddresses) { try { var p = Base58.CheckDecode(addr); if (p.Length == 21) targets.Add((Core.Chain.P2pkhLock(p[1..]), 0, 0, true)); } catch { } }
         bool changed = false;
+        var onChainUnspent = new System.Collections.Generic.HashSet<string>();   // outpoints the chain PROVES unspent now
         foreach (var (script, c, i, watch) in targets)
         {
             System.Collections.Generic.List<ElectrumSvpClient.Utxo> us;
@@ -1898,6 +1899,7 @@ public sealed class WalletView : UserControl
                 // record that a buggy/never-broadcast local "spend" marked Spent, that flag is a LIE: clear it and
                 // restore the coin as a real, proven, spendable coin. (A coin truly spent on-chain is NOT returned
                 // by listunspent, so it is never un-spent here.) This recovers real money the wallet wrongly hid.
+                onChainUnspent.Add(u.TxHashDisplay + ":" + u.Vout);
                 var existing = _w.Utxos.FirstOrDefault(x => x.Txid == u.TxHashDisplay && x.Vout == u.Vout);
                 if (existing != null)
                 {
@@ -1921,7 +1923,67 @@ public sealed class WalletView : UserControl
             // (wrong network, or one that doesn't index it) didn't return it: that was wiping real coins to zero.
             // Spent-detection is a separate concern (an outpoint check), not done by dropping a proven coin here.
         }
+        // KILL PHANTOM CHANGE (the "fake values" / double-count): a 0-conf local coin whose OWN transaction spends
+        // an input that the chain still reports UNSPENT means that spend NEVER happened on-chain — so this "change"
+        // does not exist. It was being counted ALONGSIDE the restored real input = money shown twice. Mark it
+        // DoubleSpent so it stops counting (NON-DESTRUCTIVE — the record is kept, never deleted; backups retained).
+        if (onChainUnspent.Count > 0)
+            foreach (var u in _w.Utxos)
+            {
+                if (u.Confirmed || u.WatchOnly || u.DoubleSpent || string.IsNullOrEmpty(u.RawTxHex)) continue;
+                try
+                {
+                    var tx = Chain.Deserialize(Convert.FromHexString(u.RawTxHex));
+                    if (tx.Ins.Any(inp => onChainUnspent.Contains(inp.PrevTxid + ":" + inp.Vout)))
+                    { u.DoubleSpent = true; changed = true; }   // its parent input is unspent on-chain → phantom
+                }
+                catch { }
+            }
         if (changed) await Dispatcher.InvokeAsync(() => { Save(); Render(); Notify("Coins loaded (SPV)."); });
+    }
+
+    /// <summary>FULL transaction history, ElectrumSVP-style: ask the SPV servers for EVERY transaction that ever
+    /// touched ANY of this wallet's addresses (receive + change + watch), fetch each one, and show it — confirmed
+    /// or mempool, money in or money out — with the net amount and a running balance. Not derived from local
+    /// coins (which only shows what we still hold); this is the complete on-chain history like Electrum's. Each row
+    /// carries its txid so a double-click opens the full input/output breakdown. Runs automatically.</summary>
+    public async System.Threading.Tasks.Task FetchServerHistoryAsync()
+    {
+        if (_locked || _seed.Length != 32) return;
+        using var cli = new ElectrumSvpClient();
+        if (!await cli.ConnectAnyAsync(ElectrumSvpClient.ServersFor(_net().Network))) return;
+        uint gap = Math.Min(Math.Max((uint)_w.RecvIndex + 30, 60), 120);
+        var ourScriptHex = new System.Collections.Generic.HashSet<string>();
+        var scripts = new System.Collections.Generic.List<byte[]>();
+        for (uint c = 0; c <= 1; c++) for (uint i = 0; i <= gap; i++) { var s = Core.Chain.P2pkhLockForPub(WalletKeys.Account(_seed, c, i).Pub); scripts.Add(s); ourScriptHex.Add(Convert.ToHexString(s)); }
+        foreach (var addr in _w.WatchAddresses) { try { var p = Base58.CheckDecode(addr); if (p.Length == 21) { var s = Core.Chain.P2pkhLock(p[1..]); scripts.Add(s); ourScriptHex.Add(Convert.ToHexString(s)); } } catch { } }
+        // 1) collect EVERY txid touching any of our addresses (with its height)
+        var heights = new System.Collections.Generic.Dictionary<string, int>();
+        foreach (var s in scripts)
+        {
+            try { foreach (var (txid, h) in await cli.GetHistoryAsync(ElectrumSvpClient.ScriptHashOf(s))) heights[txid] = h; } catch { }
+        }
+        if (heights.Count == 0) return;
+        // 2) fetch each transaction (bounded) and parse it
+        var txCache = new System.Collections.Generic.Dictionary<string, Core.Chain.Tx>();
+        foreach (var txid in heights.Keys.Take(500))
+        { try { txCache[txid] = Core.Chain.Deserialize(await cli.GetTransactionAsync(txid)); } catch { } }
+        // 3) value of every OUR output (so we can value the inputs that spent them)
+        var ourOut = new System.Collections.Generic.Dictionary<string, long>();
+        foreach (var (txid, tx) in txCache)
+            for (int v = 0; v < tx.Outs.Count; v++)
+                if (ourScriptHex.Contains(Convert.ToHexString(tx.Outs[v].Script))) ourOut[txid + ":" + (uint)v] = tx.Outs[v].Value;
+        // 4) one row per tx: received-to-us minus spent-from-us = the net delta, like Electrum
+        var rows = new System.Collections.Generic.List<Tx>();
+        foreach (var (txid, tx) in txCache)
+        {
+            long recv = 0; for (int v = 0; v < tx.Outs.Count; v++) if (ourScriptHex.Contains(Convert.ToHexString(tx.Outs[v].Script))) recv += tx.Outs[v].Value;
+            long sent = 0; foreach (var inp in tx.Ins) if (ourOut.TryGetValue(inp.PrevTxid + ":" + inp.Vout, out var val)) sent += val;
+            int h = heights.TryGetValue(txid, out var hh) ? hh : 0;
+            rows.Add(new Tx { Height = h, Time = h > 0 ? "on-chain" : "mempool", Type = (recv - sent) >= 0 ? "received" : "sent",
+                Amount = recv - sent, Memo = txid + (_w.TxLabels.TryGetValue(txid, out var lb) ? "  — " + lb : "") });
+        }
+        await Dispatcher.InvokeAsync(() => { _w.History = rows; Save(); ApplyHistoryFilter(); });
     }
 
     /// <summary>
@@ -2606,16 +2668,25 @@ public sealed class WalletView : UserControl
     /// </summary>
     private List<Tx> DerivedHistory()
     {
+        // PREFER the FULL server-fetched history (every tx that ever touched our addresses, ElectrumSVP-style) when
+        // we have it: ordered oldest→newest (mempool last) with a running balance. Falls back to the local
+        // coin/send derivation only before the first server fetch completes.
+        if (_w.History.Count > 0)
+        {
+            var full = _w.History.OrderBy(r => r.Height <= 0 ? int.MaxValue : r.Height).ToList();
+            long bal = 0; foreach (var r in full) { bal += r.Amount; r.Balance = bal; }
+            return full;
+        }
         var rows = new List<Tx>();
         foreach (var u in _w.Utxos)
         {
             // EVERY REAL coin shows in history — confirmed OR 0-conf (a coin backed by an actual tx is real and
             // spendable at risk; it is shown as "pending" until mined). Only pure fabrications (no tx, no proof)
             // are excluded. This is why a freshly received coin appears in history immediately, not only once mined.
-            if (!IsRealCoin(u)) continue;
+            if (!IsRealCoin(u) || u.DoubleSpent) continue;   // never list a fabrication / phantom-change coin
             rows.Add(new Tx {
                 Time = u.Confirmed ? "on-chain" : "pending",
-                Type = u.WatchOnly ? "watch" : (u.Spent ? "spent-out" : "received"),
+                Type = u.WatchOnly ? "watch" : "received",
                 Amount = u.Value,
                 Balance = 0,
                 Memo = $"{u.Txid} :{u.Vout}" + (_w.TxLabels.TryGetValue(u.Txid, out var rl) ? "  — " + rl : ""),
@@ -3056,39 +3127,78 @@ public sealed class WalletView : UserControl
 
     private void TxDetails(string txid)
     {
-        var ins = _w.Utxos.Where(u => u.Txid == txid).ToList();
         var send = _w.Sends.FirstOrDefault(s => s.Txid == txid);
         var sb = new System.Text.StringBuilder();
         sb.AppendLine("Transaction id: " + txid);
         if (_w.TxLabels.TryGetValue(txid, out var lbl)) sb.AppendLine("Label: " + lbl);
+        var hrow = _w.History.FirstOrDefault(r => r.Memo.StartsWith(txid, StringComparison.OrdinalIgnoreCase));
+        if (hrow != null) sb.AppendLine($"Status: {(hrow.Height > 0 ? "confirmed at height " + hrow.Height : "in mempool (unconfirmed)")}   Net to you: {hrow.Amount:N0} sat");
         if (send != null) sb.AppendLine($"Sent {send.Amount:N0} sat (fee {send.Fee:N0}) at {send.Time}  →  {send.To}");
-        // full input/output breakdown from the stored raw transaction, when we have it
-        if (send != null && send.RawHex.Length > 0)
+
+        // RESOLVE the raw transaction from: our send record, a stored coin, or the SPV server (so EVERY tx — even
+        // one we only saw on-chain — opens its full input/output breakdown, like ElectrumSVP).
+        string rawHex = send?.RawHex ?? "";
+        if (rawHex.Length == 0) rawHex = _w.Utxos.FirstOrDefault(u => u.Txid == txid && !string.IsNullOrEmpty(u.RawTxHex))?.RawTxHex ?? "";
+        if (rawHex.Length == 0)
         {
             try
             {
-                var tx = Chain.Deserialize(Convert.FromHexString(send.RawHex));
-                sb.AppendLine($"\nVersion {tx.Version}, locktime {tx.LockTime}, size {send.RawHex.Length / 2} bytes");
+                var t = System.Threading.Tasks.Task.Run(async () =>
+                {
+                    using var cli = new ElectrumSvpClient();
+                    if (!await cli.ConnectAnyAsync(ElectrumSvpClient.ServersFor(_net().Network))) return "";
+                    return Convert.ToHexString(await cli.GetTransactionAsync(txid)).ToLowerInvariant();
+                });
+                if (t.Wait(8000)) rawHex = t.Result;
+            }
+            catch { }
+        }
+
+        if (rawHex.Length > 0)
+        {
+            try
+            {
+                var tx = Chain.Deserialize(Convert.FromHexString(rawHex));
+                bool Mine(byte[] s) { if (s.Length != 25 || s[0] != 0x76) return false; var a = Base58.CheckEncode(Prefix(_net().AddressVersion, s[3..23])); return AddressIsMine(a); }
+                sb.AppendLine($"\nVersion {tx.Version}, locktime {tx.LockTime}, size {rawHex.Length / 2} bytes");
                 sb.AppendLine($"\nInputs ({tx.Ins.Count}):");
-                foreach (var i in tx.Ins) sb.AppendLine($"  {i.PrevTxid[..Math.Min(16, i.PrevTxid.Length)]}…:{i.Vout}");
+                foreach (var i in tx.Ins) sb.AppendLine($"  {i.PrevTxid}:{i.Vout}");
                 sb.AppendLine($"\nOutputs ({tx.Outs.Count}):");
                 for (int o = 0; o < tx.Outs.Count; o++)
                 {
                     var os = tx.Outs[o];
                     string who = os.Script.Length == 25 && os.Script[0] == 0x76 ? Base58.CheckEncode(Prefix(_net().AddressVersion, os.Script[3..23])) : $"script[{os.Script.Length}B]";
-                    sb.AppendLine($"  :{o} = {os.Value:N0} sat → {who}");
+                    sb.AppendLine($"  :{o} = {os.Value:N0} sat → {who}{(Mine(os.Script) ? "   (yours)" : "")}");
                 }
             }
-            catch { }
+            catch { sb.AppendLine("\n(could not parse the raw transaction)"); }
         }
         else
         {
             sb.AppendLine("\nOur outputs in this tx:");
-            foreach (var u in ins) sb.AppendLine($"  :{u.Vout} = {u.Value:N0} sat → {AddressForKey(u.KeyChain, u.KeyIndex)} [{(u.Spent ? "spent" : u.Confirmed ? "confirmed" : "pending")}]");
+            foreach (var u in _w.Utxos.Where(u => u.Txid == txid)) sb.AppendLine($"  :{u.Vout} = {u.Value:N0} sat → {AddressForKey(u.KeyChain, u.KeyIndex)} [{(u.Spent ? "spent" : u.Confirmed ? "confirmed" : "pending")}]");
+            sb.AppendLine("\n(full input/output detail needs a network connection — reopen when online.)");
         }
         var box = new TextBox { Text = sb.ToString(), IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, FontFamily = new FontFamily("Consolas"), Background = FieldBg, Foreground = Ink, BorderThickness = new Thickness(0) };
-        var win = new Window { Title = "Transaction details", Width = 560, Height = 420, Owner = Window.GetWindow(this), Background = WinBg, Content = new ScrollViewer { Content = box, Margin = new Thickness(10) } };
+        var win = new Window { Title = "Transaction details", Width = 600, Height = 460, Owner = Window.GetWindow(this), Background = WinBg, Content = new ScrollViewer { Content = box, Margin = new Thickness(10) } };
         win.ShowDialog();
+    }
+
+    /// <summary>True if the address belongs to this wallet (a receive/change key in range, or a watch address).</summary>
+    private bool AddressIsMine(string addr)
+    {
+        try
+        {
+            if (_w.WatchAddresses.Contains(addr)) return true;
+            if (_seed.Length != 32) return false;
+            var h160 = Base58.CheckDecode(addr); if (h160.Length != 21) return false;
+            var want = Convert.ToHexString(h160[1..]);
+            uint gap = (uint)Math.Max(_w.RecvIndex + 50, 120);
+            for (uint c = 0; c <= 1; c++) for (uint i = 0; i <= gap; i++)
+                if (Convert.ToHexString(Hashes.Hash160(WalletKeys.Account(_seed, c, i).Pub)) == want) return true;
+        }
+        catch { }
+        return false;
     }
 
     private void SetCoinLabel(string outpoint)

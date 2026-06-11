@@ -135,6 +135,19 @@ public sealed class ElectrumSvpClient : IDisposable
         return outp;
     }
 
+    /// <summary>The FULL transaction history for an address (scripthash) — EVERY tx that ever touched it, in or
+    /// out, confirmed or in the mempool — exactly like ElectrumSVP's history. Returns (txid, height); height 0 or
+    /// negative means unconfirmed/mempool.</summary>
+    public async Task<List<(string Txid, int Height)>> GetHistoryAsync(string scriptHash, int timeoutMs = 9000)
+    {
+        var res = await CallAsync("blockchain.scripthash.get_history", timeoutMs, scriptHash);
+        var outp = new List<(string, int)>();
+        if (res.ValueKind == JsonValueKind.Array)
+            foreach (var h in res.EnumerateArray())
+                outp.Add((h.GetProperty("tx_hash").GetString() ?? "", h.TryGetProperty("height", out var ht) ? ht.GetInt32() : 0));
+        return outp;
+    }
+
     /// <summary>Fetch the merkle proof for a tx and the block header at its height, and SPV-verify locally:
     /// PoW on the header + the merkle branch folding to the header's root. Returns true if the coin is proven.</summary>
     public async Task<bool> VerifyUtxoAsync(string txHashDisplay, int height, int timeoutMs = 9000)

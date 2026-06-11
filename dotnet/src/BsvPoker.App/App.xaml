@@ -9,6 +9,14 @@
         <SolidColorBrush x:Key="Accent" Color="#2E7D32" />
         <SolidColorBrush x:Key="Warn" Color="#C77800" />
 
+        <!-- EVERY window/dialog defaults to the dark surface with bright text. Many dialogs never set a Background,
+             so they defaulted to the SYSTEM WHITE window colour while their text was light = white-on-white. This
+             implicit Window style makes them all dark; a dialog that sets its own Background still wins. -->
+        <Style TargetType="Window">
+            <Setter Property="Background" Value="#0D0D0D" />
+            <Setter Property="Foreground" Value="#ECECEC" />
+        </Style>
+
         <!-- CONTRAST GUARANTEE (the principal's absolute rule: NEVER same-colour text on same-colour background).
              The dark theme sets a light Foreground on the whole window, so ANY input left with its default WHITE
              background would render light-text-on-white = invisible. These implicit styles give EVERY text input
