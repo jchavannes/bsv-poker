@@ -151,6 +151,14 @@ public partial class MainWindow : Window
         }
         // detect an incoming PAYMENT to one of our addresses (shows as pending until SPV-confirmed)
         _wallet.ConsiderIncoming(tx);
+        // PUBLIC broadcast (plaintext, anyone): show it in chat (skip our own).
+        var bc = OnChainChat.TryReadBroadcastTx(tx);
+        if (bc != null)
+        {
+            if (!bc.SenderPub.AsSpan().SequenceEqual(_idPub))
+                _chatView?.AddIncoming(Convert.ToHexString(bc.SenderPub).ToLowerInvariant(), "[broadcast] " + bc.Text);
+            return;
+        }
         var msg = OnChainChat.TryReadTx(tx, _idPriv, _idPub);
         if (msg == null) return;
         if (msg.Text.StartsWith("GOSSIP:", StringComparison.Ordinal))      // poker discovery overlay
@@ -311,10 +319,23 @@ public partial class MainWindow : Window
         try { rpub = Convert.FromHexString(recipientPubHex); } catch { return "Recipient public key must be 66 hex chars."; }
         if (rpub.Length != 33) return "Recipient public key must be a 33-byte compressed key.";
         var script = OnChainChat.BuildScript(rpub, _idPub, text);
-        var (raw, status) = _wallet.FundTx(script, 1000, 500);
+        var (raw, status) = _wallet.FundTx(script, 1, 1);   // tiny: a 1-sat message output + 1-sat fee
         if (raw == null) return status;
         var (host, port) = ParseHostPort(endpoint);
         if (host != null) _ = TxLink.SendTxAsync(_currentNet, host, port, raw);
+        _bsvNode?.Broadcast(raw);
+        return "";
+    }
+
+    /// <summary>Send a PUBLIC broadcast chat message (plaintext, readable by everyone incl. bots): fund a tiny
+    /// ChatGroup tx, push it to EVERY known peer, and broadcast to miners.</summary>
+    private string SendBroadcastChat(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return "Type a message.";
+        var (raw, status) = _wallet.FundTx(OnChainChat.BuildBroadcast(_idPub, text), 1, 1);
+        if (raw == null) return status;
+        foreach (var p in (_gossip?.Peers ?? new List<PokerGossip.Peer>()).ToList())
+        { var (h, pt) = ParseHostPort(p.Endpoint); if (h != null) _ = TxLink.SendTxAsync(_currentNet, h, pt, raw); }
         _bsvNode?.Broadcast(raw);
         return "";
     }
@@ -346,11 +367,12 @@ public partial class MainWindow : Window
     }
 
     /// <summary>Send a chat message AS a Bitcoin transaction: fund it, push IP-to-IP to the peer, broadcast to miners.</summary>
-    private string SendChatTx(string recipientPubHex, string peerHostPort, string text)
+    private string SendChatTx(string recipientPubHex, string peerHostPort, string text, bool broadcast)
     {
         if (string.IsNullOrWhiteSpace(text)) return "Type a message.";
+        if (broadcast) { var be = SendBroadcastChat(text); return be == "" ? "Sent to everyone (public broadcast)." : be; }
         var err = SendEncrypted(recipientPubHex, peerHostPort, text);
-        return err == "" ? $"Sent as a Bitcoin tx — pushed to {peerHostPort} and to miners." : err;
+        return err == "" ? $"Sent (encrypted) to {peerHostPort}." : err;
     }
 
     private static (string? Host, int Port) ParseHostPort(string s)

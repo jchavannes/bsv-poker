@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Text;
 using BsvPoker.Crypto;
 
@@ -30,6 +31,22 @@ public static class OnChainChat
     }
 
     public sealed record Incoming(byte[] SenderPub, string Text);
+
+    /// <summary>PUBLIC broadcast: a plaintext message anyone can read (incl. bots). Carried as a ChatGroup output
+    /// with a zero group id; the body is the sender's pubkey + the plaintext (NOT encrypted — it is public).</summary>
+    public static byte[] BuildBroadcast(byte[] senderPub33, string text)
+        => TxTemplates.BuildOutput(TxKind.ChatGroup, new[] { new byte[32], senderPub33, Encoding.UTF8.GetBytes(text) }, senderPub33);
+
+    /// <summary>Read a PUBLIC broadcast (ChatGroup, zero group id) — returns sender + text for everyone.</summary>
+    public static Incoming? TryReadBroadcast(byte[] script)
+    {
+        var p = TxTemplates.Parse(script);
+        if (p is not { Kind: TxKind.ChatGroup } || p.Fields.Length != 3) return null;
+        if (p.Fields[0].Length != 32 || p.Fields[0].Any(b => b != 0)) return null;   // only the public (zero-group) form
+        try { return new Incoming(p.Fields[1], Encoding.UTF8.GetString(p.Fields[2])); } catch { return null; }
+    }
+    public static Incoming? TryReadBroadcastTx(Chain.Tx tx)
+    { foreach (var o in tx.Outs) { var r = TryReadBroadcast(o.Script); if (r != null) return r; } return null; }
 
     /// <summary>Decrypt a ChatDirect output if it is addressed to me; null if it is not chat or not mine.</summary>
     public static Incoming? TryRead(byte[] script, byte[] myPriv32, byte[] myPub33)

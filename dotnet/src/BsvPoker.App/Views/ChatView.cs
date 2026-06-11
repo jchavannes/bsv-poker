@@ -15,7 +15,7 @@ namespace BsvPoker.App.Views;
 public sealed class ChatView : UserControl
 {
     private readonly Func<IReadOnlyList<(string PubHex, string Endpoint)>> _peers;
-    private readonly Func<string, string, string, string> _send;   // (recipientPubHex, endpoint, text) -> status
+    private readonly Func<string, string, string, bool, string> _send;   // (recipientPubHex, endpoint, text, broadcast) -> status
     private Func<string, string?>? _handleFor;                       // resolve a peer pubkey to a saved contact handle
     private Action<string, string>? _saveContact;                    // (handle, pubHex) -> add to the wallet address book
     private readonly ListBox _peerList = new() { Background = new SolidColorBrush(Color.FromRgb(0x12, 0x12, 0x12)), Foreground = Brushes.White, BorderThickness = new Thickness(0), Height = 150 };
@@ -28,12 +28,14 @@ public sealed class ChatView : UserControl
     public void SetHandleResolver(Func<string, string?> handleFor) => _handleFor = handleFor;
     public void SetSaveContact(Action<string, string> save) => _saveContact = save;
 
-    public ChatView(byte[] myPub, Func<IReadOnlyList<(string, string)>> peers, Func<string, string, string, string> send)
+    private readonly ComboBox _mode = new() { Width = 280, VerticalAlignment = VerticalAlignment.Center };
+
+    public ChatView(byte[] myPub, Func<IReadOnlyList<(string, string)>> peers, Func<string, string, string, bool, string> send)
     {
         _peers = peers; _send = send;
         Background = new SolidColorBrush(Color.FromRgb(0x0D, 0x0D, 0x0D)); Foreground = Brushes.White;
         var root = new StackPanel { Margin = new Thickness(20) };
-        root.Children.Add(new TextBlock { Text = "Chat — every message is a Bitcoin transaction; peers auto-discovered (no manual key exchange)", FontSize = 18, FontWeight = FontWeights.Bold, Foreground = Brushes.White, TextWrapping = TextWrapping.Wrap });
+        root.Children.Add(new TextBlock { Text = "Chat — peers auto-discovered (no manual key exchange). Choose how to send.", FontSize = 18, FontWeight = FontWeights.Bold, Foreground = Brushes.White, TextWrapping = TextWrapping.Wrap });
 
         var myHex = Convert.ToHexString(myPub).ToLowerInvariant();
         var idLine = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
@@ -50,15 +52,33 @@ public sealed class ChatView : UserControl
         root.Children.Add(new TextBlock { Text = "Messages received (transactions peers pushed to you):", Foreground = Brushes.Gainsboro, Margin = new Thickness(0, 12, 0, 2) });
         root.Children.Add(_log);
 
+        // HOW to send: the user's explicit choice. (Every message is a Bitcoin tx under the hood — we don't say so.)
+        _mode.Items.Add("Direct — encrypted to the selected player (ECDH)");
+        _mode.Items.Add("Broadcast — public, everyone & bots can read");
+        _mode.SelectedIndex = 0;
+        var modeLine = new WrapPanel { Margin = new Thickness(0, 10, 0, 0) };
+        modeLine.Children.Add(new TextBlock { Text = "Send as ", Foreground = Brushes.Gainsboro, VerticalAlignment = VerticalAlignment.Center });
+        modeLine.Children.Add(_mode);
+        root.Children.Add(modeLine);
+
         var line = new WrapPanel { Margin = new Thickness(0, 10, 0, 0) };
         line.Children.Add(new TextBlock { Text = "Message ", Foreground = Brushes.Gainsboro, VerticalAlignment = VerticalAlignment.Center });
         line.Children.Add(_text);
-        var sendBtn = new Button { Content = "Send (as a Bitcoin tx)", Margin = new Thickness(8, 0, 0, 0), Padding = new Thickness(10, 6, 10, 6) };
+        var sendBtn = new Button { Content = "Send", Margin = new Thickness(8, 0, 0, 0), Padding = new Thickness(14, 6, 14, 6), FontWeight = FontWeights.Bold };
         sendBtn.Click += (_, _) =>
         {
-            int i = _peerList.SelectedIndex;
-            if (i < 0 || i >= _current.Count) { _status.Text = "Select a discovered player above first."; return; }
-            _status.Text = _send(_current[i].PubHex, _current[i].Endpoint, _text.Text);
+            if (string.IsNullOrWhiteSpace(_text.Text)) { _status.Text = "Type a message."; return; }
+            bool broadcast = _mode.SelectedIndex == 1;
+            string pub = "", ep = "";
+            if (!broadcast)
+            {
+                int i = _peerList.SelectedIndex;
+                if (i < 0 || i >= _current.Count) { _status.Text = "Pick a player above for a Direct message, or switch to Broadcast."; return; }
+                pub = _current[i].PubHex; ep = _current[i].Endpoint;
+            }
+            var sent = _text.Text;
+            _status.Text = _send(pub, ep, sent, broadcast);
+            _log.Items.Insert(0, $"[{DateTime.Now:HH:mm:ss}] me{(broadcast ? " (broadcast)" : "")}:  {sent}");
             _text.Clear();
         };
         line.Children.Add(sendBtn);
