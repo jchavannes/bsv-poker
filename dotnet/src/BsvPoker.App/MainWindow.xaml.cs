@@ -232,9 +232,23 @@ public partial class MainWindow : Window
         win.Show();
         bot.Announce();
         UpdateNetInfo();
-        // Clicking "Play my bot" STARTS A GAME immediately — jump to the Game board and deal a hand against the
-        // bot (cards are minted as NFTs into your wallet). The bot console (funding + live log) stays docked.
-        try { _game?.StartBot(default); Tabs.SelectedIndex = 2; } catch { }
+        Tabs.SelectedIndex = 2;   // show the Game board
+        // ONE CLICK = a REAL on-chain hand vs your bot: auto-fund the bot, then run the genuine two-party
+        // mental-poker hand (RunLiveHandAgainst) — every move an on-chain Bitcoin tx, your cards minted as NFTs.
+        _ = Dispatcher.InvokeAsync(async () =>
+        {
+            try
+            {
+                if (!_wallet.IsFunded) { MessageBox.Show("Fund this wallet with real BSV first, then click Play my bot.", "Fund first"); return; }
+                var tx = await _wallet.FundBotAsync(bot.ReceiveAddress(), BotPlayer.LiveStake + 5000);
+                if (tx != null) bot.CreditRaw(tx, myRefund);
+                await System.Threading.Tasks.Task.Delay(1500);   // let the funding + gossip settle
+                var peer = new PokerGossip.Peer(bot.PubHex, bot.Endpoint, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+                var status = RunLiveHandAgainst(peer);
+                MessageBox.Show(status, "Play my bot — on-chain hand");
+            }
+            catch (Exception ex) { MessageBox.Show("Could not start the on-chain hand: " + ex.Message, "Play my bot"); }
+        });
     }
 
     /// <summary>
@@ -272,6 +286,15 @@ public partial class MainWindow : Window
         if (peers.Count == 0) return "No opponent discovered yet — the gossip overlay is still finding poker peers. A fair deal needs a real peer's entropy; there is NO local or bot deck.";
         var peer = ChooseOpponent(peers);   // the HUMAN picks the opponent — never auto-selected
         if (peer == null) return "No opponent chosen.";
+        return RunLiveHandAgainst(peer);
+    }
+
+    /// <summary>Run the GENUINE two-party on-chain mental-poker hand against a specific peer (e.g. your own bot):
+    /// every protocol move is an encrypted Bitcoin transaction, the escrow + settlement land on-chain, and each
+    /// of your cards is minted as a real on-chain encrypted NFT. No local deck, no shared RNG.</summary>
+    private string RunLiveHandAgainst(PokerGossip.Peer peer)
+    {
+        if (_activeDeal != null) return "A hand is already in progress.";
         byte[] peerPub; try { peerPub = Convert.FromHexString(peer.PubHex); } catch { return "discovered peer has a bad key."; }
         var seat = _wallet.ReserveSeat(LiveStake + 5000);
         if (seat == null) return $"No spendable coin ≥ {LiveStake + 5000:N0} sat to seat the hand — fund your wallet first (poker is real-money only).";
