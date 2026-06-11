@@ -1880,7 +1880,24 @@ public sealed class WalletView : UserControl
             }
             foreach (var (u, env) in verified)
             {
-                if (_w.Utxos.Any(x => x.Txid == u.TxHashDisplay && x.Vout == u.Vout)) continue;
+                // THE CHAIN IS THE SOURCE OF TRUTH FOR SPENT-NESS. The server returned this outpoint in
+                // listunspent, with a PROVEN envelope — so it IS unspent on-chain RIGHT NOW. If we hold a local
+                // record that a buggy/never-broadcast local "spend" marked Spent, that flag is a LIE: clear it and
+                // restore the coin as a real, proven, spendable coin. (A coin truly spent on-chain is NOT returned
+                // by listunspent, so it is never un-spent here.) This recovers real money the wallet wrongly hid.
+                var existing = _w.Utxos.FirstOrDefault(x => x.Txid == u.TxHashDisplay && x.Vout == u.Vout);
+                if (existing != null)
+                {
+                    bool was = existing.Spent || existing.DoubleSpent || !existing.Confirmed
+                               || string.IsNullOrEmpty(existing.RawTxHex) || string.IsNullOrEmpty(existing.EnvelopeWire);
+                    existing.Spent = false; existing.DoubleSpent = false; existing.WatchOnly = watch;
+                    if (string.IsNullOrEmpty(existing.RawTxHex)) existing.RawTxHex = Convert.ToHexString(env.RawTx).ToLowerInvariant();
+                    if (string.IsNullOrEmpty(existing.EnvelopeWire)) existing.EnvelopeWire = env.ToWire();
+                    existing.Value = u.Value; existing.KeyChain = c; existing.KeyIndex = i;
+                    existing.Confirmed = ReverifyProof(existing);
+                    if (was) changed = true;
+                    continue;
+                }
                 var rec = new UtxoRec { Txid = u.TxHashDisplay, Vout = u.Vout, Value = u.Value, KeyChain = c, KeyIndex = i, WatchOnly = watch, RawTxHex = Convert.ToHexString(env.RawTx).ToLowerInvariant(), EnvelopeWire = env.ToWire() };
                 rec.Confirmed = ReverifyProof(rec);
                 _w.Utxos.Add(rec);
@@ -2579,10 +2596,13 @@ public sealed class WalletView : UserControl
         var rows = new List<Tx>();
         foreach (var u in _w.Utxos)
         {
-            if (!u.Confirmed) continue;   // only SPV-PROVEN, on-chain coins appear in history — never a fabrication
+            // EVERY REAL coin shows in history — confirmed OR 0-conf (a coin backed by an actual tx is real and
+            // spendable at risk; it is shown as "pending" until mined). Only pure fabrications (no tx, no proof)
+            // are excluded. This is why a freshly received coin appears in history immediately, not only once mined.
+            if (!IsRealCoin(u)) continue;
             rows.Add(new Tx {
-                Time = "on-chain",
-                Type = "received",
+                Time = u.Confirmed ? "on-chain" : "pending",
+                Type = u.WatchOnly ? "watch" : (u.Spent ? "spent-out" : "received"),
                 Amount = u.Value,
                 Balance = 0,
                 Memo = $"{u.Txid} :{u.Vout}" + (_w.TxLabels.TryGetValue(u.Txid, out var rl) ? "  — " + rl : ""),
