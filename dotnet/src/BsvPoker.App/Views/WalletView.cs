@@ -1906,11 +1906,15 @@ public sealed class WalletView : UserControl
         foreach (var addr in _w.WatchAddresses) { try { var p = Base58.CheckDecode(addr); if (p.Length == 21) targets.Add((Core.Chain.P2pkhLock(p[1..]), 0, 0, true)); } catch { } }
         bool changed = false;
         long lastShown = -1;                                                     // last spendable total pushed to the UI
-        var onChainUnspent = new System.Collections.Generic.HashSet<string>();   // outpoints the chain PROVES unspent now
+        var onChainUnspent = new System.Collections.Generic.HashSet<string>();   // CONFIRMED-unspent outpoints (phantom check)
+        var serverUnspent = new System.Collections.Generic.HashSet<string>();    // EVERY outpoint the server lists (confirmed+mempool)
+        var queriedScriptHex = new System.Collections.Generic.HashSet<string>(); // our scripts we got a definitive answer for
         foreach (var (script, c, i, watch) in targets)
         {
             System.Collections.Generic.List<ElectrumSvpClient.Utxo> us;
             try { us = await cli.ListUnspentAsync(ElectrumSvpClient.ScriptHashOf(script)); } catch { continue; }
+            if (!watch) queriedScriptHex.Add(Convert.ToHexString(script));        // we KNOW this address's unspent set now
+            foreach (var su in us) serverUnspent.Add(su.TxHashDisplay + ":" + su.Vout);
             // SPV-verify each server-reported coin by FETCHING its envelope (raw tx + header + merkle branch) and
             // checking it folds to a proof-of-work header. listunspent alone is never trusted — servers are assumed
             // compromised; trust is in the PROOF. We SAVE the envelope so the coin re-verifies offline forever.
@@ -1954,6 +1958,16 @@ public sealed class WalletView : UserControl
                 _w.Utxos.Add(rec);
                 changed = true;
             }
+            // RECONCILE THIS address authoritatively, NOW: any coin we hold on it that the server did NOT just list
+            // as unspent has been spent (or is a stale/phantom local change coin) — mark it spent immediately so
+            // the on-screen balance is the REAL on-chain amount, never an inflated sum of dead change coins.
+            if (!watch)
+            {
+                var here = new System.Collections.Generic.HashSet<string>(us.Select(x => x.TxHashDisplay + ":" + x.Vout));
+                foreach (var u in _w.Utxos)
+                    if (!u.WatchOnly && !u.Spent && u.KeyChain == c && u.KeyIndex == i && !here.Contains(u.Txid + ":" + u.Vout))
+                    { u.Spent = true; u.DoubleSpent = false; changed = true; }
+            }
             // PUSH the balance to the screen the MOMENT it changes — don't make the user stare at 0 until the whole
             // ~120-address scan finishes. (Renders only when the spendable total actually moved.)
             long spendNow = _w.Utxos.Where(x => !x.Spent && !x.DoubleSpent && !x.WatchOnly && IsRealCoin(x)).Sum(x => x.Value);
@@ -1963,23 +1977,10 @@ public sealed class WalletView : UserControl
             // (wrong network, or one that doesn't index it) didn't return it: that was wiping real coins to zero.
             // Spent-detection is a separate concern (an outpoint check), not done by dropping a proven coin here.
         }
-        // KILL PHANTOM CHANGE (the "fake values" / double-count): a 0-conf local coin whose OWN transaction spends
-        // an input that the chain still reports UNSPENT means that spend NEVER happened on-chain — so this "change"
-        // does not exist. It was being counted ALONGSIDE the restored real input = money shown twice. Mark it
-        // DoubleSpent so it stops counting (NON-DESTRUCTIVE — the record is kept, never deleted; backups retained).
-        if (onChainUnspent.Count > 0)
-            foreach (var u in _w.Utxos)
-            {
-                if (u.Confirmed || u.WatchOnly || u.DoubleSpent || string.IsNullOrEmpty(u.RawTxHex)) continue;
-                try
-                {
-                    var tx = Chain.Deserialize(Convert.FromHexString(u.RawTxHex));
-                    if (tx.Ins.Any(inp => onChainUnspent.Contains(inp.PrevTxid + ":" + inp.Vout)))
-                    { u.DoubleSpent = true; changed = true; }   // its parent input is unspent on-chain → phantom
-                }
-                catch { }
-            }
-        if (changed) await Dispatcher.InvokeAsync(() => { Save(); Render(); Notify("Coins loaded (SPV)."); });
+        // (Per-address authoritative reconcile already ran inside the loop, so the balance now equals the chain's
+        // unspent set across every address we queried.) serverUnspent/onChainUnspent retained for clarity.
+        _ = serverUnspent; _ = queriedScriptHex; _ = onChainUnspent;
+        if (changed) await Dispatcher.InvokeAsync(() => { Save(); Render(); });
     }
 
     /// <summary>FULL transaction history, ElectrumSVP-style: ask the SPV servers for EVERY transaction that ever
