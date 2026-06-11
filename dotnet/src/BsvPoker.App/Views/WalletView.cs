@@ -844,7 +844,10 @@ public sealed class WalletView : UserControl
         sp.Children.Add(new TextBlock { Text = "Select your wallet", FontSize = 18, FontWeight = FontWeights.Bold, Foreground = Ink });
         sp.Children.Add(new TextBlock { Text = "Pick one of your wallets, open a wallet file anywhere (a USB key, a backup, another drive), or create a new one. A wallet is NEVER opened automatically — you choose.", Foreground = SubInk, TextWrapping = TextWrapping.Wrap, MaxWidth = 460, Margin = new Thickness(0, 4, 0, 12) });
         if (existing.Count > 0) sp.Children.Add(new TextBlock { Text = "Your wallets:", Foreground = SubInk, FontWeight = FontWeights.Bold, Margin = new Thickness(0, 2, 0, 2) });
-        var win = new Window { Title = "Select wallet", SizeToContent = SizeToContent.WidthAndHeight, ResizeMode = ResizeMode.NoResize, WindowStartupLocation = WindowStartupLocation.CenterScreen, Background = WinBg };
+        var win = new Window { Title = "Select wallet", SizeToContent = SizeToContent.WidthAndHeight, ResizeMode = ResizeMode.NoResize, WindowStartupLocation = WindowStartupLocation.CenterScreen, Background = WinBg, Topmost = true, ShowInTaskbar = true };
+        // GUARANTEE VISIBILITY for EVERY instance (you can run poker.exe many times — each a separate player): pop
+        // the selector to the FRONT so a 2nd/3rd instance is never lost behind the first.
+        win.Loaded += (_, _) => { try { win.Activate(); win.Topmost = true; win.Topmost = false; win.Focus(); } catch { } };
         Button Row(string label, Action act) { var b = new Button { Content = label, Margin = new Thickness(0, 3, 0, 3), Padding = new Thickness(12, 8, 12, 8), HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Left }; b.Click += (_, _) => act(); return b; }
         foreach (var f in existing)
         {

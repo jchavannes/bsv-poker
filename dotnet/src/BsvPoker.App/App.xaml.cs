@@ -32,6 +32,9 @@ public partial class App : Application
         {
             MainWindow = w;        // ShutdownMode.OnMainWindowClose now binds to the real window
             w.Show();
+            // EVERY instance is its own player — bring this one to the front so a 2nd/3rd copy is never lost behind
+            // another, and let each window be moved/maximised independently on whichever screen you want.
+            try { w.Activate(); w.Topmost = true; w.Topmost = false; } catch { }
         }
         else Shutdown();
     }
