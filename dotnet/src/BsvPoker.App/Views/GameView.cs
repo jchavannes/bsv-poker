@@ -31,6 +31,7 @@ public sealed class GameView : UserControl
     private bool _botMode;
     private Variant _botVariant = Variant.TexasHoldem;
     private int _lastMintedHand = -1; // mint my hole-card NFTs once per dealt hand (by hand number)
+    private bool _practiceMinted;     // mint my NFTs once per practice/bot hand too (ALL MINT)
 
     private readonly StackPanel _topCards = new() { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
     private readonly StackPanel _board = new() { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 8, 0, 8) };
@@ -115,7 +116,7 @@ public sealed class GameView : UserControl
     /// <summary>Lobby "Play a bot" — you (seat 0) vs a practice bot (seat 1) at the chosen variant.</summary>
     public void StartBot(Variant variant)
     {
-        _net?.Stop(); _net = null; _botMode = true; _botVariant = variant;
+        _net?.Stop(); _net = null; _botMode = true; _botVariant = variant; _practiceMinted = false;
         for (int i = 0; i < 2; i++) if (_stacks[i] < 2) _stacks[i] = 100;
         var deck = MentalPoker.ShuffledFrom(new[] { MentalPoker.FreshEntropy(), MentalPoker.FreshEntropy() }, Variants.CardSet(variant));
         _practice = HoldemState.Create(_stacks, _button, 1, 2, deck, variant);
@@ -259,6 +260,15 @@ public sealed class GameView : UserControl
             _pot.Text = "Pot: 0"; _botInfo.Text = $"You — {_stacks[0]}"; _topInfo.Text = $"Player 2 — {_stacks[1]}";
             _deal.IsEnabled = true; _fold.IsEnabled = _check.IsEnabled = _call.IsEnabled = _betBtn.IsEnabled = false;
             return;
+        }
+        // ALL MINT: every hand — including a bot/practice hand — mints MY hole cards as encrypted NFTs into my
+        // wallet vault (sealed to me), so they show up under My NFTs during the game, exactly like a networked
+        // hand. Minted once per dealt hand.
+        if (!_practiceMinted && st.Seats[0].Hole.Any() && st.Seats[0].Hole.All(c => !c.IsFaceDown))
+        {
+            _practiceMinted = true;
+            foreach (var c in st.Seats[0].Hole) _vault.AddCard(c.Index, System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
+            _onCardsChanged();
         }
         foreach (var c in st.Seats[0].Hole) { var cv = new CardView(); cv.ShowCard(c); _botCards.Children.Add(cv); }
         foreach (var c in st.Seats[1].Hole) { var cv = new CardView(); if (_botMode && !st.Complete) cv.ShowBack(); else cv.ShowCard(c); _topCards.Children.Add(cv); }

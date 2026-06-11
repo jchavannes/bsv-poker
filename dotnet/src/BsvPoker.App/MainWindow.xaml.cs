@@ -224,6 +224,9 @@ public partial class MainWindow : Window
         win.Show();
         bot.Announce();
         UpdateNetInfo();
+        // Clicking "Play my bot" STARTS A GAME immediately — jump to the Game board and deal a hand against the
+        // bot (cards are minted as NFTs into your wallet). The bot console (funding + live log) stays docked.
+        try { _game?.StartBot(default); Tabs.SelectedIndex = 2; } catch { }
     }
 
     /// <summary>
