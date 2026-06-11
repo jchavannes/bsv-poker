@@ -310,6 +310,37 @@ public static class Secp256k1
         return To32(InvMod(k, N));
     }
 
+    /// <summary>The LOW-S form of a signature scalar (s := n − s when s &gt; n/2), as 32 bytes. BSV consensus
+    /// requires low-S; both s and n−s are valid ECDSA, so normalising is safe. Used by threshold signing,
+    /// which assembles (r,s) from shares and must emit the same canonical low-S a single signer would.</summary>
+    public static byte[] LowS(ReadOnlySpan<byte> s32)
+    {
+        var s = Mod(FromBytes(s32), N);
+        if (s > N / 2) s = N - s;
+        return To32(s);
+    }
+
+    /// <summary>(a · b) mod n as 32 bytes. Z_n (n = curve order) is a prime field, so this is field
+    /// multiplication — used for polynomial evaluation and Lagrange interpolation in threshold (Shamir / JVRSS)
+    /// secret sharing. Zero is a valid field element here (unlike key derivation), so it is NOT rejected.</summary>
+    public static byte[] ScalarMulModN(ReadOnlySpan<byte> a32, ReadOnlySpan<byte> b32)
+        => To32((FromBytes(a32) * FromBytes(b32)) % N);
+
+    /// <summary>(a − b) mod n as 32 bytes, always in [0, n) — for Lagrange basis terms (x_j − x_m) in
+    /// threshold secret-sharing reconstruction.</summary>
+    public static byte[] ScalarSubModN(ReadOnlySpan<byte> a32, ReadOnlySpan<byte> b32)
+    {
+        var d = (FromBytes(a32) - FromBytes(b32)) % N;
+        if (d.Sign < 0) d += N;
+        return To32(d);
+    }
+
+    /// <summary>(a + b) mod n as 32 bytes, ALLOWING a zero result — for field accumulation in threshold sharing
+    /// (Horner polynomial evaluation, Lagrange sums) where zero is a legitimate field element. (ScalarAddModN
+    /// rejects zero because it is for key derivation, where a zero key is unusable.)</summary>
+    public static byte[] ScalarFieldAddModN(ReadOnlySpan<byte> a32, ReadOnlySpan<byte> b32)
+        => To32((FromBytes(a32) + FromBytes(b32)) % N);
+
     /// <summary>True iff <paramref name="pub33"/> is a valid 33-byte compressed point ON the curve (not infinity).</summary>
     public static bool IsValidPoint(ReadOnlySpan<byte> pub33)
     {

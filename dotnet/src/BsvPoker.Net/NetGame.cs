@@ -53,6 +53,7 @@ public sealed class NetGame
     private int[] _ecPerm = Array.Empty<int>();
     private readonly Dictionary<int, byte[][]> _shuf = new();
     private readonly Dictionary<int, byte[][]> _rem = new();
+    private readonly Dictionary<int, byte[][]> _comm = new();   // seat → per-position commitment C_k = d_k·G (full deck)
     private byte[][]? _final;
     private readonly Dictionary<int, Dictionary<int, byte[]>> _maskShares = new();
     private readonly HashSet<int> _boardStreetsSupplied = new();
@@ -78,6 +79,9 @@ public sealed class NetGame
     // pre-signed nLockTime recovery would be broadcast so no satoshi is stranded.
     public int AbortMs { get; set; } = 30000;
     public bool Aborted { get; private set; }
+    /// <summary>Set true the moment a peer reveals a card-scalar that does NOT open its published commitment
+    /// (a provable card-substitution attempt). The offending reveal is rejected and the hand stalls to abort.</summary>
+    public bool CheatDetected { get; private set; }
     private long _progressTick = Environment.TickCount64;
 
     private readonly List<string> _handLog = new();
@@ -90,6 +94,10 @@ public sealed class NetGame
     private int HandSeats => _inPubs.Length;
     private int HoleCount => Variants.HoleCards(Variant);
     private int BoardStart => HoleCount * HandSeats;
+    // The only deck positions ever revealed: every seat's hole cards + up to 5 community board cards. We
+    // commit to exactly these (both sides derive the count identically from the seat count), so the
+    // commitment payload stays small on the wire.
+    private int RevealCount => Math.Min(_n, BoardStart + 5);
     private IEnumerable<int> HolePositions(int seat) => Enumerable.Range(seat * HoleCount, HoleCount);
     private IEnumerable<int> OtherSeatsHolePositions() => Enumerable.Range(0, HandSeats).Where(s => s != _myHandSeat).SelectMany(HolePositions);
 
@@ -137,10 +145,20 @@ public sealed class NetGame
     {
         var json = JsonSerializer.Serialize(o);
         using var doc = JsonDocument.Parse(json);
-        var sig = Convert.ToHexString(Secp256k1.SignDigest(_priv, Digest(doc.RootElement))).ToLowerInvariant();
+        var digest = Digest(doc.RootElement);
+        var sig = Convert.ToHexString(Secp256k1.SignDigest(_priv, digest)).ToLowerInvariant();
         var node = JsonNode.Parse(json)!.AsObject();
         node["pub"] = _myPubHex; node["sig"] = sig;
-        _ = _node.PublishAsync(_table, Encoding.UTF8.GetBytes(node.ToJsonString()));
+        // A STABLE per-sender id for this logical message: hash(sender pubkey ‖ signing digest). The digest
+        // covers the table + canonical content but EXCLUDES pub/sig, so two different players sending
+        // structurally identical content (e.g. "hello") would otherwise collide and the second be wrongly
+        // deduped — folding in the pubkey makes the id sender-unique. Re-broadcasts of the same message share
+        // the id, so peers dedup them at the seen-check instead of re-verifying the signature every 120 ms —
+        // the headroom that lets 5–6 player deals finish on the single-consumer transport.
+        var fidBytes = new byte[33 + digest.Length];
+        Convert.FromHexString(_myPubHex).CopyTo(fidBytes, 0); digest.CopyTo(fidBytes, 33);
+        var fid = Convert.ToHexString(Hashes.Sha256(fidBytes)).ToLowerInvariant();
+        _ = _node.PublishAsync(_table, Encoding.UTF8.GetBytes(node.ToJsonString()), fid);
     }
 
     private byte[] Digest(JsonElement msg)
@@ -205,12 +223,22 @@ public sealed class NetGame
     private void Broadcast()
     {
         if (_myHandSeat < 0) return;
+        SendComm();   // persistent all hand, so every reveal can always be verified (idempotent, first-wins)
         if (Hand == null) { SendShuf(); SendRem(); }
         SendHoleD(); SendBoardD(); SendShowD();
     }
 
     private void SendShuf() { if (_shuf.TryGetValue(_myHandSeat, out var p)) Send(new { t = "shuf", h = _handNo, step = _myHandSeat, pts = PtsHex(p) }); }
     private void SendRem() { if (_rem.TryGetValue(_myHandSeat, out var p)) Send(new { t = "rem", h = _handNo, step = _myHandSeat, pts = PtsHex(p) }); }
+    // Commitments (C_k = d_k·G) are broadcast on their OWN channel, persistently for the whole hand — NOT
+    // gated on the dealing phase like the remask deck. A reveal can only be verified once the seat's
+    // commitments are in hand, and reveals (hole/board/showdown) keep flowing all hand; so the commitments
+    // must too, or a peer that dropped the early frame could never verify a later reveal (it would stall).
+    // Commitments are on the DEAL'S CRITICAL PATH: a holeD reveal is only accepted once the sender's comm has
+    // arrived, so the deal cannot finish until commitments propagate. They are small (only revealable
+    // positions) — smaller than the shuf/rem frames already sent every tick during dealing — so we send them
+    // every tick (idempotent, first-wins). Throttling them only delayed the deal and stalled it at 5–6 seats.
+    private void SendComm() { if (_comm.TryGetValue(_myHandSeat, out var c)) Send(new { t = "comm", h = _handNo, seat = _myHandSeat, c = PtsHex(c) }); }
     private void SendHoleD() { if (_final != null) Send(new { t = "holeD", h = _handNo, seat = _myHandSeat, d = ScalarMap(OtherSeatsHolePositions()) }); }
     private void SendBoardD() { if (Hand is { AwaitingBoard: true }) Send(new { t = "boardD", h = _handNo, seat = _myHandSeat, d = ScalarMap(Enumerable.Range(BoardStart + Hand.Board.Count, Hand.PendingBoardCount)) }); }
     private void SendShowD() { if (Hand is { AwaitingShowdown: true }) Send(new { t = "showD", h = _handNo, seat = _myHandSeat, d = ScalarMap(HolePositions(_myHandSeat)) }); }
@@ -237,7 +265,7 @@ public sealed class NetGame
         _ecGlobal = MentalPokerEC.NewScalar();
         _ecPerCard = MentalPokerEC.NewPerCardScalars(_n);
         _ecPerm = RandomPerm(_n);
-        _shuf.Clear(); _rem.Clear(); _final = null; _maskShares.Clear(); _boardStreetsSupplied.Clear();
+        _shuf.Clear(); _rem.Clear(); _comm.Clear(); _final = null; _maskShares.Clear(); _boardStreetsSupplied.Clear();
         _applied = 0; _handFinalized = false; Hand = null;
         _sentShuf = _sentRem = _sentHoleD = _sentShowD = false; _sentBoardKeys.Clear();
         State = Phase.Dealing;
@@ -265,7 +293,15 @@ public sealed class NetGame
         if (!_rem.ContainsKey(_myHandSeat) && _shuf.ContainsKey(HandSeats - 1))
         {
             byte[][]? input = _myHandSeat == 0 ? _shuf[HandSeats - 1] : (_rem.TryGetValue(_myHandSeat - 1, out var prev) ? prev : null);
-            if (input != null) _rem[_myHandSeat] = MentalPokerEC.Remask(input, _ecGlobal, _ecPerCard);
+            if (input != null)
+            {
+                _rem[_myHandSeat] = MentalPokerEC.Remask(input, _ecGlobal, _ecPerCard);
+                // PROVE-WHAT-IT-IS: publish a commitment C_k = d_k·G for every scalar I will ever reveal
+                // (all hole positions + the up-to-5 board positions). Only these positions are ever opened, so
+                // committing to the rest of the deck is pure wasted bandwidth on the live mesh.
+                _comm[_myHandSeat] = Enumerable.Range(0, RevealCount).Select(k => RevealProof.Commit(_ecPerCard[k])).ToArray();
+                SendComm();   // emit commitments the moment they exist — they gate every reveal that follows
+            }
         }
         if (_rem.ContainsKey(_myHandSeat) && !_sentRem) { _sentRem = true; SendRem(); }
         if (_final == null && _rem.TryGetValue(HandSeats - 1, out var fin)) _final = fin;
@@ -392,6 +428,14 @@ public sealed class NetGame
                     case "rem":
                         if (!SeatBound(root, "step", pub, out var s2)) return;
                         _rem.TryAdd(s2, PtsFrom(root.GetProperty("pts"))); DriveDeal(); break;
+                    case "comm":
+                        // a seat's per-position scalar commitments (C_k = d_k·G). First-wins (TryAdd): once a
+                        // seat has committed it cannot change them, so it cannot retro-fit a substitution.
+                        if (!SeatBound(root, "seat", pub, out var sc)) return;
+                        if (_comm.ContainsKey(sc)) break;
+                        var comm = PtsFrom(root.GetProperty("c"));
+                        if (comm.Length != RevealCount || comm.Any(c => !Secp256k1.IsValidPoint(c))) { Reject("bad commitments"); break; }
+                        _comm.TryAdd(sc, comm); DriveDeal(); DriveStreet(); break;
                     case "holeD":
                         if (!SeatBound(root, "seat", pub, out var s3)) return;
                         MergeShares(s3, root.GetProperty("d")); DriveDeal(); break;
@@ -426,11 +470,30 @@ public sealed class NetGame
     private void MergeShares(int seat, JsonElement dMap)
     {
         if (seat < 0 || seat >= HandSeats || seat == _myHandSeat) return;
+        // We can only accept a revealed scalar once the seat's commitments are in hand. If the rem (with its
+        // commitments) has not yet arrived, drop the share now — it is re-broadcast every tick, so it will be
+        // verified and accepted as soon as the commitments land. Never accept an UNVERIFIED scalar.
+        if (!_comm.TryGetValue(seat, out var comm)) return;
         foreach (var kv in dMap.EnumerateObject())
         {
-            int pos = int.Parse(kv.Name);
+            if (!int.TryParse(kv.Name, out int pos) || pos < 0 || pos >= comm.Length) continue;
+            // VERIFY ONCE: reveals are re-broadcast every tick (each with a fresh frame id, so the transport
+            // does not dedup them). An already-accepted (seat,pos) share is final — skip it BEFORE the EC
+            // check, or at high seat counts the consumer thread drowns re-verifying the same scalars and the
+            // hand stalls. This is purely a no-op fast-path; it changes no accepted value.
+            if (_maskShares.TryGetValue(pos, out var have) && have.ContainsKey(seat)) continue;
+            byte[] scalar;
+            try { scalar = Convert.FromHexString(kv.Value.GetString()!); } catch { continue; }
+            // PROVE-WHAT-IT-IS: the revealed scalar must open the commitment C_pos = d_pos·G this seat
+            // published at remask. A forged scalar (a card substitution) is rejected here, provably.
+            if (!RevealProof.Verify(scalar, comm[pos]))
+            {
+                CheatDetected = true;
+                Reject($"reveal does not open commitment (seat {seat}, pos {pos}) — card substitution rejected");
+                continue;
+            }
             if (!_maskShares.TryGetValue(pos, out var m)) { m = new(); _maskShares[pos] = m; }
-            m[seat] = Convert.FromHexString(kv.Value.GetString()!);
+            m[seat] = scalar;
         }
     }
 

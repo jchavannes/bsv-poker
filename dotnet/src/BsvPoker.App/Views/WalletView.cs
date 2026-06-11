@@ -24,7 +24,12 @@ namespace BsvPoker.App.Views;
 public sealed class WalletView : UserControl
 {
     private sealed class Tx { public string Time { get; set; } = ""; public string Type { get; set; } = ""; public long Amount { get; set; } public long Balance { get; set; } public string Memo { get; set; } = ""; }
-    private sealed class UtxoRec { public string Txid { get; set; } = ""; public uint Vout { get; set; } public long Value { get; set; } public uint KeyChain { get; set; } public uint KeyIndex { get; set; } public bool Spent { get; set; } public bool Confirmed { get; set; } public bool Frozen { get; set; } public bool WatchOnly { get; set; } }
+    // A wallet coin. The SPV proof is SAVED WITH THE COIN (no side files): the raw funding tx plus the
+    // merkle proof (branch + index + block hash) to the block that mined it. STATE is derived, never a
+    // fabricated flag: CONFIRMED only when that saved proof RE-VERIFIES against headers we validated;
+    // UNCONFIRMED = a valid coin received but not yet mined; DoubleSpent = a conflicting spend was proven
+    // (invalid). A coin is NEVER deleted regardless of state.
+    private sealed class UtxoRec { public string Txid { get; set; } = ""; public uint Vout { get; set; } public long Value { get; set; } public uint KeyChain { get; set; } public uint KeyIndex { get; set; } public bool Spent { get; set; } public bool Confirmed { get; set; } public bool Frozen { get; set; } public bool WatchOnly { get; set; } public bool DoubleSpent { get; set; } public string RawTxHex { get; set; } = ""; public string MerkleBlockHex { get; set; } = ""; public string EnvelopeWire { get; set; } = ""; }
     private sealed class SendRec { public string Txid { get; set; } = ""; public long Amount { get; set; } public long Fee { get; set; } public string To { get; set; } = ""; public string Time { get; set; } = ""; public string RawHex { get; set; } = ""; }
     private sealed class Contact { public string Handle { get; set; } = ""; public string IdentityPub { get; set; } = ""; public string Note { get; set; } = ""; public string DisplayName { get; set; } = ""; public string Email { get; set; } = ""; public bool Verified { get; set; } }
     private sealed class PayRequest { public string Address { get; set; } = ""; public long Amount { get; set; } public string Memo { get; set; } = ""; public string Time { get; set; } = ""; public string Expires { get; set; } = ""; }
@@ -165,9 +170,13 @@ public sealed class WalletView : UserControl
         Foreground = Ink;
         Directory.CreateDirectory(dataDir);
         _dataDir = dataDir;
+        _path = AccountPath(0);   // safe default until the user selects a wallet (selection is deferred to Loaded)
         // ElectrumSVP NEVER assumes a wallet: the user MUST select or create a wallet — we do not auto-load any
-        // default. No wallet selected = no program.
-        SelectWalletAtStartup();
+        // default. No wallet selected = no program. SELECTION IS DEFERRED to AFTER the main window is shown
+        // (MainWindow calls SelectWalletAtStartup() from its Loaded handler) — a modal ShowDialog() called during
+        // construction, before the window is up, does NOT run its message loop and returns instantly (proven by
+        // the startup trace), which dumped the user straight into an empty wallet. Selecting after Loaded makes
+        // the "Select your wallet" dialog block properly and be the genuine FIRST thing on screen.
         VaultBackup();   // EVERY RUN: a fresh immutable (read-only) backup in claude\backups
 
         if (_seed.Length == 32) _ring = new KeyRing(_seed, Math.Max(1, _w.RecvIndex));
@@ -221,12 +230,15 @@ public sealed class WalletView : UserControl
             if (_freshWallet) { _freshWallet = false; AccountWizard(); }   // a brand-new wallet still needs a seed+password
             // FIND THE COINS automatically (you need funds BEFORE an identity). PRIMARY = fast SPV-server lookup
             // (<15s, address-indexed); P2P block scan is the backup. Runs now and keeps running — no button ever.
-            if (!_locked) { _ = SpvServerDiscoverAsync(); RescanRequested?.Invoke(); }
+            // GUARD: only with a loaded seed — before a wallet is selected (deferred to MainWindow.Loaded) there is
+            // no seed, and deriving addresses from a 0-byte seed throws ("seed must be 32 bytes").
+            bool Ready() => !_locked && _seed.Length == 32;
+            if (Ready()) { _ = SpvServerDiscoverAsync(); RescanRequested?.Invoke(); }
             var spvTick = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(15) };
-            spvTick.Tick += (_, _) => { if (!_locked) _ = SpvServerDiscoverAsync(); };   // fast SPV every 15s
+            spvTick.Tick += (_, _) => { if (Ready()) _ = SpvServerDiscoverAsync(); };   // fast SPV every 15s
             spvTick.Start();
             var fundTick = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(90) };
-            fundTick.Tick += (_, _) => { if (!_locked) RescanRequested?.Invoke(); };      // P2P backup, slower
+            fundTick.Tick += (_, _) => { if (Ready()) RescanRequested?.Invoke(); };      // P2P backup, slower
             fundTick.Start();
         };
     }
@@ -251,18 +263,31 @@ public sealed class WalletView : UserControl
     private void StyleTabs()
     {
         var st = new Style(typeof(TabItem));
+        // The DEFAULT WPF tab template draws a LIGHT strip and ignores TabItem.Background — which left our light
+        // text on a light header (white-on-white). Replace the template with a Border that actually honours our
+        // dark Background + light Foreground, so the header is always readable.
+        var bd = new FrameworkElementFactory(typeof(Border));
+        bd.SetValue(Border.BackgroundProperty, new System.Windows.TemplateBindingExtension(TabItem.BackgroundProperty));
+        bd.SetValue(Border.BorderBrushProperty, new System.Windows.TemplateBindingExtension(TabItem.BorderBrushProperty));
+        bd.SetValue(Border.BorderThicknessProperty, new Thickness(1, 1, 1, 0));
+        bd.SetValue(Border.MarginProperty, new Thickness(0, 0, 2, 0));
+        var cp = new FrameworkElementFactory(typeof(ContentPresenter));
+        cp.SetValue(ContentPresenter.ContentSourceProperty, "Header");
+        cp.SetValue(ContentPresenter.MarginProperty, new Thickness(13, 7, 13, 7));
+        cp.SetValue(TextBlock.ForegroundProperty, new System.Windows.TemplateBindingExtension(TabItem.ForegroundProperty));
+        bd.AppendChild(cp);
+        st.Setters.Add(new Setter(TabItem.TemplateProperty, new ControlTemplate(typeof(TabItem)) { VisualTree = bd }));
         st.Setters.Add(new Setter(TabItem.BackgroundProperty, new SolidColorBrush(Color.FromRgb(0x1A, 0x1A, 0x1A))));
-        st.Setters.Add(new Setter(TabItem.ForegroundProperty, SubInk));
+        st.Setters.Add(new Setter(TabItem.ForegroundProperty, Ink));   // light text on a dark header — readable
         st.Setters.Add(new Setter(TabItem.BorderBrushProperty, Line));
-        st.Setters.Add(new Setter(TabItem.PaddingProperty, new Thickness(12, 6, 12, 6)));
         st.Setters.Add(new Setter(TabItem.FontSizeProperty, 13.0));
         var sel = new Trigger { Property = TabItem.IsSelectedProperty, Value = true };
-        sel.Setters.Add(new Setter(TabItem.BackgroundProperty, new SolidColorBrush(Color.FromRgb(0x2A, 0x2A, 0x2A))));
+        sel.Setters.Add(new Setter(TabItem.BackgroundProperty, new SolidColorBrush(Color.FromRgb(0x2E, 0x2E, 0x2E))));
         sel.Setters.Add(new Setter(TabItem.ForegroundProperty, Accent));
         sel.Setters.Add(new Setter(TabItem.FontWeightProperty, FontWeights.Bold));
         st.Triggers.Add(sel);
         var hov = new Trigger { Property = TabItem.IsMouseOverProperty, Value = true };
-        hov.Setters.Add(new Setter(TabItem.ForegroundProperty, Ink));
+        hov.Setters.Add(new Setter(TabItem.BackgroundProperty, new SolidColorBrush(Color.FromRgb(0x26, 0x26, 0x26))));
         st.Triggers.Add(hov);
         _tabs.Resources[typeof(TabItem)] = st;
     }
@@ -732,8 +757,16 @@ public sealed class WalletView : UserControl
     /// account has its own seed, coins, and history; the identity (chat/game/NFT) stays the profile identity.</summary>
     /// <summary>STARTUP: a wallet is NEVER opened automatically (assuming a wallet = fraud). The user MUST pick:
     /// an existing wallet in this profile, open a wallet file, or create a new one. No selection = no program.</summary>
-    private void SelectWalletAtStartup()
+    // STARTUP TRACE → %TEMP%\poker_startup.txt (so the exact launch sequence can be read without a screen).
+    private static void Trace(string s) { try { System.IO.File.AppendAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "poker_startup.txt"), $"{DateTime.Now:HH:mm:ss.fff}  {s}\n"); } catch { } }
+
+    /// <summary>Show the "Select your wallet" dialog as the FIRST thing on screen and open the chosen wallet.
+    /// MUST be called AFTER the main window is shown (from MainWindow.Loaded) so the modal ShowDialog() actually
+    /// runs its message loop and blocks. Returns true if a wallet was selected (and Load() ran); false if the
+    /// user cancelled selection (in which case the app shuts down).</summary>
+    public bool SelectWalletAtStartup()
     {
+        Trace("=== SelectWalletAtStartup ENTER ===");
         // List EVERY previously-used wallet across ALL profiles (never assume one). The user picks which one —
         // or opens any wallet file anywhere on the machine (a USB key, an external drive, a backup), or creates new.
         var existing = new System.Collections.Generic.List<string>();
@@ -768,6 +801,10 @@ public sealed class WalletView : UserControl
             catch { return false; }
         }
         existing = existing.Distinct().Where(IsReal).OrderBy(f => f).ToList();
+        // ALWAYS show the selection FIRST — the principal's rule: "the first thing I do is select my wallet, then
+        // I log in." A wallet is NEVER opened automatically (even when only one exists); an immediate password
+        // prompt for an existing wallet is a failure. The user SELECTS here, and only the SELECTED wallet is then
+        // opened (Load → unlock/login). The network is a separate switch, never a wallet choice.
         string? chosen = null;
         var sp = new StackPanel { Margin = new Thickness(20) };
         sp.Children.Add(new TextBlock { Text = "Select your wallet", FontSize = 18, FontWeight = FontWeights.Bold, Foreground = Ink });
@@ -792,17 +829,20 @@ public sealed class WalletView : UserControl
             if (dlg.ShowDialog() == true) { chosen = dlg.FileName; win.DialogResult = true; }
         }));
         win.Content = new ScrollViewer { Content = sp };
+        Trace($"SELECT dialog SHOWING now ({existing.Count} wallets listed) — this is the FIRST window");
         var ok = win.ShowDialog();
+        Trace($"SELECT dialog closed: ok={ok} chosen={(chosen == null ? "(none)" : Path.GetFileName(chosen))}");
         if (ok != true || chosen == null)
         {
             _locked = true; _seed = Array.Empty<byte>(); _path = AccountPath(0);   // nothing opened
             Application.Current?.Shutdown();                                       // no wallet selected => no program
-            return;
+            return false;
         }
         _path = chosen;
         Load();   // opens (or, if the chosen file is new, creates) the SELECTED wallet — never a default
         // re-seal the card vault to the OPENED wallet's identity (NFTs belong to the wallet you opened, not a profile)
         if (_seed.Length == 32) _vault = new CardVault(_dataDir, _identityPriv, _identityPub);
+        return true;
     }
 
     /// <summary>ElectrumSVP-style: open a wallet at an arbitrary FILE path the user chooses.</summary>
@@ -1563,9 +1603,42 @@ public sealed class WalletView : UserControl
 
     // Balance counts ONLY real, SPV-confirmed, unspent coins. Unconfirmed coins (detected-but-not-yet-mined
     // incoming, or our own in-flight change) are shown separately as PENDING and never counted as spendable.
-    private long Balance => _w.Utxos.Where(u => !u.Spent && u.Confirmed && !u.WatchOnly).Sum(u => u.Value);
-    private long Pending => _w.Utxos.Where(u => !u.Spent && !u.Confirmed && !u.WatchOnly).Sum(u => u.Value);
+    // SPENDABLE = REAL coins you can use NOW. A coin is REAL if it is confirmed (mined + saved proof verifies)
+    // OR it is backed by an actual broadcast/received TRANSACTION (an SPV coin waiting to be mined is trusted
+    // between moves — the principal's rule). Pure fabrications (NO tx AND NO proof) count for NOTHING. Balance
+    // is the total spendable; Pending is the not-yet-mined PORTION of it (informational). Double-spent and
+    // watch-only are excluded.
+    private static bool IsRealCoin(UtxoRec u) => u.Confirmed || !string.IsNullOrEmpty(u.RawTxHex) || !string.IsNullOrEmpty(u.EnvelopeWire);
+    private long Balance => _w.Utxos.Where(u => !u.Spent && !u.DoubleSpent && !u.WatchOnly && IsRealCoin(u)).Sum(u => u.Value);
+    private long Pending => _w.Utxos.Where(u => !u.Spent && !u.Confirmed && !u.DoubleSpent && !u.WatchOnly && IsRealCoin(u)).Sum(u => u.Value);
     private long WatchedBalance => _w.Utxos.Where(u => !u.Spent && u.Confirmed && u.WatchOnly).Sum(u => u.Value);
+
+    /// <summary>A coin is CONFIRMED only if its SAVED SPV proof re-verifies offline — the merkle branch folds to
+    /// a header that meets proof-of-work (<see cref="BsvPoker.Net.Bsv.SpvEnvelope.Verify"/>). No saved proof, a
+    /// bad one, or a proven double-spend => NOT confirmed. The proof travels WITH the coin: no network, no header
+    /// store, no server needed to re-check it. This is the single source of truth for "confirmed".</summary>
+    private static bool ReverifyProof(UtxoRec u)
+    {
+        if (u.DoubleSpent) return false;
+        try
+        {
+            // Form A — an SpvEnvelope (raw tx + 80-byte header + merkle branch + index): self-verifies (PoW + branch).
+            if (!string.IsNullOrEmpty(u.EnvelopeWire))
+                return BsvPoker.Net.Bsv.SpvEnvelope.FromWire(u.EnvelopeWire).Verify();
+            // Form B — a merkleblock (header + partial tree) carrying our tx: recompute root, check PoW, our tx matched.
+            if (!string.IsNullOrEmpty(u.RawTxHex) && !string.IsNullOrEmpty(u.MerkleBlockHex))
+            {
+                var tx = Chain.Deserialize(Convert.FromHexString(u.RawTxHex));
+                var parsed = BsvPoker.Net.Bsv.PartialMerkleTree.ParseMerkleBlock(Convert.FromHexString(u.MerkleBlockHex));
+                if (!parsed.Header.MeetsPow()) return false;                                   // real proof-of-work
+                if (!parsed.Root.AsSpan().SequenceEqual(parsed.Header.MerkleRoot)) return false; // partial tree folds to the header root
+                var txid = BsvPoker.Crypto.Hashes.Sha256d(Chain.Serialize(tx));               // internal-order txid
+                return parsed.Matched.Any(m => m.Txid.AsSpan().SequenceEqual(txid));          // our tx is among the proven leaves
+            }
+            return false;   // no saved proof => never confirmed
+        }
+        catch { return false; }
+    }
 
     /// <summary>
     /// Detect an INCOMING payment: scan a transaction's outputs for any that pay one of our receive keys and,
@@ -1584,7 +1657,15 @@ public sealed class WalletView : UserControl
                 if (tx.Outs[v].Script.AsSpan().SequenceEqual(Core.Chain.P2pkhLockForPub(WalletKeys.Account(_seed, 0, i).Pub)))
                 {
                     if (!_w.Utxos.Any(u => u.Txid == txid && u.Vout == (uint)v))
-                    { _w.Utxos.Add(new UtxoRec { Txid = txid, Vout = (uint)v, Value = tx.Outs[v].Value, KeyChain = 0, KeyIndex = i, Confirmed = false }); added = true; }
+                    {
+                        // STORE THE ACTUAL TX BYTES: this coin is backed by a REAL received transaction, so it is a
+                        // REAL coin — spendable NOW as 0-conf (at the holder's risk) and counted in the balance,
+                        // not a fabrication. Saving the raw tx is also what lets it survive a restart (the Load()
+                        // purge only drops coins with NO tx and NO proof) and what later gets a merkle proof added.
+                        _w.Utxos.Add(new UtxoRec { Txid = txid, Vout = (uint)v, Value = tx.Outs[v].Value, KeyChain = 0, KeyIndex = i,
+                            Confirmed = false, RawTxHex = Convert.ToHexString(Core.Chain.Serialize(tx)).ToLowerInvariant() });
+                        added = true;
+                    }
                     break;
                 }
             }
@@ -1608,7 +1689,13 @@ public sealed class WalletView : UserControl
         bool changed = false;
         foreach (var u in _w.Utxos.Where(u => !u.Confirmed && !u.Spent))
             if (index.TryGetValue(u.Txid, out int idx) && MerkleProof.Verify(parsed.Txids[idx], idx, MerkleProof.Branch(parsed.Txids, idx), parsed.Header.MerkleRoot))
-            { u.Confirmed = true; changed = true; AppendTx("confirmed", u.Value, $"{u.Txid[..12]}…:{u.Vout} mined"); }
+            {
+                // SAVE a re-verifiable proof for this now-mined coin, then DERIVE Confirmed from it (never set blindly).
+                try { u.RawTxHex = Convert.ToHexString(Core.Chain.Serialize(parsed.Txs[idx])).ToLowerInvariant();
+                      u.MerkleBlockHex = Convert.ToHexString(BsvPoker.Net.Bsv.PartialMerkleTree.BuildMerkleBlock(parsed.Header, parsed.Txids, new HashSet<int> { idx })).ToLowerInvariant(); } catch { }
+                u.Confirmed = ReverifyProof(u);
+                if (u.Confirmed) { changed = true; AppendTx("confirmed", u.Value, $"{u.Txid[..12]}…:{u.Vout} mined"); }
+            }
         if (changed) { Save(); Render(); }
     }
 
@@ -1664,14 +1751,21 @@ public sealed class WalletView : UserControl
                     if (utxo == null) continue;
                     if (!_w.Utxos.Any(u => u.Txid == utxo.Txid && u.Vout == utxo.Vout))
                     {
-                        _w.Utxos.Add(new UtxoRec { Txid = utxo.Txid, Vout = utxo.Vout, Value = utxo.Value, KeyChain = c, KeyIndex = i, Confirmed = true });
+                        var rec = new UtxoRec { Txid = utxo.Txid, Vout = utxo.Vout, Value = utxo.Value, KeyChain = c, KeyIndex = i, RawTxHex = Convert.ToHexString(Chain.Serialize(tx)).ToLowerInvariant(), MerkleBlockHex = Convert.ToHexString(merkleBlockPayload).ToLowerInvariant() };
+                        rec.Confirmed = ReverifyProof(rec);   // SAVE the proof with the coin; confirmed only if it re-verifies
+                        _w.Utxos.Add(rec);
                         AppendTx("received", utxo.Value, $"SPV-confirmed {utxo.Txid[..12]}…:{utxo.Vout}");
                         Notify($"Received {utxo.Value:N0} sat (SPV-confirmed).");
                         changed = true;
                     }
-                    else // already known (was pending) → mark it confirmed now that we hold the proof
+                    else // already known (was pending) → SAVE the proof onto it, then re-verify to confirm
                         foreach (var u in _w.Utxos.Where(u => u.Txid == utxo.Txid && u.Vout == utxo.Vout && !u.Confirmed))
-                        { u.Confirmed = true; changed = true; AppendTx("confirmed", u.Value, $"{u.Txid[..12]}…:{u.Vout} mined"); }
+                        {
+                            u.RawTxHex = Convert.ToHexString(Chain.Serialize(tx)).ToLowerInvariant();
+                            u.MerkleBlockHex = Convert.ToHexString(merkleBlockPayload).ToLowerInvariant();
+                            u.Confirmed = ReverifyProof(u);
+                            if (u.Confirmed) { changed = true; AppendTx("confirmed", u.Value, $"{u.Txid[..12]}…:{u.Vout} mined"); }
+                        }
                     break;
                 }
         // watch-only: credit (as unspendable, balance-only) any output paying a watched address, proven by SPV
@@ -1683,7 +1777,7 @@ public sealed class WalletView : UserControl
                 var wu = SpvFunding.VerifyWatchFromMerkleBlock(tx, v, merkleBlockPayload, chain, h160);
                 if (wu == null) continue;
                 if (!_w.Utxos.Any(u => u.Txid == wu.Txid && u.Vout == wu.Vout))
-                { _w.Utxos.Add(new UtxoRec { Txid = wu.Txid, Vout = wu.Vout, Value = wu.Value, Confirmed = true, WatchOnly = true }); changed = true; Notify($"Watch-only: {wu.Value:N0} sat seen on {addr}."); }
+                { var wrec = new UtxoRec { Txid = wu.Txid, Vout = wu.Vout, Value = wu.Value, WatchOnly = true, RawTxHex = Convert.ToHexString(Chain.Serialize(tx)).ToLowerInvariant(), MerkleBlockHex = Convert.ToHexString(merkleBlockPayload).ToLowerInvariant() }; wrec.Confirmed = ReverifyProof(wrec); _w.Utxos.Add(wrec); changed = true; Notify($"Watch-only: {wu.Value:N0} sat seen on {addr}."); }
             }
         }
         // sweep: if an output of this proven tx pays an external key we're sweeping, move it into THIS wallet now
@@ -1699,13 +1793,22 @@ public sealed class WalletView : UserControl
     /// filters. Any output paying one of our receive/change keys (a wide index window) or a watch address is
     /// credited as a confirmed coin. Idempotent. Returns true if anything was credited.
     /// </summary>
-    public bool ConfirmFromBlock(Core.Chain.Tx tx)
+    public bool ConfirmFromBlock(Core.Chain.Tx tx, BsvPoker.Net.Bsv.BlockHeader? header = null, IReadOnlyList<byte[]>? txids = null, int txIndex = -1)
     {
-        if (!Dispatcher.CheckAccess()) { return (bool)Dispatcher.Invoke(new Func<bool>(() => ConfirmFromBlock(tx))); }
+        if (!Dispatcher.CheckAccess()) { return (bool)Dispatcher.Invoke(new Func<bool>(() => ConfirmFromBlock(tx, header, txids, txIndex))); }
         if (_locked || _seed.Length != 32) return false;
         bool changed = false;
         var txid = Core.Chain.Txid(tx);
         uint gap = Math.Max((uint)_w.RecvIndex + 50, 500);   // scan a wide index window so a high-index funded address is still found
+        // Build the SAVEABLE merkle proof for THIS tx from the full block, so a credited coin CARRIES its proof
+        // and is re-verifiable offline forever. Only when the caller passed the block header + txids + this index.
+        string rawHex = "", mbHex = "";
+        if (header != null && txids != null && txIndex >= 0)
+        {
+            try { rawHex = Convert.ToHexString(Core.Chain.Serialize(tx)).ToLowerInvariant();
+                  mbHex = Convert.ToHexString(BsvPoker.Net.Bsv.PartialMerkleTree.BuildMerkleBlock(header, txids, new HashSet<int> { txIndex })).ToLowerInvariant(); }
+            catch { rawHex = ""; mbHex = ""; }
+        }
         for (uint v = 0; v < (uint)tx.Outs.Count; v++)
         {
             var script = tx.Outs[(int)v].Script;
@@ -1715,13 +1818,20 @@ public sealed class WalletView : UserControl
                 {
                     var pub = WalletKeys.Account(_seed, c, i).Pub;
                     if (!script.AsSpan().SequenceEqual(Core.Chain.P2pkhLockForPub(pub))) continue;
-                    if (!_w.Utxos.Any(u => u.Txid == txid && u.Vout == v))
+                    var existing = _w.Utxos.FirstOrDefault(u => u.Txid == txid && u.Vout == v);
+                    if (existing == null)
                     {
-                        _w.Utxos.Add(new UtxoRec { Txid = txid, Vout = v, Value = tx.Outs[(int)v].Value, KeyChain = c, KeyIndex = i, Confirmed = true });
+                        var rec = new UtxoRec { Txid = txid, Vout = v, Value = tx.Outs[(int)v].Value, KeyChain = c, KeyIndex = i, RawTxHex = rawHex, MerkleBlockHex = mbHex };
+                        rec.Confirmed = ReverifyProof(rec);   // confirmed ONLY if the saved proof re-verifies
+                        _w.Utxos.Add(rec);
                         AppendTx("received", tx.Outs[(int)v].Value, $"found on-chain {txid[..12]}…:{v}");
-                        Notify($"Found {tx.Outs[(int)v].Value:N0} sat on-chain (confirmed).");
+                        if (rec.Confirmed) Notify($"Found {tx.Outs[(int)v].Value:N0} sat on-chain (confirmed).");
                     }
-                    else foreach (var u in _w.Utxos.Where(u => u.Txid == txid && u.Vout == v && !u.Confirmed)) u.Confirmed = true;
+                    else if (!existing.Confirmed)   // upgrade a known coin by SAVING its proof, then re-verify
+                    {
+                        if (mbHex.Length > 0) { existing.RawTxHex = rawHex; existing.MerkleBlockHex = mbHex; }
+                        existing.Confirmed = ReverifyProof(existing);
+                    }
                     changed = true; credited = true; break;
                 }
             if (credited) continue;
@@ -1730,7 +1840,7 @@ public sealed class WalletView : UserControl
                 byte[] h160; try { var p = Base58.CheckDecode(addr); if (p.Length != 21) continue; h160 = p[1..]; } catch { continue; }
                 if (!script.AsSpan().SequenceEqual(Core.Chain.P2pkhLock(h160))) continue;
                 if (!_w.Utxos.Any(u => u.Txid == txid && u.Vout == v))
-                { _w.Utxos.Add(new UtxoRec { Txid = txid, Vout = v, Value = tx.Outs[(int)v].Value, Confirmed = true, WatchOnly = true }); changed = true; Notify($"Watch-only: {tx.Outs[(int)v].Value:N0} sat on {addr}."); }
+                { var wrec = new UtxoRec { Txid = txid, Vout = v, Value = tx.Outs[(int)v].Value, WatchOnly = true, RawTxHex = rawHex, MerkleBlockHex = mbHex }; wrec.Confirmed = ReverifyProof(wrec); _w.Utxos.Add(wrec); changed = true; Notify($"Watch-only: {tx.Outs[(int)v].Value:N0} sat on {addr}."); }
             }
         }
         if (changed) { Save(); Render(); }
@@ -1757,12 +1867,29 @@ public sealed class WalletView : UserControl
         {
             System.Collections.Generic.List<ElectrumSvpClient.Utxo> us;
             try { us = await cli.ListUnspentAsync(ElectrumSvpClient.ScriptHashOf(script)); } catch { continue; }
+            // SPV-verify each server-reported coin by FETCHING its envelope (raw tx + header + merkle branch) and
+            // checking it folds to a proof-of-work header. listunspent alone is never trusted — servers are assumed
+            // compromised; trust is in the PROOF. We SAVE the envelope so the coin re-verifies offline forever.
+            var verified = new System.Collections.Generic.List<(ElectrumSvpClient.Utxo U, BsvPoker.Net.Bsv.SpvEnvelope Env)>();
             foreach (var u in us)
             {
+                if (u.Height <= 0) continue;
+                BsvPoker.Net.Bsv.SpvEnvelope? env = null;
+                try { env = await cli.GetEnvelopeAsync(u.TxHashDisplay, u.Height); } catch { env = null; }
+                if (env != null) verified.Add((u, env));
+            }
+            foreach (var (u, env) in verified)
+            {
                 if (_w.Utxos.Any(x => x.Txid == u.TxHashDisplay && x.Vout == u.Vout)) continue;
-                _w.Utxos.Add(new UtxoRec { Txid = u.TxHashDisplay, Vout = u.Vout, Value = u.Value, KeyChain = c, KeyIndex = i, Confirmed = u.Height > 0, WatchOnly = watch });
+                var rec = new UtxoRec { Txid = u.TxHashDisplay, Vout = u.Vout, Value = u.Value, KeyChain = c, KeyIndex = i, WatchOnly = watch, RawTxHex = Convert.ToHexString(env.RawTx).ToLowerInvariant(), EnvelopeWire = env.ToWire() };
+                rec.Confirmed = ReverifyProof(rec);
+                _w.Utxos.Add(rec);
                 changed = true;
             }
+            // CONFIRMED comes ONLY from a coin's SAVED PROOF (ReverifyProof at load) — NEVER from whether THIS
+            // network's server currently lists it. A real coin must NOT be un-confirmed just because this server
+            // (wrong network, or one that doesn't index it) didn't return it: that was wiping real coins to zero.
+            // Spent-detection is a separate concern (an outpoint check), not done by dropping a proven coin here.
         }
         if (changed) await Dispatcher.InvokeAsync(() => { Save(); Render(); Notify("Coins loaded (SPV)."); });
     }
@@ -1851,10 +1978,22 @@ public sealed class WalletView : UserControl
         try
         {
             var spend = w.SpendAction(outputScript, value, fee);
-            // preserve watch-only and already-spent records; replace only the SPENDABLE set with what remains.
-            var keep = _w.Utxos.Where(u => u.WatchOnly || u.Spent).ToList();
-            var remaining = w.Coins.Select(u => new UtxoRec { Txid = u.Txid, Vout = u.Vout, Value = u.Value, KeyChain = u.KeyChain, KeyIndex = u.KeyIndex, Confirmed = true }).ToList();
-            _w.Utxos = keep.Concat(remaining.Where(r => !keep.Any(k => k.Txid == r.Txid && k.Vout == r.Vout))).ToList();
+            // NON-DESTRUCTIVE — never delete a coin record. Mark the spent inputs Spent (they are KEPT in full,
+            // not removed) and add the change as a new UNCONFIRMED coin (real only once SPV-proven on-chain).
+            // Change is never stamped Confirmed optimistically — that fabrication, via the 45s Announce -> FundTx,
+            // WAS the phantom-balance fraud. Nothing whatsoever is deleted here.
+            foreach (var inp in spend.Inputs)
+                foreach (var u in _w.Utxos.Where(u => u.Txid == inp.Txid && u.Vout == inp.Vout)) u.Spent = true;
+            if (spend.Change > 0)
+            {
+                uint cvout = (uint)(spend.Tx.Outs.Count - 1);
+                var ctxid = Chain.Txid(spend.Tx);
+                if (!_w.Utxos.Any(u => u.Txid == ctxid && u.Vout == cvout))
+                    // store the raw change tx we just built: change is a REAL coin (we made the tx), spendable as
+                    // 0-conf between moves and kept across restarts — not a fabrication.
+                    _w.Utxos.Add(new UtxoRec { Txid = ctxid, Vout = cvout, Value = spend.Change, KeyChain = 1, KeyIndex = 0,
+                        Confirmed = false, RawTxHex = Convert.ToHexString(Chain.Serialize(spend.Tx)).ToLowerInvariant() });
+            }
             AppendTx("message", -(value + fee), $"on-chain tx {Chain.Txid(spend.Tx)[..12]}…");
             Save(); Render();
             return (Chain.Serialize(spend.Tx), "");
@@ -1992,7 +2131,9 @@ public sealed class WalletView : UserControl
                 }
                 if (utxo == null) { MessageBox.Show("Proof did not verify against our validated headers, or the output does not pay any of our addresses.", "Import rejected"); return; }
                 if (_w.Utxos.Any(u => u.Txid == utxo.Txid && u.Vout == utxo.Vout)) { MessageBox.Show("That UTXO is already in the wallet.", "Already imported"); return; }
-                _w.Utxos.Add(new UtxoRec { Txid = utxo.Txid, Vout = utxo.Vout, Value = utxo.Value, KeyChain = utxo.KeyChain, KeyIndex = utxo.KeyIndex, Confirmed = true }); // SPV-verified against our headers
+                var rec = new UtxoRec { Txid = utxo.Txid, Vout = utxo.Vout, Value = utxo.Value, KeyChain = utxo.KeyChain, KeyIndex = utxo.KeyIndex, RawTxHex = txBox.Text.Trim().ToLowerInvariant(), MerkleBlockHex = mbBox.Text.Trim().ToLowerInvariant() };
+                rec.Confirmed = ReverifyProof(rec);   // SAVE the proof; confirmed only if it re-verifies
+                _w.Utxos.Add(rec);
                 AppendTx("funded", utxo.Value, $"SPV funding {utxo.Txid[..12]}…:{utxo.Vout}");
                 Save(); Render();
                 _status.Text = $"Imported {utxo.Value:N0} sat (verified against our own headers).";
@@ -2201,38 +2342,55 @@ public sealed class WalletView : UserControl
 
     // ---- persistence / seed lifecycle ----
 
+    /// <summary>The login a wallet REQUIRES before it can be used — a pure, headless-testable decision so the
+    /// "no wallet without a login" rule can be verified 100×. There is NO outcome that opens a wallet with no
+    /// login: an encrypted seed needs Unlock (password); a plaintext existing seed MUST set a password
+    /// (SetPassword); an absent/invalid seed is a brand-new wallet that runs the create wizard (NewWizard).</summary>
+    public enum StartupLogin { Unlock, SetPassword, NewWizard }
+    public static StartupLogin DecideLogin(string? seedField)
+    {
+        if (WalletExtras.IsEncryptedSeed(seedField ?? "")) return StartupLogin.Unlock;
+        try { if (WalletKeys.BackupToSeed(seedField ?? "").Length == 32) return StartupLogin.SetPassword; } catch { }
+        return StartupLogin.NewWizard;
+    }
+
     private void Load()
     {
+        Trace("LOAD enter path=" + Path.GetFileName(_path));
         try { if (File.Exists(_path)) _w = JsonSerializer.Deserialize<File_>(File.ReadAllText(_path)) ?? new File_(); } catch { _w = new File_(); }
         // AN IDENTITY IS ONLY REAL ON-CHAIN: a registration that was never broadcast (no OnChainTxid) is a DRAFT
         // and does not survive a restart — drop it so it is never treated as an identity.
         if (_w.Identity is { IsOnChain: false }) _w.Identity = null;
-        // LOAD IS READ-ONLY AND NON-DESTRUCTIVE: we keep EVERY coin and every record exactly as stored. We do
-        // NOT prune, clear, or re-save the wallet on load — destroying a user's coin/history cache (even a
-        // "pending" one) is data loss and is forbidden. The balance computation already counts confirmed-unspent
-        // only; that is a display concern, never a reason to delete stored data.
-        if (WalletExtras.IsEncryptedSeed(_w.Seed))
+        // A coin is CONFIRMED only if its SAVED SPV proof re-verifies (offline). Set that first.
+        foreach (var u in _w.Utxos) u.Confirmed = ReverifyProof(u);
+        // FRAUD MUST NOT EXIST: the optimistic Announce/FundTx machinery fabricated "coins" with NO transaction
+        // and NO proof — pure local fraud, never on-chain. Remove them entirely so they DO NOT EXIST. This is
+        // NOT deleting a real coin, a key, or the seed: anything with on-chain data (a raw tx OR a merkle/envelope
+        // proof) or a watch address is KEPT, and every prior state remains in the read-only claude\backups vault.
+        _w.Utxos.RemoveAll(u => !u.WatchOnly && !u.Confirmed
+            && string.IsNullOrEmpty(u.RawTxHex) && string.IsNullOrEmpty(u.MerkleBlockHex) && string.IsNullOrEmpty(u.EnvelopeWire));
+        // EVERY path requires a login — there is no no-login outcome (DecideLogin proves this, tested 100×).
+        switch (DecideLogin(_w.Seed))
         {
-            _locked = true;            // encrypted on disk — must be unlocked with the password before use
-            Unlock();                  // prompt now (modal); if cancelled, the wallet stays locked
-            return;
-        }
-        bool valid = false;
-        try { _seed = WalletKeys.BackupToSeed(_w.Seed); valid = _seed.Length == 32; } catch { valid = false; }
-        if (!valid)
-        {
-            // brand-new wallet: a fresh seed, and EMPTY — no play money, no opening balance, no UTXOs.
-            _seed = WalletKeys.NewSeed();
-            _w = new File_ { Seed = WalletKeys.SeedToBackup(_seed), RecvIndex = 0 };
-            _freshWallet = true;     // first run → run the ElectrumSVP-style account wizard
-            Save();
-        }
-        else
-        {
-            // SECURITY (no-login is fraud): an EXISTING wallet whose seed is stored in the clear must be
-            // password-protected before it can be used. Force a password now and encrypt the SAME seed in
-            // place — the seed, the addresses, and every coin are RETAINED; nothing is regenerated.
-            RequirePasswordForExistingWallet();
+            case StartupLogin.Unlock:
+                Trace("LOAD: encrypted seed -> Unlock (password required)");
+                _locked = true;            // encrypted on disk — must be unlocked with the password before use
+                Unlock();                  // prompt now (modal); if cancelled, the wallet stays locked
+                return;
+            case StartupLogin.SetPassword:
+                // SECURITY (no-login is fraud): an EXISTING plaintext wallet MUST be password-protected before
+                // use. Force a password now and encrypt the SAME seed in place — seed/addresses/coins RETAINED.
+                Trace("LOAD: plaintext seed -> RequirePasswordForExistingWallet (must set a password)");
+                _seed = WalletKeys.BackupToSeed(_w.Seed);
+                RequirePasswordForExistingWallet();
+                return;
+            default: // NewWizard — brand-new wallet: a fresh seed, EMPTY (no play money, no opening balance).
+                Trace("LOAD: new/invalid seed -> fresh wallet + AccountWizard (set seed + password)");
+                _seed = WalletKeys.NewSeed();
+                _w = new File_ { Seed = WalletKeys.SeedToBackup(_seed), RecvIndex = 0 };
+                _freshWallet = true;       // first run → run the ElectrumSVP-style account wizard
+                Save();
+                return;
         }
     }
 
@@ -2420,13 +2578,16 @@ public sealed class WalletView : UserControl
     {
         var rows = new List<Tx>();
         foreach (var u in _w.Utxos)
+        {
+            if (!u.Confirmed) continue;   // only SPV-PROVEN, on-chain coins appear in history — never a fabrication
             rows.Add(new Tx {
-                Time = u.Confirmed ? "on-chain" : "pending",
+                Time = "on-chain",
                 Type = "received",
                 Amount = u.Value,
                 Balance = 0,
                 Memo = $"{u.Txid} :{u.Vout}" + (_w.TxLabels.TryGetValue(u.Txid, out var rl) ? "  — " + rl : ""),
             });
+        }
         foreach (var s in _w.Sends)
             rows.Add(new Tx {
                 Time = s.Time,
@@ -2506,11 +2667,16 @@ public sealed class WalletView : UserControl
 
     private void Render()
     {
-        if (_locked)
+        // No usable seed yet → show a safe placeholder and DO NOT derive any address (WalletKeys.Account throws on
+        // a non-32-byte seed). Two cases land here: an encrypted wallet before Unlock (_locked), and the brief
+        // pre-selection state before the user has picked a wallet (selection is deferred to MainWindow.Loaded).
+        if (_locked || _seed.Length != 32)
         {
             _bal.Text = "🔒 locked";
             _sbBalance.Text = "🔒 locked"; _sbLock.Text = "🔒 locked"; _sbNetwork.Text = $"{_net().Network}";
-            _recv.Text = "Wallet is encrypted — press “Unlock…” (Wallet menu) to enter your password.";
+            _recv.Text = _locked
+                ? "Wallet is encrypted — press “Unlock…” (Wallet menu) to enter your password."
+                : "No wallet open — select a wallet to begin.";
             _historyGrid.ItemsSource = null; _coinsGrid.ItemsSource = null; _addrGrid.ItemsSource = null;
             return;
         }
@@ -2576,7 +2742,9 @@ public sealed class WalletView : UserControl
     {
         if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(new Action(UpdateStatusBar)); return; }
         if (_locked) { _sbBalance.Text = "🔒 locked"; _sbLock.Text = "🔒 locked"; _sbNetwork.Text = $"{_net().Network}"; return; }
-        _sbBalance.Text = $"{Balance:N0} sat" + (Pending > 0 ? $"  (+{Pending:N0} pending)" : "") + (WatchedBalance > 0 ? $"  [watch {WatchedBalance:N0}]" : "");
+        // HEADLINE = CONFIRMED (proof-verified, mined) money ONLY — never an unproven/optimistic total. The
+        // unconfirmed and double-spent coins live in their own tab; they are never shown as the balance.
+        _sbBalance.Text = $"{Balance:N0} sat" + (WatchedBalance > 0 ? $"  ·  watch {WatchedBalance:N0}" : "");
         _sbLock.Text = "🔓 unlocked";
         var node = _node();
         var who = string.IsNullOrWhiteSpace(_w.Handle) ? "" : $"@{_w.Handle} · ";
@@ -2738,7 +2906,7 @@ public sealed class WalletView : UserControl
         try
         {
             var w = new OnChainWallet(_seed);
-            foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.Frozen && u.Confirmed && !u.WatchOnly)) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
+            foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.Frozen && !u.WatchOnly && IsRealCoin(u))) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
             var spend = w.BuildActionMany(outputs.Select(o => (o.Lock, o.Value)).ToList(), fee);
             if (!w.VerifySpend(spend)) { _sendStatus.Text = "Built transaction failed self-verification — not broadcast."; return; }
             _sendStatus.Text = "Broadcasting…";
@@ -2775,7 +2943,7 @@ public sealed class WalletView : UserControl
         try
         {
             var w = new OnChainWallet(_seed);
-            foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.Frozen && u.Confirmed && !u.WatchOnly)) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
+            foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.Frozen && !u.WatchOnly && IsRealCoin(u))) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
             var spend = w.BuildAction(resolved.Value.Lock, amount, fee);
             rawHex = Convert.ToHexString(Chain.Serialize(spend.Tx)).ToLowerInvariant();
         }
@@ -3009,7 +3177,7 @@ public sealed class WalletView : UserControl
             if (confirm != MessageBoxResult.Yes) { _sendStatus.Text = "Invoice cancelled."; return; }
 
             var w = new OnChainWallet(_seed);
-            foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.Frozen && u.Confirmed && !u.WatchOnly)) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
+            foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.Frozen && !u.WatchOnly && IsRealCoin(u))) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
             var spend = w.BuildActionMany(pr.Outputs.Select(o => (o.Script, o.Amount)).ToList(), fee);
             if (!w.VerifySpend(spend)) { _sendStatus.Text = "Built invoice tx failed self-verification — not sent."; return; }
             var rawHex = Convert.ToHexString(Chain.Serialize(spend.Tx)).ToLowerInvariant();

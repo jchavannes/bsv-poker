@@ -153,6 +153,18 @@ public static class Chain
         return tx with { Ins = ins };
     }
 
+    /// <summary>Apply an EXTERNALLY produced 64-byte compact (r‖s) signature to a P2PKH input — e.g. one assembled
+    /// by THRESHOLD signing, where no single party holds the key. Builds the standard scriptSig
+    /// &lt;DER(sig)‖0x41&gt; &lt;pub&gt;, so the spend verifies on the ordinary consensus path (<see cref="VerifyP2pkhInput"/>).</summary>
+    public static Tx ApplyP2pkhSig(Tx tx, int index, byte[] compactSig64, byte[] pub33)
+    {
+        var sigWithType = Secp256k1.ToDer(compactSig64).Concat(new byte[] { SighashAllForkId }).ToArray();
+        var scriptSig = Push(sigWithType).Concat(Push(pub33)).ToArray();
+        var ins = tx.Ins.ToList();
+        ins[index] = ins[index] with { ScriptSig = scriptSig };
+        return tx with { Ins = ins };
+    }
+
     /// <summary>
     /// Verify a signed P2PKH input's signature against its sighash (the core consensus check). Strict:
     /// the scriptSig must be exactly &lt;sig+hashtype&gt;&lt;pubkey&gt; with no trailing bytes, the pubkey must
@@ -373,6 +385,99 @@ public static class Chain
             return Secp256k1.VerifyDigest(pubA, digest, compactA) && Secp256k1.VerifyDigest(pubB, digest, compactB);
         }
         catch { return false; }
+    }
+
+    // ===================== n-of-n pot escrow: SAFETY against an (n-1)-collusion =====================
+    // The fully-on-chain pot is locked to ALL n contributors (n-of-n). Even if n-1 players collude on a
+    // compromised system, they CANNOT move the pot without the one honest player's signature — so the pot
+    // can only ever pay the outcome every contributor agreed to (the provable winner). If anyone refuses,
+    // the pre-agreed nLockTime recovery returns the stakes. Consensus-enforced no-theft via OP_CHECKMULTISIG.
+
+    /// <summary>n-of-n bare multisig lock: OP_n &lt;pub1&gt;…&lt;pubN&gt; OP_n OP_CHECKMULTISIG (n = 1..16).</summary>
+    public static byte[] MultisigLockNofN(IReadOnlyList<byte[]> pubs)
+    {
+        if (pubs.Count is < 1 or > 16) throw new ArgumentException("n must be 1..16");
+        foreach (var p in pubs) if (p.Length != 33 || (p[0] != 0x02 && p[0] != 0x03)) throw new ArgumentException("pubkeys must be 33-byte compressed");
+        var b = new List<byte> { (byte)(0x50 + pubs.Count) };          // OP_n (m = n required signatures)
+        foreach (var p in pubs) { b.Add(33); b.AddRange(p); }
+        b.Add((byte)(0x50 + pubs.Count));                              // OP_n (key count)
+        b.Add(0xae);                                                  // OP_CHECKMULTISIG
+        return b.ToArray();
+    }
+
+    /// <summary>One contributor's signature over an n-of-n pot input (DER ‖ 0x41, low-S).</summary>
+    public static byte[] SignMultisigN(Tx tx, int index, IReadOnlyList<byte[]> pubs, long amount, byte[] signerSeed)
+    {
+        var digest = SighashForkId(tx, index, MultisigLockNofN(pubs), amount);
+        var sig = Secp256k1.SignDigest(signerSeed, digest);
+        return Secp256k1.ToDer(sig).Concat(new byte[] { SighashAllForkId }).ToArray();
+    }
+
+    /// <summary>scriptSig for an n-of-n spend: OP_0 &lt;sig1&gt;…&lt;sigN&gt; (sigs in the SAME order as the pubkeys).</summary>
+    public static byte[] MultisigScriptSigN(IReadOnlyList<byte[]> sigs)
+    {
+        var b = new List<byte> { 0x00 };                              // OP_0 — CHECKMULTISIG off-by-one dummy
+        foreach (var s in sigs) { if (s.Length is < 1 or > 75) throw new ArgumentException("signature push out of range"); b.Add((byte)s.Length); b.AddRange(s); }
+        return b.ToArray();
+    }
+
+    public static Tx ApplyMultisigScriptSigN(Tx tx, int index, IReadOnlyList<byte[]> sigs)
+    {
+        var ins = tx.Ins.ToList();
+        ins[index] = ins[index] with { ScriptSig = MultisigScriptSigN(sigs) };
+        return tx with { Ins = ins };
+    }
+
+    /// <summary>Strictly verify a fully-signed n-of-n input: exactly OP_0 then n sigs, in pubkey order, all
+    /// valid, hashtype 0x41, no trailing bytes. Fewer than n valid sigs ⇒ false (the collusion-safety check).</summary>
+    public static bool VerifyMultisigNofN(Tx signed, int index, IReadOnlyList<byte[]> pubs, long amount)
+    {
+        try
+        {
+            if (index < 0 || index >= signed.Ins.Count) return false;
+            var ss = signed.Ins[index].ScriptSig;
+            int p = 0;
+            if (ss.Length < 1 || ss[p++] != 0x00) return false;        // OP_0 dummy
+            var sigs = new List<byte[]>();
+            for (int k = 0; k < pubs.Count; k++) { var (s, np) = ReadPush(ss, p); if (s == null) return false; sigs.Add(s); p = np; }
+            if (p != ss.Length) return false;                          // exactly n sigs, no trailing bytes
+            var scriptCode = MultisigLockNofN(pubs);
+            var unsigned = signed with { Ins = signed.Ins.Select((i, k) => k == index ? i with { ScriptSig = Array.Empty<byte>() } : i).ToList() };
+            var digest = SighashForkId(unsigned, index, scriptCode, amount);
+            for (int k = 0; k < pubs.Count; k++)
+            {
+                if (sigs[k].Length < 1 || sigs[k][^1] != SighashAllForkId) return false;
+                var compact = StrictDerToCompact(sigs[k][..^1]); if (compact == null) return false;
+                if (!Secp256k1.VerifyDigest(pubs[k], digest, compact)) return false; // every contributor must have signed
+            }
+            return true;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// The pre-agreed nLockTime RECOVERY for an n-of-n pot: refunds EACH contributor their stake after
+    /// <paramref name="lockHeight"/> (non-final sequence so the locktime binds). Every contributor co-signs
+    /// this at SETUP, before funding — so if the cooperative settlement ever stalls (a party griefs by
+    /// refusing to sign the winner payout), anyone can broadcast this after the timeout and no stake is ever
+    /// stranded. Safety (n-of-n, no theft) + liveness (pre-signed refund) without any covenant opcode.
+    /// </summary>
+    public static Tx BuildNofNRecovery(string potTxid, uint vout, IReadOnlyList<(byte[] Pub, long Stake)> contributors, long fee, uint lockHeight)
+    {
+        if (contributors.Count < 1) throw new ArgumentException("need contributors");
+        if (fee < 0) throw new ArgumentException("negative fee");
+        long total = contributors.Sum(c => c.Stake);
+        if (fee >= total) throw new ArgumentException("fee exceeds the pot");
+        var outs = new List<TxOut>();
+        for (int i = 0; i < contributors.Count; i++)
+        {
+            long refund = contributors[i].Stake - (i == contributors.Count - 1 ? fee : 0); // fee off the last share
+            if (refund < 0) throw new ArgumentException("a stake cannot cover the fee");
+            if (refund > 0) outs.Add(new TxOut(refund, P2pkhLockForPub(contributors[i].Pub)));
+        }
+        if (outs.Count == 0) throw new ArgumentException("no positive refunds");
+        var ins = new List<TxIn> { new(potTxid, vout, Array.Empty<byte>(), 0xfffffffe) }; // non-final → locktime active
+        return new Tx(2, ins, outs, lockHeight);
     }
 
     // ----- 1-of-2 multisig: every coin a player sends to their OWN bot lives here -----

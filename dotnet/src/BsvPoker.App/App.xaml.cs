@@ -21,8 +21,19 @@ public partial class App : Application
         // %TEMP%/poker_findcoins.txt, then exits. Lets the coin-discovery be verified with NO window.
         int fcIdx = Array.IndexOf(e.Args, "--findcoins");
         if (fcIdx >= 0 && fcIdx + 1 < e.Args.Length) { RunFindCoins(e.Args[fcIdx + 1]).GetAwaiter().GetResult(); Shutdown(); return; }
-        base.OnStartup(e);   // StartupUri shows MainWindow; the WALLET requires a password before it can be used
+        base.OnStartup(e);
         ShutdownMode = ShutdownMode.OnMainWindowClose; // close the window => the whole app exits
+        // SEQUENTIAL STARTUP (the principal's rule): the wallet SELECTOR is the first thing on screen, ALONE; then
+        // the PASSWORD, ALONE; only AFTER a wallet is open and unlocked is the main window shown. The selector and
+        // password are modal dialogs run here, BEFORE the main window exists, so there is NEVER a window behind
+        // them and they appear one after the other — never together, never with the game/wallet behind.
+        var w = new MainWindow();
+        if (w.RunStartupLogin())   // selector → password (each alone); false => the user cancelled => exit
+        {
+            MainWindow = w;        // ShutdownMode.OnMainWindowClose now binds to the real window
+            w.Show();
+        }
+        else Shutdown();
     }
 
     /// <summary>Headless verification of the SAME discovery the wallet runs: connect to public BSV nodes (with the
@@ -112,6 +123,14 @@ public partial class App : Application
                                           new() { new(50_000, Chain.P2pkhLockForPub(k.Pub)) }, 0);
                 var signed = Chain.SignP2pkhInput(tx, 0, k.Priv, k.Pub, 100_000);
                 if (!Chain.VerifyP2pkhInput(signed, 0, k.Pub, 100_000)) throw new Exception("spend signature verify failed");
+
+                // (4) STARTUP LOGIN ENFORCEMENT — NO wallet ever opens without a login. The startup decision
+                //     (the SAME one Load() uses) must require: encrypted seed → Unlock (password); existing
+                //     plaintext seed → must SET a password; absent/garbage seed → the new-wallet wizard.
+                if (Views.WalletView.DecideLogin(enc) != Views.WalletView.StartupLogin.Unlock) throw new Exception("encrypted seed did not require Unlock");
+                if (Views.WalletView.DecideLogin(backup) != Views.WalletView.StartupLogin.SetPassword) throw new Exception("plaintext seed did not require a password");
+                if (Views.WalletView.DecideLogin("not-a-seed-" + i) != Views.WalletView.StartupLogin.NewWizard) throw new Exception("invalid seed did not route to the new-wallet wizard");
+                if (Views.WalletView.DecideLogin("") != Views.WalletView.StartupLogin.NewWizard) throw new Exception("empty seed did not route to the new-wallet wizard");
                 ok++;
             }
             catch (Exception ex) { fail++; if (firstErr.Length == 0) firstErr = "iter " + i + ": " + ex.Message; }

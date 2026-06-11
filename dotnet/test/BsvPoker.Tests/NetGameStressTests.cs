@@ -69,7 +69,7 @@ public static class NetGameStressTests
                     games[p] = new NetGame(nodes[p], table, kp.Priv, kp.Pub);
                 }
                 foreach (var g in games) g.Start();
-                if (!Until(() => games.All(g => g.Hand != null), 90000)) throw new Exception("first hand not dealt");
+                if (!Until(() => games.All(g => g.Hand != null), 30000)) throw new Exception("first hand not dealt");
                 foreach (var g in games)
                 {
                     if (!g.Hand!.Seats[g.MySeat].Hole.All(x => !x.IsFaceDown)) throw new Exception("cannot see my own holes");

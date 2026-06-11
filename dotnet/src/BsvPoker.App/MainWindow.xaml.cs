@@ -30,32 +30,21 @@ public partial class MainWindow : Window
         var wallet = new WalletView(_profile.Dir, vault, () => _bsvNode, () => _headerStore, () => _currentNet, _profile.IdentityPriv, _profile.IdentityPub);
         WalletHost.Content = wallet;
         _wallet = wallet;
-        _idPriv = wallet.WalletIdentityPriv; _idPub = wallet.WalletIdentityPub;   // identity = the wallet you opened, not an auto-profile key
         _wallet.RescanRequested = DeepRescan;   // the "Rescan / Find my coins" button → full block scan (works on mainnet)
-
-        _game = new GameView(_node, _idPriv, _idPub, wallet.WalletVault, wallet.RefreshCards);   // vault sealed to the OPENED wallet
-        GameHost.Content = _game;
-
-        // Chat: every message is a Bitcoin transaction; peers are auto-discovered from on-chain Announce txs
-        // (no manual key/IP exchange). Send = fund an encrypted ChatDirect tx, push it IP-to-IP to the peer
-        // AND broadcast it to miners.
-        _chatView = new ChatView(_idPub,
-            () => (_gossip?.Peers ?? new List<PokerGossip.Peer>()).Select(p => (p.PubHex, p.Endpoint)).ToList(),
-            SendChatTx);
-        _chatView.SetHandleResolver(wallet.IdentityLabelFor);   // chat shows @handles from the wallet's Contacts
-        _chatView.SetSaveContact(wallet.ImportContact);  // save a discovered peer into the wallet address book
-        ChatHost.Content = _chatView;
-
-        // The lobby: pick a variant + seat count (2–6), host/join a real table, or play your own bot at the chosen
-        // variant. Joining a table or pressing "Play a bot" jumps to the game board.
-        _lobby = new LobbyView(_node, _idPub, JoinTable,
-            variant => { if (CanPlay()) { _game!.StartBot(variant); Tabs.SelectedIndex = 2; } });
-        LobbyHost.Content = _lobby;
+        // The game / chat / lobby views all derive their identity FROM THE OPENED WALLET. They are NOT built here:
+        // the wallet is selected AFTER this window is shown (Loaded), so there is no identity yet at construction.
+        // BuildIdentityViews() wires them once the wallet is open (see Loaded, and OnUnlocked for a later unlock).
         InitNetworkSelector();
 
         Loaded += async (_, _) =>
         {
-            ChooseNetworkAtStartup();   // FIRST: pick mainnet / testnet / regtest for this wallet (cancel = exit)
+            if (_startupRan) return;   // Loaded can fire again on re-parenting; run the network bring-up ONCE
+            _startupRan = true;
+            // The wallet was ALREADY selected + unlocked in RunStartupLogin() (BEFORE this window was shown), so by
+            // the time we get here the identity views are wired and we can bring up the network.
+            // No startup network popup: the top network selector (InitNetworkSelector, defaults to Mainnet) is
+            // the ONLY network control, and switching it never re-logs-in. (Removed the ChooseNetworkAtStartup
+            // popup — the principal does not want windows popping up in front of him.)
             StartBsvNetwork();   // the only Bitcoin-network connection (tx/headers/block) — nothing off-chain
             _wallet.Refresh();   // the receive address is network-aware; show it for the loaded network
             StartTxLink();       // listen for transactions pushed to us IP-to-IP by other players
@@ -69,18 +58,66 @@ public partial class MainWindow : Window
             var spvScan = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(20) };
             spvScan.Tick += (_, _) => SpvRescan();
             spvScan.Start();
-            // re-arm the SPV filter the instant the wallet is unlocked (it needs the seed to derive our addresses)
-            _wallet.OnUnlocked += () => { ApplySpvFilter(); SpvRescan(); };
+            // (the OnUnlocked handler that re-arms the SPV filter + wires the identity views is subscribed above,
+            //  right after wallet selection, so it is in place before the very first unlock fires.)
             // announce ourselves on-chain so peers auto-discover our key + address (a funded Announce tx)
             var ann = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(45) };
             ann.Tick += (_, _) => Announce();
             ann.Start();
             Announce();
         };
-        Closed += (_, _) => { foreach (var w in _botWindows.ToList()) { try { w.Close(); } catch { } } foreach (var b in _bots.ToList()) { try { b.Dispose(); } catch { } } try { _bsvNode?.Dispose(); } catch { } try { _link?.Dispose(); } catch { } try { _node.Dispose(); } catch { } };
+        Closed += (_, _) => { try { _wallet.VaultBackup(); } catch { } foreach (var w in _botWindows.ToList()) { try { w.Close(); } catch { } } foreach (var b in _bots.ToList()) { try { b.Dispose(); } catch { } } try { _bsvNode?.Dispose(); } catch { } try { _link?.Dispose(); } catch { } try { _node.Dispose(); } catch { } };
     }
 
     private WalletView _wallet = null!;
+    private bool _startupRan;   // guards the once-only network bring-up against a repeated Loaded event
+
+    /// <summary>Run the SEQUENTIAL startup login BEFORE the main window is shown: the "Select your wallet" dialog
+    /// (alone), then the password (alone). Returns true once a wallet is open + unlocked (identity views wired);
+    /// false if the user cancelled (the app then exits). Called from App.OnStartup so nothing is ever behind the
+    /// dialogs and they appear one after the other — never together, never with the game/wallet behind them.</summary>
+    public bool RunStartupLogin()
+    {
+        if (!_wallet.SelectWalletAtStartup()) return false;   // selector → Load() → password, all modal/sequential
+        BuildIdentityViews();                                  // identity is now the opened wallet's Base ID
+        // a LATER unlock (account switch / unlock-from-locked) re-arms SPV and wires the views if not yet built
+        _wallet.OnUnlocked += () => { BuildIdentityViews(); ApplySpvFilter(); SpvRescan(); };
+        return true;
+    }
+    private bool _viewsBuilt;   // the identity-bound views (game/chat/lobby) are wired exactly once, after open
+
+    /// <summary>Wire the views that derive their identity from the OPENED wallet — the game (its card vault is
+    /// sealed to the wallet's identity), the chat (signs/encrypts with the wallet's Base ID) and the lobby. Built
+    /// exactly once, the moment the wallet is open and its identity is available; a no-op until then and after.
+    /// (Called after wallet selection, and again on a later unlock for the locked-at-selection case.)</summary>
+    private void BuildIdentityViews()
+    {
+        if (_viewsBuilt) return;
+        var pub = _wallet.WalletIdentityPub;
+        if (pub.Length != 33) return;   // wallet open but still locked (no seed yet) → wait for OnUnlocked
+        _viewsBuilt = true;
+        _idPriv = _wallet.WalletIdentityPriv; _idPub = pub;   // identity = the wallet you opened, not an auto-profile key
+
+        _game = new GameView(_node, _idPriv, _idPub, _wallet.WalletVault, _wallet.RefreshCards);   // vault sealed to the OPENED wallet
+        GameHost.Content = _game;
+
+        // Chat: every message is a Bitcoin transaction; peers are auto-discovered from on-chain Announce txs
+        // (no manual key/IP exchange). Send = fund an encrypted ChatDirect tx, push it IP-to-IP to the peer
+        // AND broadcast it to miners.
+        _chatView = new ChatView(_idPub,
+            () => (_gossip?.Peers ?? new List<PokerGossip.Peer>()).Select(p => (p.PubHex, p.Endpoint)).ToList(),
+            SendChatTx);
+        _chatView.SetHandleResolver(_wallet.IdentityLabelFor);   // chat shows @handles from the wallet's Contacts
+        _chatView.SetSaveContact(_wallet.ImportContact);  // save a discovered peer into the wallet address book
+        ChatHost.Content = _chatView;
+
+        // The lobby: pick a variant + seat count (2–6), host/join a real table, or play your own bot at the chosen
+        // variant. Joining a table or pressing "Play a bot" jumps to the game board.
+        _lobby = new LobbyView(_node, _idPub, JoinTable,
+            variant => { if (CanPlay()) { _game!.StartBot(variant); Tabs.SelectedIndex = 2; } });
+        LobbyHost.Content = _lobby;
+        if (_node.BoundPort > 0) { try { _node.SetIdentity(_idPriv, _idPub); _lobby.OnNodeReady(_node.BoundPort); } catch { } }   // node may already be up if the wallet was locked at selection
+    }
 
     private void StartTxLink()
     {
@@ -278,13 +315,9 @@ public partial class MainWindow : Window
     /// </summary>
     private void Announce()
     {
-        try
-        {
-            var script = OnChainAnnounce.BuildScript(_idPub, MyEndpoint());
-            var (raw, _) = _wallet.FundTx(script, 1000, 500);   // a bootstrap announcement is a real funded tx
-            if (raw != null) _bsvNode?.Broadcast(raw);
-        }
-        catch { }
+        // NEVER auto-spend the user's coins. A funded on-chain announce is an EXPLICIT user action — NEVER a
+        // 45-second timer. That timer spent the real funding coin every cycle and left fake change: it is what
+        // DESTROYED the user's 1,000,000-sat coin. Peer discovery here is OFF-CHAIN gossip only — no tx, no spend.
         _gossip?.Announce();   // poker overlay: announce to known peers (they forward it onward)
         _gossip?.Query();      // and pull the peers they know
     }
@@ -342,16 +375,19 @@ public partial class MainWindow : Window
 
     private void InitNetworkSelector()
     {
-        // ALWAYS start on Mainnet, every launch — Mainnet is primary, Testnet the backup, Regtest a distant 3rd
-        // and NEVER the default. The selected network is deliberately NOT persisted: the app always opens on
-        // Mainnet so it can never silently come up on a test network.
+        // REMEMBER the network across launches. A wallet must NOT silently show zero just because the app
+        // reset to a different network on restart — if you were on Testnet with confirmed coins, you reopen on
+        // Testnet and still see them. A brand-new profile (no saved choice) defaults to Mainnet.
         var file = System.IO.Path.Combine(_profile.Dir, "network.txt");
-        try { if (System.IO.File.Exists(file)) System.IO.File.Delete(file); } catch { } // purge any stale saved choice
-        NetworkBox.SelectedIndex = 0; // Mainnet
+        int idx = 0; // Mainnet default for a fresh profile
+        try { if (System.IO.File.Exists(file) && int.TryParse(System.IO.File.ReadAllText(file).Trim(), out var v) && v is >= 0 and <= 2) idx = v; } catch { }
+        NetworkBox.SelectedIndex = idx;
+        if (idx != 0) StartBsvNetwork();   // bring up the node on the restored (non-Mainnet) network
         UpdateNetInfo();
         NetworkBox.SelectionChanged += (_, _) =>
         {
-            StartBsvNetwork();   // sets _currentNet from the selection (session-only; not persisted)
+            try { System.IO.File.WriteAllText(file, NetworkBox.SelectedIndex.ToString()); } catch { } // persist the choice
+            StartBsvNetwork();   // sets _currentNet from the selection
             _wallet.Refresh();   // re-render the network-aware receive address for the newly selected network
             UpdateNetInfo();
         };
@@ -463,7 +499,7 @@ public partial class MainWindow : Window
                 byte[]? raw = await node.GetBlockAsync(bh, 30000);
                 if (raw == null) continue;
                 BsvBlock.Parsed blk; try { blk = BsvBlock.Parse(raw); } catch { continue; } // merkle root must match the header
-                foreach (var tx in blk.Txs) _wallet.ConfirmFromBlock(tx);   // credits silently; the balance just appears
+                for (int ti = 0; ti < blk.Txs.Count; ti++) _wallet.ConfirmFromBlock(blk.Txs[ti], blk.Header, blk.Txids, ti);   // credit WITH a saved, re-verifiable proof
             }
             _lastScannedHeight = tip;
         }

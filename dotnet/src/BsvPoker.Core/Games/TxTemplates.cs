@@ -7,7 +7,7 @@ public enum TxKind
 {
     Payment, KeepAlive,
     ChatDirect, ChatGroup,
-    CardNft, Commitment, Reveal, ShuffleStage, Deal, BoardReveal, Showdown,
+    CardNft, Commitment, Reveal, ShuffleStage, ShuffleReveal, Deal, BoardReveal, Showdown,
     Bet, PotEscrow, Settlement, Recovery,
     Bid, Auction, RoleClaim,
     TableGenesis, GameStart, HandStart,
@@ -38,7 +38,8 @@ public static class TxTemplates
         new Template(TxKind.CardNft,      "BSVP:NFT:1",  1, "A card as a 1-sat NFT, sealed to its owner.", new[] { "sealCommitment" }),
         new Template(TxKind.Commitment,   "BSVP:CMT:1",  1, "A hash commitment published before a reveal.", new[] { "commitHash" }),
         new Template(TxKind.Reveal,       "BSVP:RVL:1",  1, "The reveal of a prior commitment.", new[] { "commitHash", "preimage" }),
-        new Template(TxKind.ShuffleStage, "BSVP:SHF:1",  1, "One seat's masking+shuffle stage of the deal.", new[] { "handId", "step", "deck" }),
+        new Template(TxKind.ShuffleStage, "BSVP:SHF:1",  1, "One seat's masking+shuffle stage: a commitment + the masked deck.", new[] { "handId", "step", "commitment", "deck" }),
+        new Template(TxKind.ShuffleReveal,"BSVP:SHR:1",  1, "One seat opens its shuffle secret (global scalar + permutation) so the commitment is VERIFIED.", new[] { "handId", "step", "global", "perm" }),
         new Template(TxKind.Deal,         "BSVP:DEAL:1", 1, "Dealing a card to a seat (per-position mask reveal).", new[] { "handId", "position", "mask" }),
         new Template(TxKind.BoardReveal,  "BSVP:BRD:1",  1, "A community-board card revealed by all seats.", new[] { "handId", "street", "mask" }),
         new Template(TxKind.Showdown,     "BSVP:SHO:1",  1, "Showdown reveal of a seat's hole cards.", new[] { "handId", "seat", "holeMasks" }),

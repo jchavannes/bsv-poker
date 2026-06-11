@@ -32,11 +32,14 @@ public sealed class P2PNode : IDisposable
     private const string DirQuery = " bsvp/dir?";
     private const string PresenceTopic = " bsvp/presence";
 
+    private const int MaxInboundQueue = 8192;         // per-node frames awaiting processing before we shed load
+    private const int MaxPeerOutQueue = 4096;          // per-peer frames awaiting the wire before we shed load
+
     private readonly int _port;
     private readonly string _bindHost;
     private TcpListener? _listener;
     private volatile bool _closed;
-    private readonly ConcurrentDictionary<Guid, (TcpClient Sock, RateState Rate)> _peers = new();
+    private readonly ConcurrentDictionary<Guid, Peer> _peers = new();
     private readonly ConcurrentDictionary<string, List<Action<string>>> _subs = new();
     private readonly ConcurrentDictionary<string, byte> _seen = new();
     private readonly ConcurrentQueue<string> _seenOrder = new();
@@ -46,13 +49,30 @@ public sealed class P2PNode : IDisposable
     private readonly ConcurrentDictionary<string, TableAnnounce> _ownTables = new();
     private readonly ConcurrentDictionary<string, PresenceAnnounce> _ownPresence = new();
     private Timer? _reannounceTimer;
-    private readonly object _writeLock = new();
+
+    // INBOUND PIPELINE: socket read loops must NEVER block on subscriber work (the mental-poker deal does
+    // heavy EC crypto inside its callback). A read loop that stalls stops draining its socket, the OS recv
+    // buffer fills, and a peer's blocking Write wedges — a back-pressure convoy that, once formed, never
+    // recovers and only worsens with player count. So the read loops do nothing but split frames and hand
+    // them to this bounded queue; a single dedicated consumer thread does all dedup/deliver/flood work.
+    private readonly BlockingCollection<(string line, Guid from, RateState rate, int cost)> _inbound
+        = new(new ConcurrentQueue<(string, Guid, RateState, int)>(), MaxInboundQueue);
+    private Thread? _consumer;
 
     public sealed record TableAnnounce(string id, string name, int members);
     public sealed record PresenceAnnounce(string playerId, string addr);
     public sealed record PeerAddr(string Host, int Port);
     private sealed record Frame(string t, string d, string id);
     private sealed class RateState { public double Tokens; public long Last; }
+
+    // A connected peer owns its OWN outbound queue and writer thread. Flood enqueues (non-blocking) and moves
+    // on, so a single slow/wedged peer can never block sends to the others — there is no global write lock.
+    private sealed class Peer
+    {
+        public required TcpClient Sock;
+        public required RateState Rate;
+        public required BlockingCollection<byte[]> Out;
+    }
 
     // SECURITY: default to LOOPBACK. The node listens only on 127.0.0.1 until the user explicitly opts in
     // to LAN/online play via EnableLan(). Outbound dials work regardless, so a player can still join others.
@@ -90,6 +110,7 @@ public sealed class P2PNode : IDisposable
         _listener = new TcpListener(addr, _port);
         _listener.Start();
         BoundPort = ((IPEndPoint)_listener.LocalEndpoint).Port;
+        StartConsumer();
         _ = AcceptLoop(_listener);
         Subscribe(DirTopic, OnDirAnnounce);
         Subscribe(PresenceTopic, OnPresenceAnnounce);
@@ -157,13 +178,32 @@ public sealed class P2PNode : IDisposable
         if (_peers.Count >= MaxPeers) { try { sock.Dispose(); } catch { } return; }
         var id = Guid.NewGuid();
         var rate = new RateState { Tokens = RateCapacityBytes, Last = Environment.TickCount64 };
-        _peers[id] = (sock, rate);
+        var outq = new BlockingCollection<byte[]>(new ConcurrentQueue<byte[]>(), MaxPeerOutQueue);
+        _peers[id] = new Peer { Sock = sock, Rate = rate, Out = outq };
         sock.NoDelay = true;
+
+        // WRITER: one dedicated thread per peer drains its outbound queue with blocking writes. A wedged
+        // peer can only back up (then shed) its OWN queue — it cannot stall this node's other sends.
+        new Thread(() =>
+        {
+            try
+            {
+                var stream = sock.GetStream();
+                foreach (var payload in outq.GetConsumingEnumerable())
+                {
+                    if (_closed) break;
+                    stream.Write(payload, 0, payload.Length);
+                }
+            }
+            catch { }
+            finally { try { sock.Dispose(); } catch { } _peers.TryRemove(id, out _); }
+        }) { IsBackground = true, Name = "p2p-writer" }.Start();
+
+        // READER: do NOTHING but byte-accurate framing + hand each frame to the shared inbound queue. No
+        // dedup, no deliver, no flood here — those happen on the consumer thread so heavy subscriber work
+        // can never stall this socket's draining.
         _ = Task.Run(async () =>
         {
-            // BYTE-accurate framing: accumulate raw bytes, split on the '\n' byte, and hard-cap the byte
-            // length of any single frame. An oversize frame is dropped and we resync to the next newline
-            // rather than tearing down the connection.
             var acc = new MemoryStream();
             var bytes = new byte[8192];
             bool skipping = false;
@@ -180,7 +220,7 @@ public sealed class P2PNode : IDisposable
                         if (ch == (byte)'\n')
                         {
                             if (skipping) { skipping = false; acc.SetLength(0); continue; }
-                            if (acc.Length > 0) { OnFrame(Encoding.UTF8.GetString(acc.ToArray()), id, rate, (int)acc.Length); acc.SetLength(0); }
+                            if (acc.Length > 0) { Enqueue(Encoding.UTF8.GetString(acc.ToArray()), id, rate, (int)acc.Length); acc.SetLength(0); }
                         }
                         else if (skipping) { /* discard until newline */ }
                         else
@@ -192,8 +232,28 @@ public sealed class P2PNode : IDisposable
                 }
             }
             catch { }
-            finally { _peers.TryRemove(id, out _); try { sock.Dispose(); } catch { } }
+            finally { try { outq.CompleteAdding(); } catch { } _peers.TryRemove(id, out _); try { sock.Dispose(); } catch { } }
         });
+    }
+
+    // Non-blocking handoff from a socket read loop to the consumer. Under genuine overload we SHED (drop the
+    // frame) rather than block the read loop — gossip is loss-tolerant (frames are re-broadcast), and a
+    // never-blocking reader is what keeps the mesh from convoying.
+    private void Enqueue(string line, Guid from, RateState rate, int cost)
+    {
+        if (_closed) return;
+        if (!_inbound.TryAdd((line, from, rate, cost))) Drop("inbound overflow");
+    }
+
+    private void StartConsumer()
+    {
+        if (_consumer != null) return;
+        _consumer = new Thread(() =>
+        {
+            try { foreach (var item in _inbound.GetConsumingEnumerable()) { if (_closed) break; OnFrame(item.line, item.from, item.rate, item.cost); } }
+            catch { }
+        }) { IsBackground = true, Name = "p2p-consumer" };
+        _consumer.Start();
     }
 
     // token bucket measured in BYTES, so a few large frames cost as much as many small ones (byte-cost
@@ -242,7 +302,9 @@ public sealed class P2PNode : IDisposable
         foreach (var kv in _peers)
         {
             if (except is { } ex && kv.Key == ex) continue;
-            try { var s = kv.Value.Sock.GetStream(); lock (_writeLock) s.Write(payload, 0, payload.Length); } catch { }
+            // Non-blocking enqueue to the peer's own writer. If that peer is wedged and its queue is full we
+            // shed the frame for THAT peer only — the rest of the mesh is unaffected (no global lock).
+            try { if (!kv.Value.Out.TryAdd(payload)) Drop("peer out overflow"); } catch { }
         }
     }
 
@@ -325,10 +387,20 @@ public sealed class P2PNode : IDisposable
         return () => { lock (set) set.Remove(onEvent); };
     }
 
-    public Task<int> PublishAsync(string tableId, byte[] payload)
+    /// <summary>
+    /// Publish a frame. If <paramref name="id"/> is given it is the frame's dedup key: re-publishing the SAME
+    /// logical message (same id) is delivered to local subscribers only ONCE, but is always re-flooded so a
+    /// peer that dropped the first copy can still catch up — and every peer that already saw it discards the
+    /// re-flood at the cheap seen-check, BEFORE the expensive signature verify. Callers that want every call
+    /// treated as new (announcements, queries) pass no id and get a random one.
+    /// </summary>
+    public Task<int> PublishAsync(string tableId, byte[] payload, string? id = null)
     {
-        var f = new Frame(tableId, Convert.ToBase64String(payload), RandomId());
-        MarkSeen(f.id); DeliverLocal(f); Flood(JsonSerializer.Serialize(f));
+        var fid = id ?? RandomId();
+        var f = new Frame(tableId, Convert.ToBase64String(payload), fid);
+        bool already = MarkSeen(fid);
+        if (!already) DeliverLocal(f);                 // local echo only the first time this frame is published
+        Flood(JsonSerializer.Serialize(f));            // always reflood: retries reach peers that shed the first copy
         return Task.FromResult(_peers.Count);
     }
 
@@ -338,7 +410,8 @@ public sealed class P2PNode : IDisposable
     {
         _closed = true; _reannounceTimer?.Dispose();
         try { _listener?.Stop(); } catch { }
-        foreach (var kv in _peers) { try { kv.Value.Sock.Dispose(); } catch { } }
+        try { _inbound.CompleteAdding(); } catch { }   // let the consumer thread fall out of its loop
+        foreach (var kv in _peers) { try { kv.Value.Out.CompleteAdding(); } catch { } try { kv.Value.Sock.Dispose(); } catch { } }
         _peers.Clear();
     }
 }

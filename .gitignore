@@ -9,4 +9,19 @@ dist/
 # OS / editor / logs
 .DS_Store
 *.log
+*.log.*
 .env.local
+
+# SECRETS — never commit to this PUBLIC repo (wallet seeds / private keys / backups)
+_testnet_wallet.txt
+*wallet*.txt
+*.seed
+*.seed.txt
+seed*.txt
+wallet*.json
+*.key
+
+# Local agent scratch / captured command output at repo root (never published)
+/_*.txt
+/_bg.*
+/_*.log*

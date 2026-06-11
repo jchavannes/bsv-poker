@@ -34,14 +34,14 @@ public static class OnChainHandTapeTests
 
             var expected = new[]
             {
-                TxKind.TableGenesis, TxKind.GameStart, TxKind.HandStart, TxKind.PotEscrow,
+                TxKind.TableGenesis, TxKind.GameStart, TxKind.HandStart, TxKind.PotEscrow, TxKind.Recovery,
                 TxKind.ShuffleStage, TxKind.ShuffleStage,
                 TxKind.Deal, TxKind.Deal, TxKind.Deal, TxKind.Deal,
                 TxKind.BoardReveal, TxKind.BoardReveal, TxKind.BoardReveal,
                 TxKind.Bet, TxKind.Bet, TxKind.Bet, TxKind.Bet,
-                TxKind.Showdown, TxKind.Showdown, TxKind.Settlement,
+                TxKind.Showdown, TxKind.Showdown, TxKind.ShuffleReveal, TxKind.ShuffleReveal, TxKind.Settlement,
             };
-            T.Eq(tape.Steps.Count, expected.Length, "20 transactions in one heads-up hand");
+            T.Eq(tape.Steps.Count, expected.Length, "the full ordered tape (with always-on recovery + shuffle reveal)");
             for (int i = 0; i < expected.Length; i++) T.Eq(tape.Steps[i].Kind.ToString(), expected[i].ToString(), $"step {i} kind");
 
             // every transaction is distinct (real, separate on-chain txs)
@@ -51,27 +51,34 @@ public static class OnChainHandTapeTests
             // every TYPED step parses back to its kind + owner (PotEscrow + Settlement are money txs, not typed)
             foreach (var step in tape.Steps)
             {
-                if (step.Kind is TxKind.PotEscrow or TxKind.Settlement) continue;
+                if (step.Kind is TxKind.PotEscrow or TxKind.Settlement or TxKind.Recovery) continue;
                 var parsed = TxTemplates.Parse(step.Tx.Outs[0].Script);
                 T.True(parsed != null, $"{step.Kind} output is a typed output");
                 T.Eq(parsed!.Kind.ToString(), step.Kind.ToString(), $"{step.Kind} parses to its kind");
                 T.Eq(T.Hex(parsed.OwnerPub), T.Hex(step.OwnerPub), $"{step.Kind} owner round-trips");
             }
 
-            // the Deal steps carry the REAL dealt card indices in their position/card fields
+            // the Deal steps carry the hole card ENCRYPTED to the recipient seat — ONLY that seat can open it.
+            // The cleartext index is NEVER on-chain at deal time (true mental-poker privacy).
             var deals = tape.Steps.Where(s => s.Kind == TxKind.Deal).ToList();
             for (int pos = 0; pos < 4; pos++)
             {
                 var f = TxTemplates.Parse(deals[pos].Tx.Outs[0].Script)!.Fields;
                 T.Eq(f[1][0], (byte)pos, $"deal {pos} position");
-                T.Eq(f[2][0], (byte)deck[pos].Index, $"deal {pos} carries the real card index");
+                var sealedHex = Convert.ToHexString(f[2]);
+                var recipientPriv = pos / 2 == 0 ? a.Priv : b.Priv;
+                var otherPriv = pos / 2 == 0 ? b.Priv : a.Priv;
+                T.Eq(CardNft.Open(sealedHex, recipientPriv).CardIndex, deck[pos].Index, $"deal {pos}: the recipient opens the real card");
+                T.True(!CardNft.CanOpen(sealedHex, otherPriv), $"deal {pos}: the OTHER seat CANNOT open it (privacy)");
             }
 
-            // the ShuffleStage steps carry REAL commutative-encryption masked decks (33-byte points), not a hash
+            // the ShuffleStage steps carry a 32-byte COMMITMENT then the REAL masked deck (33-byte points)
             var shuffles = tape.Steps.Where(s => s.Kind == TxKind.ShuffleStage).ToList();
             foreach (var sstep in shuffles)
             {
-                var deckField = TxTemplates.Parse(sstep.Tx.Outs[0].Script)!.Fields[2]; // fields: handId, step, deck
+                var fields = TxTemplates.Parse(sstep.Tx.Outs[0].Script)!.Fields; // fields: handId, step, commitment, deck
+                T.Eq(fields[2].Length, 32, "shuffle commitment is a 32-byte hash (commit-then-reveal)");
+                var deckField = fields[3];
                 T.Eq(deckField.Length, deck.Length * 33, "masked deck = one 33-byte point per card");
                 for (int i = 0; i < deck.Length; i++) T.True(deckField[i * 33] is 0x02 or 0x03, "each masked card is a compressed point");
             }
@@ -94,6 +101,18 @@ public static class OnChainHandTapeTests
             var recovered = sh.Masked1.Select(p => T.Hex(MentalPokerEC.Unmask(p, new[] { sh.G1, sh.G0 }))).OrderBy(x => x).ToArray();
             var baseSet = sh.Base.Select(T.Hex).OrderBy(x => x).ToArray();
             T.Eq(string.Join(",", recovered), string.Join(",", baseSet), "unmasking both globals recovers the base deck — no card lost, none added, none fixable by one seat");
+        });
+
+        T.Run("the on-chain shuffle is COMMITTED and the reveal VERIFIES (provably honest)", () =>
+        {
+            var sh = OnChainHandTape.RealShuffle(9);
+            T.True(ShuffleProof.VerifyShuffle(sh.Base, sh.Masked0, sh.G0, sh.P0, ShuffleProof.CommitShuffle(sh.G0, sh.P0)),
+                   "seat 0's shuffle recomputes to its commitment");
+            T.True(ShuffleProof.VerifyShuffle(sh.Masked0, sh.Masked1, sh.G1, sh.P1, ShuffleProof.CommitShuffle(sh.G1, sh.P1)),
+                   "seat 1's shuffle recomputes to its commitment");
+            var badPerm = (int[])sh.P0.Clone(); (badPerm[0], badPerm[1]) = (badPerm[1], badPerm[0]);
+            T.True(!ShuffleProof.VerifyShuffle(sh.Base, sh.Masked0, sh.G0, badPerm, ShuffleProof.CommitShuffle(sh.G0, sh.P0)),
+                   "a tampered shuffle is provably CAUGHT");
         });
     }
 }

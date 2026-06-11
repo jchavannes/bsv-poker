@@ -151,5 +151,21 @@ public sealed class ElectrumSvpClient : IDisposable
         return MerkleProof.Verify(leaf, pos, branch.ToArray(), header.MerkleRoot);
     }
 
+    /// <summary>Fetch a SAVEABLE SpvEnvelope (raw tx + 80-byte header + merkle branch + index) for a coin, and
+    /// return it only if it self-verifies (PoW + branch). This is the proof the wallet STORES so the coin can be
+    /// re-verified offline forever — the server supplies the data, but trust is in the proof, never the server.</summary>
+    public async Task<SpvEnvelope?> GetEnvelopeAsync(string txHashDisplay, int height, int timeoutMs = 9000)
+    {
+        var raw = await GetTransactionAsync(txHashDisplay, timeoutMs);
+        var m = await CallAsync("blockchain.transaction.get_merkle", timeoutMs, txHashDisplay, height);
+        int pos = m.GetProperty("pos").GetInt32();
+        var branch = new List<byte[]>();
+        foreach (var b in m.GetProperty("merkle").EnumerateArray()) { var x = Convert.FromHexString(b.GetString()!); Array.Reverse(x); branch.Add(x); }
+        var hdrHex = (await CallAsync("blockchain.block.header", timeoutMs, height)).GetString();
+        if (string.IsNullOrEmpty(hdrHex)) return null;
+        var env = new SpvEnvelope(raw, Convert.FromHexString(hdrHex), branch.ToArray(), pos);
+        return env.Verify() ? env : null;
+    }
+
     public void Dispose() { try { _ssl?.Dispose(); } catch { } try { _tcp?.Dispose(); } catch { } }
 }
