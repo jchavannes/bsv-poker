@@ -1540,7 +1540,6 @@ public sealed class WalletView : UserControl
         // Registration card — the self-signed identity certificate (everything is bound to this).
         var regBox = new Border { Background = PanelBg, BorderBrush = Line, BorderThickness = new Thickness(1), Padding = new Thickness(10), Margin = new Thickness(0, 8, 0, 8), CornerRadius = new CornerRadius(4) };
         var regSp = new StackPanel();
-        Trace($"BuildIdentityTab: identity={(_w.Identity == null ? "NULL -> shows NOT REGISTERED" : "Registered " + _w.Identity.Pseudonym + " txid=" + _w.Identity.OnChainTxid)} locked={_locked} seed={_seed.Length}");
         if (_w.Identity is { } id)
         {
             bool valid = false; try { valid = WalletExtras.VerifyMessage(_identityPub, id.Canonical(), id.Signature); } catch { }
@@ -1562,9 +1561,15 @@ public sealed class WalletView : UserControl
                 regSp.Children.Add(edit);
             }
         }
+        else if (_locked || _seed.Length != 32)
+        {
+            // The wallet is NOT loaded yet (locked / no seed). We do NOT know the identity, so we must NEVER claim
+            // "not registered" here — that false message is exactly what made a registered wallet look unregistered.
+            regSp.Children.Add(new TextBlock { Text = "🔒 Unlock your wallet to view your identity.", Foreground = SubInk, TextWrapping = TextWrapping.Wrap });
+        }
         else
         {
-            regSp.Children.Add(new TextBlock { Text = "NOT REGISTERED — your identity has no registration yet. Nothing works until you register.", Foreground = Brushes.IndianRed, FontWeight = FontWeights.Bold, TextWrapping = TextWrapping.Wrap });
+            regSp.Children.Add(new TextBlock { Text = "NOT REGISTERED — this wallet has no on-chain identity yet. Register to create it (one-time, permanent).", Foreground = Brushes.IndianRed, FontWeight = FontWeights.Bold, TextWrapping = TextWrapping.Wrap });
             var reg = Btn("Register your identity…"); reg.Background = new SolidColorBrush(Color.FromRgb(0x2E, 0x7D, 0x32)); reg.Foreground = Brushes.White; reg.Click += (_, _) => RegisterDialog();
             regSp.Children.Add(reg);
         }
@@ -2556,9 +2561,7 @@ public sealed class WalletView : UserControl
         try { if (File.Exists(_path)) _w = JsonSerializer.Deserialize<File_>(File.ReadAllText(_path)) ?? new File_(); } catch { _w = new File_(); }
         // AN IDENTITY IS ONLY REAL ON-CHAIN: a registration that was never broadcast (no OnChainTxid) is a DRAFT
         // and does not survive a restart — drop it so it is never treated as an identity.
-        Trace($"LOAD identity-before-drop: {(_w.Identity == null ? "NULL" : _w.Identity.Pseudonym + " onchain=" + _w.Identity.IsOnChain + " txid=" + (_w.Identity.OnChainTxid ?? "") )}");
         if (_w.Identity is { IsOnChain: false }) _w.Identity = null;
-        Trace($"LOAD identity-after-drop: {(_w.Identity == null ? "NULL" : "KEPT " + _w.Identity.Pseudonym)}");
         // A coin is CONFIRMED only if its SAVED SPV proof re-verifies (offline). Set that first.
         foreach (var u in _w.Utxos) u.Confirmed = ReverifyProof(u);
         // FRAUD MUST NOT EXIST: the optimistic Announce/FundTx machinery fabricated "coins" with NO transaction
@@ -2649,9 +2652,7 @@ public sealed class WalletView : UserControl
         if (Window.GetWindow(this) is { } owner && owner.IsLoaded) win.Owner = owner;
         ok.Click += (_, _) =>
         {
-            try { _seed = WalletKeys.BackupToSeed(WalletExtras.DecryptSeed(_w.Seed, pb.Password)); _locked = false; RestoreIdentityFromCache();
-                  Trace($"UNLOCK ok: idpub={Convert.ToHexString(_identityPub).ToLowerInvariant().Substring(0,12)} identity={(_w.Identity==null?"NULL":_w.Identity.Pseudonym+" txid="+_w.Identity.OnChainTxid)} regIdPub={(_w.Identity?.IdentityPub ?? "").PadRight(12).Substring(0,12)}");
-                  OnUnlocked?.Invoke(); win.DialogResult = true; Render(); }
+            try { _seed = WalletKeys.BackupToSeed(WalletExtras.DecryptSeed(_w.Seed, pb.Password)); _locked = false; RestoreIdentityFromCache(); OnUnlocked?.Invoke(); win.DialogResult = true; Render(); }
             catch { err.Text = "Wrong password — try again."; pb.Clear(); pb.Focus(); }
         };
         pb.Loaded += (_, _) => pb.Focus();
