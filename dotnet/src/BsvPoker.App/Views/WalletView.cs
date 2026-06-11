@@ -2797,8 +2797,10 @@ public sealed class WalletView : UserControl
             {
                 _seed = WalletKeys.BackupToSeed(box.Text.Trim());
                 _w = new File_ { Seed = WalletKeys.SeedToBackup(_seed), RecvIndex = 0 };
-                _locked = false; OnUnlocked?.Invoke(); Save(); Render(); win.Close();
-                if (!IsRegistered) RegisterDialog();              // restored wallet still needs a registered identity
+                _locked = false; RestoreIdentityFromCache(); OnUnlocked?.Invoke(); Save(); Render(); win.Close();
+                // Do NOT force registration. A restored wallet's identity is re-discovered from its seed/cache (and
+                // re-confirmed on-chain); if it was registered before, it stays registered. If not, the user
+                // registers when funded — never forced before they can do anything.
                 _status.Text = "Wallet restored from seed.";
             }
             catch (Exception ex) { MessageBox.Show(ex.Message, "Invalid seed"); }
@@ -2907,7 +2909,9 @@ public sealed class WalletView : UserControl
     private bool Guard()
     {
         if (_locked) { _status.Text = "🔒 Wallet is locked — press “Unlock…” and enter your password."; return false; }
-        if (!IsRegistered) { _status.Text = "You must register your identity first — Identity tab → Register."; RegisterDialog(); return IsRegistered; }
+        // Do NOT pop the register dialog here. Order is Wallet → Fund → Identity → Game; a freshly-opened wallet
+        // must be usable (receive, back up, view) WITHOUT being forced to register first. Identity is required only
+        // for the GAME (CanPlay) and the user registers it from the Identity tab when funded — never auto-forced.
         return true;
     }
 
