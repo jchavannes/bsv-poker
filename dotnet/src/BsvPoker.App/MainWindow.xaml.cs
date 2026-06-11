@@ -211,7 +211,14 @@ public partial class MainWindow : Window
         bot.AddPeer(myHex, MyEndpoint());                  // the bot knows how to reach us
         _gossip?.AddSeed(bot.PubHex, bot.Endpoint);        // we know how to reach the bot
         _wallet.ImportContact(bot.Name, bot.PubHex);       // add the bot to the address book so it's named everywhere
-        var win = new BotWindow(bot) { Owner = this };
+        // ONE-CLICK funding: the BotWindow's amount + button calls this — send the sats from MY wallet to the bot
+        // and credit it immediately; the bot refunds to my receive address on close.
+        var myRefund = _wallet.PublicReceiveAddress();
+        var win = new BotWindow(bot, async sat =>
+        {
+            var tx = await _wallet.FundBotAsync(bot.ReceiveAddress(), sat);
+            return tx != null && bot.CreditRaw(tx, myRefund);
+        }) { Owner = this };
         _bots.Add(bot); _botWindows.Add(win);
         win.Closed += (_, _) => { _bots.Remove(bot); _botWindows.Remove(win); UpdateNetInfo(); };
         win.Show();

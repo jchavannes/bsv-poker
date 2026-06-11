@@ -86,6 +86,24 @@ public sealed class BotPlayer : IDisposable
         return credited;
     }
 
+    /// <summary>ONE-CLICK funding for the owner's OWN bot (same process): credit the bot directly from the raw
+    /// funding transaction the owner's wallet just built and broadcast — no SPV-envelope cut-and-paste, no waiting
+    /// for confirmation. Trust is implicit (the bot is derived from the owner's key and runs in the owner's app).
+    /// On close the whole balance is refunded to <paramref name="funderAddress"/>, so the money is never lost.</summary>
+    public bool CreditRaw(Chain.Tx tx, string funderAddress)
+    {
+        var lockMe = Chain.P2pkhLock(Hashes.Hash160(Pub));
+        bool credited = false;
+        for (int v = 0; v < tx.Outs.Count; v++)
+            if (tx.Outs[v].Script.AsSpan().SequenceEqual(lockMe))
+            {
+                lock (_lock) { _wallet.Add(new OnChainWallet.Utxo(Chain.Txid(tx), (uint)v, tx.Outs[v].Value, 0, 0)); _balance += tx.Outs[v].Value; }
+                credited = true;
+            }
+        if (credited) { _funderAddress = funderAddress; Log($"funded (one-click) — balance {Balance:N0} sat (refunds {funderAddress} on close)"); }
+        return credited;
+    }
+
     /// <summary>Announce on the overlay (so the human finds the bot) and pull peers it knows.</summary>
     public void Announce() { Gossip.Announce(); Gossip.Query(); }
     public void AddPeer(string pubHex, string endpoint) => Gossip.AddSeed(pubHex, endpoint);

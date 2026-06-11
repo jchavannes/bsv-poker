@@ -1,3 +1,4 @@
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -14,12 +15,14 @@ namespace BsvPoker.App;
 public sealed class BotWindow : Window
 {
     private readonly BotPlayer _bot;
+    private readonly Func<long, Task<bool>>? _onFund;   // one-click: send the amount from MY wallet to the bot
     private readonly ListBox _log = new() { Background = new SolidColorBrush(Color.FromRgb(0x1A, 0x0B, 0x0E)), Foreground = Brushes.White, BorderThickness = new Thickness(0) };
     private readonly TextBlock _bal = new() { Foreground = Brushes.White, FontSize = 18, FontWeight = FontWeights.Bold };
 
-    public BotWindow(BotPlayer bot)
+    public BotWindow(BotPlayer bot, Func<long, Task<bool>>? onFund = null)
     {
         _bot = bot;
+        _onFund = onFund;
         Title = bot.Name + " (your bot)";
         Width = 460; Height = 620;
         WindowStartupLocation = WindowStartupLocation.Manual;
@@ -37,9 +40,25 @@ public sealed class BotWindow : Window
         root.Children.Add(new TextBlock { Text = "Balance (confirmed):", Foreground = Brushes.Gainsboro, Margin = new Thickness(0, 8, 0, 0) });
         root.Children.Add(_bal);
 
-        var importBtn = new Button { Content = "Fund the bot (SPV envelope)…", Margin = new Thickness(0, 8, 0, 0), Padding = new Thickness(10, 6, 10, 6) };
-        importBtn.Click += (_, _) => ImportFunding();
-        root.Children.Add(importBtn);
+        // ONE-CLICK funding (the principal's rule): type the amount, press ONE button. The amount is sent from the
+        // owner's wallet to the bot automatically — no SPV-envelope, no copy-paste. The bot refunds it on close.
+        var amtRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 10, 0, 0) };
+        amtRow.Children.Add(new TextBlock { Text = "Fund (sat): ", Foreground = Brushes.Gainsboro, VerticalAlignment = VerticalAlignment.Center });
+        var amount = new TextBox { Text = "20000", Width = 120, VerticalAlignment = VerticalAlignment.Center };
+        amtRow.Children.Add(amount);
+        var fundBtn = new Button { Content = "Fund bot & start", Margin = new Thickness(8, 0, 0, 0), Padding = new Thickness(12, 6, 12, 6),
+            Background = new SolidColorBrush(Color.FromRgb(0x2E, 0x7D, 0x32)), Foreground = Brushes.White, FontWeight = FontWeights.Bold };
+        fundBtn.Click += async (_, _) =>
+        {
+            if (_onFund == null) { ImportFunding(); return; }   // fallback to manual if no wallet wired
+            if (!long.TryParse(amount.Text.Trim(), out var sat) || sat <= 0) { MessageBox.Show("Enter a positive amount in satoshis.", "Fund bot"); return; }
+            fundBtn.IsEnabled = false; fundBtn.Content = "Funding…";
+            try { bool ok = await _onFund(sat); AppendLog(ok ? $"funded with {sat:N0} sat — bot is ready to play" : "funding failed"); }
+            catch (Exception ex) { MessageBox.Show("Funding failed: " + ex.Message, "Fund bot"); }
+            finally { fundBtn.IsEnabled = true; fundBtn.Content = "Fund bot & start"; }
+        };
+        amtRow.Children.Add(fundBtn);
+        root.Children.Add(amtRow);
 
         root.Children.Add(new TextBlock { Text = "Bot log:", Foreground = Brushes.Gainsboro, Margin = new Thickness(0, 10, 0, 2) });
         _log.Height = 300; root.Children.Add(_log);

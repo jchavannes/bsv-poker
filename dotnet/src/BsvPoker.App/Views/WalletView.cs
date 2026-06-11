@@ -164,6 +164,8 @@ public sealed class WalletView : UserControl
     /// <summary>The opened wallet's identity (Base ID) — for the rest of the app to use instead of any profile key.</summary>
     public byte[] WalletIdentityPriv => _identityPriv;
     public byte[] WalletIdentityPub => _identityPub;
+    /// <summary>A receive address of this wallet (for the bot to refund to). Empty if locked.</summary>
+    public string PublicReceiveAddress() => _seed.Length == 32 ? ReceiveAddress() : "";
 
     public WalletView(string dataDir, CardVault vault, Func<BsvNode?> node, Func<HeaderStore?> store, Func<NetworkParams> net, byte[] identityPriv, byte[] identityPub)
     {
@@ -2094,7 +2096,9 @@ public sealed class WalletView : UserControl
     {
         if (_locked) return (null, "🔒 Unlock the wallet first.");
         var w = new OnChainWallet(_seed);
-        foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.WatchOnly)) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
+        // Select only REAL spendable coins — exclude phantom/double-spent and unbacked records (match Balance), so
+        // we never try to spend a coin that does not exist on-chain.
+        foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.DoubleSpent && !u.WatchOnly && IsRealCoin(u))) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
         if (w.Balance < value + fee)
         {
             long watch = _w.Utxos.Where(u => !u.Spent && u.WatchOnly).Sum(u => u.Value);
@@ -2127,6 +2131,25 @@ public sealed class WalletView : UserControl
         }
         catch (Exception ex) { return (null, ex.Message); }
     }
+
+    /// <summary>ONE-CLICK bot funding from THIS wallet: build, sign and broadcast a real on-chain payment of
+    /// <paramref name="amountSat"/> to the bot's address, and return the funding transaction so the caller credits
+    /// the bot from it immediately (no SPV-envelope cut-and-paste). The funds are real and on-chain; the bot
+    /// refunds the balance back to this wallet when its window is closed.</summary>
+    public async System.Threading.Tasks.Task<Core.Chain.Tx?> FundBotAsync(string botAddress, long amountSat)
+    {
+        if (!Guard()) return null;
+        byte[] h160;
+        try { var p = Base58.CheckDecode(botAddress); if (p.Length != 21) throw new Exception("bad address"); h160 = p[1..]; }
+        catch { _status.Text = "The bot address is not a valid P2PKH address."; return null; }
+        var (raw, status) = FundTx(Chain.P2pkhLock(h160), amountSat, EstimateFee(1));
+        if (raw == null) { MessageBox.Show("Could not fund the bot: " + status, "Fund bot"); return null; }
+        var (ok, info) = await BroadcastEverywhere(raw);
+        Notify(ok ? $"Funded your bot with {amountSat:N0} sat (tx {Chain.Txid(Chain.Deserialize(raw))[..12]}…)." : "Bot funding broadcast issue: " + info);
+        Save(); Render();
+        return Chain.Deserialize(raw);
+    }
+
     private const long OnChainHandReserve = 60_000; // headroom for the ~20 per-step values + fees of one hand
 
     // (REMOVED) PlayOnChainHand — the old single-player LOCAL-RNG-DECK settle path. Deleted so there is ZERO
