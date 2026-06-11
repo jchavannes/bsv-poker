@@ -24,6 +24,7 @@ OnChainHandTests.All();
 OnChainSessionTests.All();
 OnChainHandTapeTests.All();
 BlackjackTests.All();
+BroadcastEncryptionTests.All();
 TxTemplatesTests.All();
 MentalPokerECTests.All();
 VariantTests.All();
