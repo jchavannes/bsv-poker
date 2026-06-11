@@ -40,6 +40,16 @@ public sealed class LobbyView : UserControl
         root.Children.Add(new TextBlock { Text = "Lobby — peer-to-peer (no server)", FontSize = 22, FontWeight = FontWeights.Bold, Foreground = Brushes.White });
         root.Children.Add(_nodeInfo);
 
+        // PLAY NOW — the bot buttons up front so they are never buried. One click starts a game.
+        var quick = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 12, 0, 6) };
+        quick.Children.Add(new TextBlock { Text = "Play now:", Foreground = Brushes.White, FontWeight = FontWeights.Bold, FontSize = 15, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 6, 0) });
+        var botBtn = Btn("Play a bot", "#6A3FA0"); botBtn.Click += (_, _) => _onPlayBot(Variants.All[Math.Max(0, _variant.SelectedIndex)]);
+        quick.Children.Add(botBtn);
+        var myBotBtn = Btn("Play MY bot (on-chain)", "#B8860B"); myBotBtn.ToolTip = "Open your own bot — a separate player derived from your identity — and start an on-chain hand.";
+        myBotBtn.Click += (_, _) => _onPlayMyBot();
+        quick.Children.Add(myBotBtn);
+        root.Children.Add(quick);
+
         var create = new WrapPanel { Margin = new Thickness(0, 12, 0, 0) };
         create.Children.Add(new TextBlock { Text = "Host table ", Foreground = Brushes.Gainsboro, VerticalAlignment = VerticalAlignment.Center });
         create.Children.Add(_name);
@@ -59,13 +69,6 @@ public sealed class LobbyView : UserControl
         create.Children.Add(createBtn);
         create.Children.Add(new TextBlock { Text = "    Connect to player ", Foreground = Brushes.Gainsboro, VerticalAlignment = VerticalAlignment.Center });
         create.Children.Add(_peer);
-        var botBtn = Btn("Play a bot", "#6A3FA0"); botBtn.Click += (_, _) => _onPlayBot(Variants.All[Math.Max(0, _variant.SelectedIndex)]);
-        create.Children.Add(botBtn);
-        // YOUR OWN bot: a separate automated player DERIVED FROM YOUR identity, in its own window, that only ever
-        // plays you (open as many as you like). This is the identity-bot the principal set up — restored here.
-        var myBotBtn = Btn("Play my bot", "#B8860B"); myBotBtn.ToolTip = "Open your own bot — a separate player derived from your identity, in its own window. Play it on-chain.";
-        myBotBtn.Click += (_, _) => _onPlayMyBot();
-        create.Children.Add(myBotBtn);
         var dialBtn = Btn("Connect", "#333333"); dialBtn.Click += (_, _) => Dial();
         create.Children.Add(dialBtn);
         root.Children.Add(create);
