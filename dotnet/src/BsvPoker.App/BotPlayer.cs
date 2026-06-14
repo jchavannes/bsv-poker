@@ -6,12 +6,12 @@ using BsvPoker.Net.Bsv;
 namespace BsvPoker.App;
 
 /// <summary>
-/// A bot is a SEPARATE automated player — its OWN identity, OWN wallet, OWN always-online SPV node (TxLink),
-/// and OWN entry on the poker gossip overlay. It is not a hot-seat clone and not a second copy of the app.
-/// The human discovers it on the gossip overlay and plays a REAL two-party on-chain hand against it
-/// (<see cref="LiveHand"/>); the bot funds its own stake, signs its own escrow input, and reveals/plays the
-/// dealerless deal automatically. The bot is test-only: it must be funded with real coins (an SPV envelope)
-/// before it can play, and on close it refunds everything to its funder.
+/// A bot is a SEPARATE automated player — its OWN identity (derived from its owner via Type-42), OWN wallet,
+/// OWN always-online SPV node (TxLink), and OWN entry on the poker gossip overlay/chat. It is not a hot-seat
+/// clone and not a second copy of the app. When the owner plays it, the bot takes a REAL second seat in a
+/// <c>NetGame</c> — the same secure dealerless mental-poker protocol as any networked table — driven by the
+/// host app (see <c>MainWindow.StartBotNetGame</c>), auto-acting on its turn. The bot is funded with real coins
+/// (an SPV envelope) and on close it refunds everything to its funder.
 /// </summary>
 public sealed class BotPlayer : IDisposable
 {
@@ -22,7 +22,6 @@ public sealed class BotPlayer : IDisposable
     private readonly OnChainWallet _wallet;
     private readonly TxLink _link;
     private readonly object _lock = new();
-    private TxDealChannel? _deal;
     private long _balance;                 // confirmed coin held by the bot (SPV-verified envelopes only)
     private string? _funderAddress;        // where to refund on close
 
@@ -126,14 +125,6 @@ public sealed class BotPlayer : IDisposable
         if (msg == null) return;
         var senderHex = Convert.ToHexString(msg.SenderPub).ToLowerInvariant();
         if (msg.Text.StartsWith("GOSSIP:", StringComparison.Ordinal)) { Gossip.Receive(msg.Text["GOSSIP:".Length..]); return; }
-        if (msg.Text.StartsWith("DEAL:", StringComparison.Ordinal))
-        {
-            // a bot ONLY ever plays its owner — refuse a hand from anyone else, always.
-            if (!msg.SenderPub.AsSpan().SequenceEqual(_ownerPub)) { Log($"refused a hand from {senderHex[..12]}… — {Name} only plays its owner."); return; }
-            if (_deal == null) StartHand(msg.SenderPub, senderHex);
-            if (_deal != null && _deal.PeerPub.AsSpan().SequenceEqual(msg.SenderPub)) _deal.Deliver(msg.Text["DEAL:".Length..]);
-            return;
-        }
         // the bot only converses with its OWNER; it replies (a real funded chat tx) so chat is visibly two-way
         if (!msg.SenderPub.AsSpan().SequenceEqual(_ownerPub)) { Log($"ignored a chat from a non-owner {senderHex[..12]}…"); return; }
         Log($"owner: {msg.Text}");
@@ -146,44 +137,8 @@ public sealed class BotPlayer : IDisposable
         }
     }
 
-    private void StartHand(byte[] peerPub, string peerHex)
-    {
-        var peer = Gossip.Peers.FirstOrDefault(p => p.PubHex == peerHex);
-        if (peer == null) { Log("got a hand request but don't know that peer's address yet"); return; }
-        if (Balance < LiveStake + 5000) { Log("cannot play — fund the bot first (Import funding)"); return; }
-        var seatCoin = ReserveSeat();
-        if (seatCoin == null) { Log("no spendable coin to seat the hand"); return; }
-        var ch = new TxDealChannel(peerPub, pt => SendChat(peerHex, peer.Endpoint, "DEAL:" + pt));
-        _deal = ch;
-        bool initiator = string.CompareOrdinal(PubHex, peerHex) < 0;
-        Log($"playing a hand vs {peerHex[..12]}… ({(initiator ? "I deal first" : "they deal first")})");
-        System.Threading.Tasks.Task.Run(() =>
-        {
-            try
-            {
-                var s = seatCoin.Value;
-                var r = initiator
-                    ? LiveHand.RunInitiator(ch, s.Utxo, s.ChangePub, (s.Priv, s.Pub), LiveStake)
-                    : LiveHand.RunResponder(ch, s.Utxo, s.ChangePub, (s.Priv, s.Pub), LiveStake);
-                bool iWon = (r.WinnerSeat == 0) == initiator;
-                lock (_lock) { _balance -= LiveStake; if (iWon) _balance += r.Pot; }   // settlement moves the pot
-                Log($"hand complete — pot {r.Pot:N0} → {(iWon ? "bot wins" : "human wins")}; proofs {r.ProofsVerified}");
-            }
-            catch (Exception ex) { Log("hand did not complete: " + ex.Message); }
-            finally { _deal = null; }
-        });
-    }
-
-    private (OnChainWallet.Utxo Utxo, byte[] Priv, byte[] Pub, byte[] ChangePub)? ReserveSeat()
-    {
-        lock (_lock)
-        {
-            var u = _wallet.Coins.FirstOrDefault(c => c.Value >= LiveStake + 5000);
-            if (u == null) return null;
-            var k = WalletKeys.Account(_seed, u.KeyChain, u.KeyIndex);
-            return (u, k.Priv, k.Pub, WalletKeys.Account(_seed, 1, 0).Pub);
-        }
-    }
+    // The bot plays as a real second NetGame seat (driven by the host app in MainWindow.StartBotNetGame) — the
+    // same secure dealerless protocol as any networked table. The old LiveHand/LiveDeal two-party path was removed.
 
     private string SendChat(string recipientPubHex, string endpoint, string text)
     {

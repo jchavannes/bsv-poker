@@ -75,6 +75,34 @@ public static class NetGameJoinTests
             finally { try { gA?.Stop(); } catch { } try { gB?.Stop(); } catch { } try { da?.Dispose(); } catch { } try { db?.Dispose(); } catch { } a.Dispose(); b.Dispose(); }
         });
 
+        T.Run("Play-my-bot: the bot on its OWN node (dialed to ours) deals and plays the secure protocol", () =>
+        {
+            // This mirrors what "Play my bot" now does (migrated off the removed LiveDeal): the bot runs on its OWN
+            // loopback node dialed to the owner's node (NOT the same node — same-node delivery would deadlock the
+            // two games' locks). Proves the secure dealerless deal runs and a hand completes with the bot auto-acting.
+            var me = Secp256k1.GenerateKeyPair();
+            var bot = Secp256k1.GenerateKeyPair();
+            var node = new P2PNode(0, "127.0.0.1"); node.SetIdentity(me.Priv, me.Pub); node.StartAsync().Wait();
+            P2PNode? botNode = null; NetGame? gMe = null, gBot = null;
+            try
+            {
+                botNode = new P2PNode(0, "127.0.0.1"); botNode.SetIdentity(bot.Priv, bot.Pub);
+                botNode.StartAsync(new[] { new P2PNode.PeerAddr("127.0.0.1", node.BoundPort) }).Wait();
+                T.True(Until(() => node.PeerCount >= 1 && botNode.PeerCount >= 1, 8000), "the bot node connects to the owner's node");
+
+                const string table = "t-mybot~TexasHoldem~p2~s100~b2";
+                gMe = new NetGame(node, table, me.Priv, me.Pub); gMe.Start();
+                gBot = new NetGame(botNode, table, bot.Priv, bot.Pub); gBot.Start();
+                T.True(Until(() => gMe.Hand != null && gBot.Hand != null && gMe.MySeat >= 0 && gBot.MySeat >= 0, 30000),
+                    "the bot hand STARTS — both seats dealt");
+                T.True(gMe.SeatPubs.SequenceEqual(gBot.SeatPubs), "both seats agree on the fair seat order");
+                bool played = Until(() => { Drive(gMe); Drive(gBot); return gMe.HandNumber >= 1; }, 30000);
+                T.True(played, "a full hand completes vs the bot");
+                T.True(!gMe.Aborted && !gBot.Aborted && !gMe.CheatDetected && !gBot.CheatDetected, "no abort, no false cheat");
+            }
+            finally { try { gMe?.Stop(); } catch { } try { gBot?.Stop(); } catch { } try { botNode?.Dispose(); } catch { } node.Dispose(); }
+        });
+
         T.Run("who's online directory: each node lists the other's signed @handle and reachable endpoint", () =>
         {
             var ka = Secp256k1.GenerateKeyPair();

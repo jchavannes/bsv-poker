@@ -67,8 +67,6 @@ RevealProofTests.All();
 HandTranscriptTests.All();
 SeatOrderTests.All();
 VerifiedHandTests.All();
-LiveDealTests.All();
-LiveHandTests.All();
 SpvEnvelopeTests.All();
 PokerGossipTests.All();
 BsvProtocolTests.All();

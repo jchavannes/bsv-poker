@@ -91,7 +91,7 @@ public partial class MainWindow : Window
             presence.Start();
             AnnouncePresence();
         };
-        Closed += (_, _) => { try { _wallet.VaultBackup(); } catch { } foreach (var w in _botWindows.ToList()) { try { w.Close(); } catch { } } foreach (var b in _bots.ToList()) { try { b.Dispose(); } catch { } } try { _discovery?.Dispose(); } catch { } try { _bsvNode?.Dispose(); } catch { } try { _link?.Dispose(); } catch { } try { _node.Dispose(); } catch { } };
+        Closed += (_, _) => { try { _wallet.VaultBackup(); } catch { } try { StopBotNetGame(); } catch { } foreach (var w in _botWindows.ToList()) { try { w.Close(); } catch { } } foreach (var b in _bots.ToList()) { try { b.Dispose(); } catch { } } try { _discovery?.Dispose(); } catch { } try { _bsvNode?.Dispose(); } catch { } try { _link?.Dispose(); } catch { } try { _node.Dispose(); } catch { } };
     }
 
     private WalletView _wallet = null!;
@@ -125,7 +125,7 @@ public partial class MainWindow : Window
 
         _game = new GameView(_node, _idPriv, _idPub, _wallet.WalletVault, _wallet.RefreshCards);   // vault sealed to the OPENED wallet
         _game.OnMove += EmitMoveOnChain;   // EVERY move I make becomes a funded on-chain tx, dual-path broadcast
-        _game.OnLeaveTable += AbortActiveDeal;   // leaving the table can NEVER leave a hand wedged "in progress"
+        _game.OnLeaveTable += StopBotNetGame;   // leaving the table stops the bot's NetGame too
         _game.SetIdentityLabelResolver(_wallet.IdentityLabelFor);   // the table shows your PSEUDONYM, not a raw key
         GameHost.Content = _game;
 
@@ -214,23 +214,51 @@ public partial class MainWindow : Window
         if (msg == null) return;
         if (msg.Text.StartsWith("GOSSIP:", StringComparison.Ordinal))      // poker discovery overlay
             _gossip?.Receive(msg.Text["GOSSIP:".Length..]);
-        else if (msg.Text.StartsWith("DEAL:", StringComparison.Ordinal) && _activeDeal != null
-                 && _activeDeal.PeerPub.AsSpan().SequenceEqual(msg.SenderPub))
-            _activeDeal.Deliver(msg.Text["DEAL:".Length..]);             // live hand protocol
         else
             _chatView?.AddIncoming(Convert.ToHexString(msg.SenderPub).ToLowerInvariant(), msg.Text);
     }
 
-    private TxDealChannel? _activeDeal;
+    // The owner's bot, run as a real second NetGame player (see PlayBot) on its OWN node. Stopped when the
+    // player leaves the table or starts a fresh hand, so a finished bot game never lingers.
+    private NetGame? _botGame;
+    private P2PNode? _botNode;
+    private System.Threading.Timer? _botActor;
 
-    /// <summary>Cancel and clear any in-flight live hand so a stalled attempt can NEVER permanently block play.
-    /// Called when the player leaves the table or starts a fresh join — the table is always reclaimable.</summary>
-    private void AbortActiveDeal()
+    /// <summary>Run the owner's bot as a REAL second NetGame player so "Play my bot" is a genuine secure dealerless
+    /// mental-poker hand — the SAME protocol as any networked game, not a local practice deal. The bot runs on its
+    /// OWN loopback node dialed to ours (the proven two-node topology); cross-delivery goes through the transport's
+    /// consumer thread, so there is no same-node re-entrancy deadlock between the two games' locks.</summary>
+    private void StartBotNetGame(BotPlayer bot, string tableId)
     {
-        var d = _activeDeal;
-        if (d == null) return;
-        _activeDeal = null;
-        try { d.Cancel(); } catch { }   // unblocks its Receive → the deal thread unwinds cleanly
+        StopBotNetGame();
+        var bn = new P2PNode(0, "127.0.0.1");
+        bn.SetIdentity(bot.Priv, bot.Pub);
+        bn.StartAsync(new[] { new P2PNode.PeerAddr("127.0.0.1", _node.BoundPort) }).Wait();
+        _botNode = bn;
+        var bg = new NetGame(bn, tableId, bot.Priv, bot.Pub);
+        bg.Start();
+        _botGame = bg;
+        _botActor = new System.Threading.Timer(_ =>
+        {
+            try
+            {
+                var h = bg.Hand;
+                if (h == null || h.Complete || bg.MySeat < 0 || h.ToAct != bg.MySeat) return;
+                var la = h.Legal();
+                if (la.CanCheck) bg.Act(BsvPoker.Core.ActionKind.Check, 0);
+                else if (la.CanCall) bg.Act(BsvPoker.Core.ActionKind.Call, la.CallAmount);
+                else bg.Act(BsvPoker.Core.ActionKind.Fold, 0);
+            }
+            catch { }
+        }, null, 250, 150);
+    }
+
+    /// <summary>Stop the bot's NetGame, its auto-actor, and its node. Safe to call when none is running.</summary>
+    private void StopBotNetGame()
+    {
+        try { _botActor?.Dispose(); } catch { } _botActor = null;
+        try { _botGame?.Stop(); } catch { } _botGame = null;
+        try { _botNode?.Dispose(); } catch { } _botNode = null;
     }
 
     private readonly List<BotPlayer> _bots = new();        // Alice can run as MANY of her own bots as she likes
@@ -248,7 +276,7 @@ public partial class MainWindow : Window
     private void JoinTable(string tableId, string tableName)
     {
         if (!CanPlay()) return;
-        AbortActiveDeal();   // a fresh join reclaims the table — a previously stuck deal can never block this
+        StopBotNetGame();   // a fresh join reclaims the table — any prior bot game is stopped
         _game?.StartNetworked(tableId, tableName);
         Tabs.SelectedIndex = 2; // Game
     }
@@ -378,11 +406,14 @@ public partial class MainWindow : Window
         win.Show();
         Tabs.SelectedIndex = 2;   // show the Game board
 
-        // IMMEDIATE, PLAYABLE HAND: deal a real hand on the visible table right now so you HAVE cards and can act
-        // this instant — no waiting on a gossip handshake, no "a hand is already in progress" wall. This is the
-        // hand you see and play. The on-chain mental-poker hand vs the BotPlayer settles in the BACKGROUND below
-        // (funding the bot, minting your card NFTs, landing the escrow+settlement on-chain) and never blocks play.
-        _game?.StartBot(_lobby?.SelectedVariant ?? Variant.TexasHoldem);
+        // REAL SECURE HAND vs your bot: both you and the bot play the SAME dealerless mental-poker NetGame (private
+        // holes, commit-reveal seating, hiding reveal commitments) — the identical protocol as any networked table,
+        // now with the bot as the second seat (auto-acting). This replaces the old local practice deal and the
+        // removed LiveDeal/LiveHand path. The fully on-chain hand tape still runs in the BACKGROUND below for Replay.
+        var v = _lobby?.SelectedVariant ?? Variant.TexasHoldem;
+        var tableId = $"t-mybot{_botCount}-{Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(4)).ToLowerInvariant()}~{v}~p2~s100~b2";
+        _game?.StartNetworked(tableId, $"Heads-up vs {bot.Name}");
+        StartBotNetGame(bot, tableId);
 
         // The bot now JOINS chat and ANNOUNCES — strictly AFTER its game has started, never before. This is the
         // lifecycle fix: a bot must not act or appear in chat ahead of its own game.
@@ -437,93 +468,6 @@ public partial class MainWindow : Window
             if (_wallet.LastBlackjack == null) MessageBox.Show(status, "On-chain Blackjack");
         }
         finally { _wallet.OnBlackjackDealt -= onDealt; }
-    }
-
-    /// <summary>
-    /// Play a hand as a GENUINE two-party on-chain mental-poker deal against a discovered peer — no local or
-    /// bot deck, no shared RNG. Both players run <see cref="LiveDeal"/>; every protocol message is an encrypted
-    /// Bitcoin transaction pushed IP-to-IP to the peer and to the miners. Returns an immediate status; the
-    /// dealt result is shown on the table when the exchange completes.
-    /// </summary>
-    private const long LiveStake = 20_000;
-
-    /// <summary>Let the HUMAN choose which discovered peer to play (never auto-selected). Returns null if cancelled.</summary>
-    private PokerGossip.Peer? ChooseOpponent(List<PokerGossip.Peer> peers)
-    {
-        if (!Dispatcher.CheckAccess()) return Dispatcher.Invoke(() => ChooseOpponent(peers));
-        var list = new System.Windows.Controls.ListBox { Height = 200, Width = 460 };
-        foreach (var p in peers) { var h = _wallet.IdentityLabelFor(p.PubHex); list.Items.Add((h ?? "(player without an identity)") + "  @ " + p.Endpoint); }
-        list.SelectedIndex = 0;
-        var ok = new System.Windows.Controls.Button { Content = "Play this opponent", Margin = new Thickness(0, 10, 0, 0), Padding = new Thickness(12, 6, 12, 6) };
-        var sp = new System.Windows.Controls.StackPanel { Margin = new Thickness(12) };
-        sp.Children.Add(new System.Windows.Controls.TextBlock { Text = "Choose your opponent (you select every action):" });
-        sp.Children.Add(list); sp.Children.Add(ok);
-        var win = new Window { Title = "Choose opponent", Width = 500, Height = 300, Owner = this, WindowStartupLocation = WindowStartupLocation.CenterOwner, Content = sp };
-        PokerGossip.Peer? chosen = null;
-        ok.Click += (_, _) => { if (list.SelectedIndex >= 0) chosen = peers[list.SelectedIndex]; win.Close(); };
-        win.ShowDialog();
-        return chosen;
-    }
-
-    private string RunLiveHand()
-    {
-        // STANDALONE SPV: there is NO "connect to the BSV network" requirement. A hand is peer-to-peer
-        // (transactions handed IP-to-IP to the opponent) and the same txs are sent to a miner to land on-chain.
-        // A stale deal is reclaimed (cancelled) rather than blocking — you can always start a hand.
-        if (_activeDeal != null) { try { _activeDeal.Cancel(); } catch { } _activeDeal = null; }
-        var peers = _gossip?.Peers.ToList() ?? new();
-        if (peers.Count == 0) return "No opponent discovered yet — the gossip overlay is still finding poker peers. A fair deal needs a real peer's entropy; there is NO local or bot deck.";
-        var peer = ChooseOpponent(peers);   // the HUMAN picks the opponent — never auto-selected
-        if (peer == null) return "No opponent chosen.";
-        return RunLiveHandAgainst(peer);
-    }
-
-    /// <summary>Run the GENUINE two-party on-chain mental-poker hand against a specific peer (e.g. your own bot):
-    /// every protocol move is an encrypted Bitcoin transaction, the escrow + settlement land on-chain, and each
-    /// of your cards is minted as a real on-chain encrypted NFT. No local deck, no shared RNG.</summary>
-    private string RunLiveHandAgainst(PokerGossip.Peer peer)
-    {
-        // A previously stalled deal must NEVER permanently block a new one. If one is still marked active, cancel
-        // it (its Receive unblocks and its thread unwinds) and reclaim the table — the user can always start a hand.
-        if (_activeDeal != null) { try { _activeDeal.Cancel(); } catch { } _activeDeal = null; }
-        byte[] peerPub; try { peerPub = Convert.FromHexString(peer.PubHex); } catch { return "discovered peer has a bad key."; }
-        var seat = _wallet.ReserveSeat(LiveStake + 5000);
-        if (seat == null) return $"No spendable coin ≥ {LiveStake + 5000:N0} sat to seat the hand — fund your wallet first (poker is real-money only).";
-        var endpoint = peer.Endpoint;
-        var peerHex = peer.PubHex;
-        var ch = new TxDealChannel(peerPub, plaintext => SendEncrypted(peerHex, endpoint, "DEAL:" + plaintext));
-        _activeDeal = ch;
-        bool initiator = string.CompareOrdinal(Convert.ToHexString(_idPub).ToLowerInvariant(), peerHex) < 0;
-        var s = seat.Value;
-        System.Threading.Tasks.Task.Run(() =>
-        {
-            try
-            {
-                var r = initiator
-                    ? LiveHand.RunInitiator(ch, s.Utxo, s.ChangePub, (s.Priv, s.Pub), LiveStake)
-                    : LiveHand.RunResponder(ch, s.Utxo, s.ChangePub, (s.Priv, s.Pub), LiveStake);
-                _bsvNode?.Broadcast(Chain.Serialize(r.EscrowTx));     // both to miners → on-chain
-                _bsvNode?.Broadcast(Chain.Serialize(r.Settlement));
-                _wallet.MarkSpent(s.Utxo.Txid, s.Utxo.Vout);
-                // every card dealt to me becomes a REAL on-chain encrypted NFT sealed to my identity (in my wallet)
-                var mintStatus = _wallet.MintCardNftsOnChain(r.MyHoles.Select(c => c.Index).ToList());
-                bool iWon = (r.WinnerSeat == 0) == initiator;
-                var oppName = _wallet.IdentityLabelFor(peerHex) ?? peerHex[..12] + "…";
-                Dispatcher.BeginInvoke(new Action(() => MessageBox.Show(
-                    $"Hand vs {oppName}: pot {r.Pot:N0} sat → {(iWon ? "YOU win" : "opponent wins")} · proofs verified: {r.ProofsVerified} · NFTs: {mintStatus}",
-                    "On-chain hand complete")));
-            }
-            catch (Exception ex) { Dispatcher.BeginInvoke(new Action(() => MessageBox.Show("Hand did not complete: " + ex.Message, "On-chain hand"))); }
-            finally { if (ReferenceEquals(_activeDeal, ch)) _activeDeal = null; }   // only clear OUR deal, never a newer one
-        });
-        // OVERALL WATCHDOG: even with the per-message Receive timeout, never let a deal own the table indefinitely.
-        // After a hard cap, cancel the channel (its Receive unblocks → the thread unwinds → the finally clears it).
-        var watch = ch;
-        System.Threading.Tasks.Task.Delay(180_000).ContinueWith(_ =>
-        {
-            if (ReferenceEquals(_activeDeal, watch)) { try { watch.Cancel(); } catch { } }
-        });
-        return $"Opponent {peerHex[..12]}… found — playing a real two-party on-chain hand for {LiveStake:N0} sat ({(initiator ? "you deal first" : "opponent deals first")}). Every message is a Bitcoin transaction.";
     }
 
     private static string CardStr(Card c)

@@ -185,9 +185,9 @@ which is negligible under (EUF-CMA). Replays are dropped by frame-id dedup and h
 - **Liveness vs. punishment.** A withholding peer triggers an *accountable abort* → unilateral nLockTime /
   2-of-2 escrow recovery, so **no honest player loses funds**. On-chain economic *penalty* for a griefer
   (stake slashing) is **not** claimed.
-- **Legacy `LiveDeal`.** The two-party `LiveDeal` demo reveals the full transform at showdown and does not use
-  `RevealProof`; it is superseded by `NetGame` and is **out of scope** of this analysis (it should be removed
-  or gated; the production path is `NetGame`).
+- **One deal protocol.** The legacy two-party `LiveDeal`/`LiveHand` path (which revealed the full transform at
+  showdown and lacked per-reveal binding) has been **removed**. `NetGame` is now the single deal protocol for
+  every mode, including "Play my bot" (the bot takes a real second `NetGame` seat). This analysis covers it.
 - **Folded-card privacy.** In `NetGame` a folded player never discloses its hole scalars (showdown reveals only
   non-folded seats), so folded cards remain hidden by Theorem 2.
 
