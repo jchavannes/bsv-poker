@@ -86,5 +86,82 @@ public static class CardNft
         return b.ToArray();
     }
 
+    // ===================== D-A: a card NFT is PERMANENTLY BOUND to its game =====================
+    // The card commits its gameId AND a hash of a COPY of the game's details into its own locking script, so it
+    // is provably bound to THAT game and can NEVER be presented as belonging to another game. Trading/updating
+    // re-seals to the new owner but keeps the binding. No OP_RETURN.
+
+    private static readonly byte[] GameNftTag = Encoding.ASCII.GetBytes("BSVPOKER-CARD-NFT-V2");   // v2 = game-bound
+
+    /// <summary>Deterministic hash committing a COPY of the game's identifying details (the data that makes this
+    /// game unique). Bound into every card NFT of the game so a card cannot cross to a different game.</summary>
+    public static byte[] GameDetailsHash(byte[] tableId, byte[] gameId, byte variant, byte seats, long stakes, IReadOnlyList<byte[]> playerPubs)
+    {
+        var b = new List<byte>();
+        b.AddRange(Encoding.ASCII.GetBytes("BSVPOKER-GAME-DETAILS-V1|"));
+        void Field(byte[] d) { b.AddRange(BitConverter.GetBytes(d.Length)); b.AddRange(d); }
+        Field(tableId); Field(gameId);
+        b.Add(variant); b.Add(seats);
+        b.AddRange(BitConverter.GetBytes(stakes));
+        b.AddRange(BitConverter.GetBytes(playerPubs.Count));
+        foreach (var p in playerPubs.OrderBy(p => Convert.ToHexString(p), StringComparer.Ordinal)) Field(p);  // order-independent
+        return Hashes.Sha256(b.ToArray());
+    }
+
+    /// <summary>The 1-sat GAME-BOUND NFT lock: &lt;state&gt; OP_DROP &lt;ownerPub&gt; OP_CHECKSIG, where
+    /// state = TAG-V2 ‖ gameId(16) ‖ gameDetailsHash(32) ‖ H(sealed)(32). The gameId and a hash of a COPY of the
+    /// game details are committed INTO the card, binding it permanently to that game. No OP_RETURN.</summary>
+    public static byte[] NftLockForGame(string sealedHex, byte[] ownerPub33, byte[] gameId16, byte[] gameDetailsHash32)
+    {
+        if (gameId16.Length != 16) throw new ArgumentException("gameId must be 16 bytes");
+        if (gameDetailsHash32.Length != 32) throw new ArgumentException("gameDetailsHash must be 32 bytes");
+        if (ownerPub33.Length != 33) throw new ArgumentException("ownerPub must be 33-byte compressed");
+        var state = Concat(Concat(Concat(GameNftTag, gameId16), gameDetailsHash32), SealCommitment(sealedHex));
+        var b = new List<byte>();
+        b.Add(0x4c); b.Add((byte)state.Length); b.AddRange(state);   // OP_PUSHDATA1 <state>   (state = 20+16+32+32 = 100 bytes)
+        b.Add(0x75);                                                 // OP_DROP
+        b.Add((byte)ownerPub33.Length); b.AddRange(ownerPub33);
+        b.Add(0xac);                                                 // OP_CHECKSIG
+        return b.ToArray();
+    }
+
+    /// <summary>Read (gameId, gameDetailsHash, sealCommitment) bound into a game-bound NFT output; null if the
+    /// script is not a v2 game-bound card NFT.</summary>
+    public static (byte[] GameId, byte[] DetailsHash, byte[] SealCommitment)? ParseGameNft(byte[] script)
+    {
+        try
+        {
+            if (script.Length < 3 || script[0] != 0x4c) return null;          // OP_PUSHDATA1
+            int len = script[1];
+            int stateEnd = 2 + len;
+            if (len != GameNftTag.Length + 16 + 32 + 32 || stateEnd >= script.Length) return null;
+            if (script[stateEnd] != 0x75) return null;                        // OP_DROP
+            var state = script[2..stateEnd];
+            for (int i = 0; i < GameNftTag.Length; i++) if (state[i] != GameNftTag[i]) return null;
+            int p = GameNftTag.Length;
+            var gameId = state[p..(p + 16)]; p += 16;
+            var details = state[p..(p + 32)]; p += 32;
+            var seal = state[p..(p + 32)];
+            return (gameId, details, seal);
+        }
+        catch { return null; }
+    }
+
+    /// <summary>The cross-game GUARD: true iff this card NFT is bound to the given game (BOTH gameId and the
+    /// game-details hash match). A card bound to a different game is rejected — it can never be used elsewhere.</summary>
+    public static bool BelongsToGame(byte[] script, byte[] gameId16, byte[] gameDetailsHash32)
+    {
+        var p = ParseGameNft(script);
+        return p is { } v && v.GameId.AsSpan().SequenceEqual(gameId16) && v.DetailsHash.AsSpan().SequenceEqual(gameDetailsHash32);
+    }
+
+    /// <summary>Trade/update a game-bound card to a new owner WITHIN the same game: re-seal the secret to the new
+    /// owner and re-issue the NFT lock with the SAME gameId/detailsHash (the binding is permanent).</summary>
+    public static byte[] TransferForGame(string sealedHex, byte[] fromPriv32, byte[] toPub33, byte[] gameId16, byte[] gameDetailsHash32)
+    {
+        var resealed = Transfer(sealedHex, fromPriv32, toPub33);
+        return NftLockForGame(resealed, toPub33, gameId16, gameDetailsHash32);
+    }
+
     private static byte[] Concat(byte[] a, byte[] b) { var o = new byte[a.Length + b.Length]; a.CopyTo(o, 0); b.CopyTo(o, a.Length); return o; }
 }

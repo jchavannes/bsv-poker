@@ -56,8 +56,12 @@ public static class TxTemplatesTests
             T.True(Array.IndexOf(script, (byte)0x52) >= 0, "single byte 2 → OP_2 (0x52), not a length-prefixed push");
             T.True(Array.IndexOf(script, (byte)0x60) >= 0, "single byte 16 → OP_16 (0x60)");
             T.True(Array.IndexOf(script, (byte)0x4f) >= 0, "0x81 → OP_1NEGATE (0x4f)");
-            // no length-prefixed 1-byte push of a small value (0x01 0x02) appears
-            for (int i = 0; i + 1 < script.Length; i++)
+            // no length-prefixed 1-byte push of a small value (0x01 0x02) appears in the MARKER+FIELDS region the
+            // builder controls. The trailing 35 bytes are the owner push (0x21 <33-byte pubkey>) + OP_CHECKSIG: a
+            // RANDOM pubkey can legitimately contain the bytes 0x01 followed by a 1..16 value, which is data, not a
+            // non-minimal push — so the scan must exclude that region (otherwise this test flakes on ~1 run in N).
+            int dataEnd = script.Length - 35;   // exclude <0x21><33-byte ownerPub><OP_CHECKSIG>
+            for (int i = 0; i + 1 < dataEnd; i++)
                 T.False(script[i] == 0x01 && script[i + 1] >= 1 && script[i + 1] <= 16, "no non-minimal 1-byte push of 1..16");
             var parsed = TxTemplates.Parse(script);
             T.True(parsed != null && parsed.Fields.Length == 4, "still parses");

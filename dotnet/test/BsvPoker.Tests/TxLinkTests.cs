@@ -58,7 +58,7 @@ public static class TxLinkTests
             // Alice funds a chat tx and pushes it straight to Bob's IP (and would also send it to miners)
             var w = new OnChainWallet(WalletKeys.NewSeed());
             w.Add(new OnChainWallet.Utxo("cd".PadRight(64, '2'), 0, 1_000_000, 0, 0));
-            var spend = w.SpendAction(OnChainChat.BuildScript(bob.Pub, alice.Pub, "nice hand"), 1000, 500);
+            var spend = w.SpendAction(OnChainChat.BuildScript(bob.Pub, alice.Priv, alice.Pub, 0, "nice hand"), 1000, 500);
             TxLink.SendTxAsync(net, "127.0.0.1", link.Port, Chain.Serialize(spend.Tx)).GetAwaiter().GetResult();
 
             T.True(ev.Wait(TimeSpan.FromSeconds(5)), "Bob received the chat tx IP-to-IP");
@@ -116,7 +116,7 @@ public static class TxLinkTests
             // Alice funds + pushes the signature-bearing transaction straight to Bob
             var w = new OnChainWallet(WalletKeys.NewSeed());
             w.Add(new OnChainWallet.Utxo("bb".PadRight(64, '2'), 0, 1_000_000, 0, 0));
-            var carrier = w.SpendAction(OnChainChat.BuildScript(bob.Pub, alice.Pub, Convert.ToHexString(sigA)), 1000, 500);
+            var carrier = w.SpendAction(OnChainChat.BuildScript(bob.Pub, alice.Priv, alice.Pub, 0, Convert.ToHexString(sigA)), 1000, 500);
             TxLink.SendTxAsync(net, "127.0.0.1", bobLink.Port, Chain.Serialize(carrier.Tx)).GetAwaiter().GetResult();
             T.True(ev.Wait(TimeSpan.FromSeconds(5)), "Bob received Alice's signature as a transaction");
 

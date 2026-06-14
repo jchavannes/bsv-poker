@@ -11,7 +11,8 @@ public enum TxKind
     Bet, PotEscrow, Settlement, Recovery,
     Bid, Auction, RoleClaim,
     TableGenesis, GameStart, HandStart,
-    Announce, Identity
+    Announce, Identity,
+    Points
 }
 
 /// <summary>
@@ -33,7 +34,7 @@ public static class TxTemplates
     {
         new Template(TxKind.Payment,      "BSVP:PAY:1",  1, "A plain value transfer of satoshis between wallets.", new[] { "memo" }),
         new Template(TxKind.KeepAlive,    "BSVP:KA:1",   1, "A liveness heartbeat proving a peer/seat is still present.", new[] { "seat", "nonce" }),
-        new Template(TxKind.ChatDirect,   "BSVP:DM:1",   1, "A one-to-one encrypted chat message (ECDH+AES).", new[] { "senderPub", "recipientPub", "ciphertext" }),
+        new Template(TxKind.ChatDirect,   "BSVP:DM:1",   1, "A one-to-one chat message under a SYMMETRIC key from the two identity keys (ECDH) + chat marker + per-message index; recoverable forever (no ephemeral/ECIES).", new[] { "senderPub", "recipientPub", "index", "ciphertext" }),
         new Template(TxKind.ChatGroup,    "BSVP:GC:1",   1, "A group encrypted chat message (per-recipient ECDH+AES).", new[] { "groupId", "senderPub", "ciphertext" }),
         new Template(TxKind.CardNft,      "BSVP:NFT:1",  1, "A card as a 1-sat NFT, sealed to its owner.", new[] { "sealCommitment" }),
         new Template(TxKind.Commitment,   "BSVP:CMT:1",  1, "A hash commitment published before a reveal.", new[] { "commitHash" }),
@@ -55,6 +56,7 @@ public static class TxTemplates
         new Template(TxKind.HandStart,    "BSVP:HAND:1", 1, "Starting a hand within a game.", new[] { "gameId", "handId", "button" }),
         new Template(TxKind.Announce,     "BSVP:ANN:1",  1, "A player announcing its public key and IP endpoint so peers auto-discover it (no manual key exchange).", new[] { "playerPub", "endpoint" }),
         new Template(TxKind.Identity,     "BSVP:ID:1",   1, "An identity claim written ON-CHAIN (an NFT): the Base ID pubkey + a derived attestation pubkey + pseudonym + email, signed by the attestation sub-key. An identity is only real once this transaction is on-chain.", new[] { "identityPub", "attestationPub", "pseudonym", "email", "signature" }),
+        new Template(TxKind.Points,       "BSVP:PTS:1",  1, "A point scored, permanently linked to the scorer's IDENTITY and to the GAME (D-A/D-B): a point is forever that identity's point in that game.", new[] { "gameId", "identityPub", "points", "handId" }),
     }.ToDictionary(t => t.Kind);
 
     public static Template Of(TxKind kind) => Registry[kind];

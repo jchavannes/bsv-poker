@@ -13,8 +13,12 @@ public partial class MainWindow : Window
     private ChatView? _chatView;
     private TxLink? _link;   // the ONLY player-to-player transport: it carries nothing but Bitcoin transactions
     private PokerGossip? _gossip;   // the poker discovery overlay (announce/forward/query) on top of Bitcoin
-    private readonly P2PNode _node = new(0, "127.0.0.1"); // table/lobby transport (loopback default; LAN is opt-in)
+    // Bind to ALL interfaces on a WELL-KNOWN port so same-network players find us with zero config (no IP entry).
+    // P2PNode falls back to an ephemeral port if the well-known one is busy (e.g. a 2nd instance on one machine).
+    private readonly P2PNode _node = new(PeerDiscovery.WellKnownPort, "0.0.0.0");
     private LobbyView? _lobby;
+    private ReplayView? _replay;
+    private PeerDiscovery? _discovery;   // automatic local + LAN peer discovery (zero-config "just connects")
     private byte[] _idPriv = Array.Empty<byte>();   // the OPENED wallet's identity (Base ID) — set after the wallet is selected
     private byte[] _idPub = Array.Empty<byte>();
 
@@ -50,6 +54,19 @@ public partial class MainWindow : Window
             StartTxLink();       // listen for transactions pushed to us IP-to-IP by other players
             // bring up the table/lobby node so you can host/join a table or play your bot
             try { _node.SetIdentity(_idPriv, _idPub); await _node.StartAsync(); _lobby?.OnNodeReady(_node.BoundPort); } catch { }
+            // AUTOMATIC PEER DISCOVERY — "open your node and it just connects", no host:port to type, NO UDP.
+            // Same-machine instances are found via a shared rendezvous file; players ANYWHERE (LAN or internet)
+            // are found via the ON-CHAIN node-seed registry (a well-known BSV address) and dialled over TCP. LAN
+            // inbound is enabled so peers can actually reach us. Reading the registry is free; publishing our own
+            // seed is an explicit user action (the "Publish my node on-chain" button) to honour never-auto-spend.
+            try
+            {
+                TryAllowFirewall();                        // best-effort: open the well-known port so SAME-NETWORK players can reach us
+                _node.EnableLan();                         // accept inbound TCP connections from the network, not just loopback
+                _discovery = new PeerDiscovery(_node, LocalIp());
+                _discovery.Start();
+            }
+            catch { }
             var netRefresh = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
             netRefresh.Tick += (_, _) => UpdateNetInfo();
             netRefresh.Start();
@@ -65,8 +82,16 @@ public partial class MainWindow : Window
             ann.Tick += (_, _) => Announce();
             ann.Start();
             Announce();
+            // WHO'S ONLINE: beacon my presence (identity key + reachable endpoint + @handle) every few seconds so
+            // every other running app shows me in its directory automatically — no IP, no key, no add step. This is
+            // pure off-chain gossip (never spends a coin). Presence beacons use a fresh id, so a peer that comes
+            // online later still receives mine.
+            var presence = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(5) };
+            presence.Tick += (_, _) => AnnouncePresence();
+            presence.Start();
+            AnnouncePresence();
         };
-        Closed += (_, _) => { try { _wallet.VaultBackup(); } catch { } foreach (var w in _botWindows.ToList()) { try { w.Close(); } catch { } } foreach (var b in _bots.ToList()) { try { b.Dispose(); } catch { } } try { _bsvNode?.Dispose(); } catch { } try { _link?.Dispose(); } catch { } try { _node.Dispose(); } catch { } };
+        Closed += (_, _) => { try { _wallet.VaultBackup(); } catch { } foreach (var w in _botWindows.ToList()) { try { w.Close(); } catch { } } foreach (var b in _bots.ToList()) { try { b.Dispose(); } catch { } } try { _discovery?.Dispose(); } catch { } try { _bsvNode?.Dispose(); } catch { } try { _link?.Dispose(); } catch { } try { _node.Dispose(); } catch { } };
     }
 
     private WalletView _wallet = null!;
@@ -99,6 +124,9 @@ public partial class MainWindow : Window
         _idPriv = _wallet.WalletIdentityPriv; _idPub = pub;   // identity = the wallet you opened, not an auto-profile key
 
         _game = new GameView(_node, _idPriv, _idPub, _wallet.WalletVault, _wallet.RefreshCards);   // vault sealed to the OPENED wallet
+        _game.OnMove += EmitMoveOnChain;   // EVERY move I make becomes a funded on-chain tx, dual-path broadcast
+        _game.OnLeaveTable += AbortActiveDeal;   // leaving the table can NEVER leave a hand wedged "in progress"
+        _game.SetIdentityLabelResolver(_wallet.IdentityLabelFor);   // the table shows your PSEUDONYM, not a raw key
         GameHost.Content = _game;
 
         // Chat: every message is a Bitcoin transaction; peers are auto-discovered from on-chain Announce txs
@@ -108,7 +136,13 @@ public partial class MainWindow : Window
             () => (_gossip?.Peers ?? new List<PokerGossip.Peer>()).Select(p => (p.PubHex, p.Endpoint)).ToList(),
             SendChatTx);
         _chatView.SetHandleResolver(_wallet.IdentityLabelFor);   // chat shows @handles from the wallet's Contacts
+        _chatView.SetOnlineDirectory(OnlineDirectory);           // live "who's online" directory (presence beacons)
         _chatView.SetSaveContact(_wallet.ImportContact);  // save a discovered peer into the wallet address book
+        _chatView.SetContacts(_wallet.ContactList);       // recipients come from the address book, not just peers
+        _chatView.SetGroups(_wallet.GroupList, _wallet.SaveGroup, _wallet.DeleteGroup);   // create/manage named groups
+        _chatView.SetSendGroup(SendGroupChat);            // GROUP mode = the user's broadcast-encryption patent
+        _chatView.SetAddBot(AddChatBot);                  // one-click: add a bot identity to chat + groups (no game)
+        _wallet.OnChatReceived += (sender, text) => _chatView?.AddIncoming(sender, text);   // OFFLINE messages found on-chain at sync
         ChatHost.Content = _chatView;
 
         // The lobby: pick a variant + seat count (2–6), host/join a real table, or play your own bot at the chosen
@@ -117,7 +151,15 @@ public partial class MainWindow : Window
             variant => { if (CanPlay()) { _game!.StartBot(variant); Tabs.SelectedIndex = 2; } },
             () => { if (CanPlay()) PlayBot(); },   // "Play my bot" → open YOUR identity-derived bot in its own window
             () => { if (CanPlay()) _ = PlayBlackjack(); });   // "Blackjack" → a full on-chain Blackjack hand
+        _lobby.PublishNode = () => PublishMyNodeSeed();   // "Publish my node on-chain" → the registry seed (explicit, ~3 sat)
         LobbyHost.Content = _lobby;
+
+        // REPLAY: every move is on-chain, so a finished hand can be loaded and stepped through move-by-move.
+        _replay = new ReplayView();
+        _replay.GameFetcher = FetchGameFromChain;   // Replay pulls a REAL game off the chain by its start address/tx id
+        ReplayHost.Content = _replay;
+        // HELP: a plain-language how-to-play for someone who does not know poker (rules, buttons, winning/losing).
+        HelpHost.Content = new HelpView();
         if (_node.BoundPort > 0) { try { _node.SetIdentity(_idPriv, _idPub); _lobby.OnNodeReady(_node.BoundPort); } catch { } }   // node may already be up if the wallet was locked at selection
     }
 
@@ -138,9 +180,16 @@ public partial class MainWindow : Window
 
     private string MyEndpoint() => $"{LocalIp()}:{(_link?.Port ?? 0)}";
 
+    // Live node seeds learned from the on-chain registry (newest record per node), fed to PeerDiscovery so the
+    // node dials them over TCP. Works locally, on a LAN, and across the internet — the registry is on the chain.
+    private readonly Dictionary<string, NodeSeedRegistry.Seed> _seedRecords = new();
+
     /// <summary>Every inbound transaction (pushed IP-to-IP or relayed by the network) is inspected here.</summary>
     private void Ingest(Chain.Tx tx)
     {
+        // a NODE-SEED record (from the on-chain registry): learn this node's live endpoint and dial it over TCP
+        var seed = NodeSeedRegistry.TryReadTx(tx);
+        if (seed != null) { ConsiderNodeSeed(seed); return; }
         // an Announce tx (relayed) bootstraps the gossip overlay with a first peer
         var ann = OnChainAnnounce.TryReadTx(tx);
         if (ann != null)
@@ -152,12 +201,13 @@ public partial class MainWindow : Window
         }
         // detect an incoming PAYMENT to one of our addresses (shows as pending until SPV-confirmed)
         _wallet.ConsiderIncoming(tx);
-        // PUBLIC broadcast (plaintext, anyone): show it in chat (skip our own).
-        var bc = OnChainChat.TryReadBroadcastTx(tx);
-        if (bc != null)
+        // GROUP message (broadcast encryption): readable only if I'm one of the selected members (skip my own).
+        // A "broadcast to everyone" is a group sealed to every known recipient (the patent) — it arrives here.
+        var grp = OnChainChat.TryReadGroupTx(tx, _idPriv, _idPub);
+        if (grp != null)
         {
-            if (!bc.SenderPub.AsSpan().SequenceEqual(_idPub))
-                _chatView?.AddIncoming(Convert.ToHexString(bc.SenderPub).ToLowerInvariant(), "[broadcast] " + bc.Text);
+            if (!grp.SenderPub.AsSpan().SequenceEqual(_idPub))
+                _chatView?.AddIncoming(Convert.ToHexString(grp.SenderPub).ToLowerInvariant(), "[group] " + grp.Text);
             return;
         }
         var msg = OnChainChat.TryReadTx(tx, _idPriv, _idPub);
@@ -172,6 +222,17 @@ public partial class MainWindow : Window
     }
 
     private TxDealChannel? _activeDeal;
+
+    /// <summary>Cancel and clear any in-flight live hand so a stalled attempt can NEVER permanently block play.
+    /// Called when the player leaves the table or starts a fresh join — the table is always reclaimable.</summary>
+    private void AbortActiveDeal()
+    {
+        var d = _activeDeal;
+        if (d == null) return;
+        _activeDeal = null;
+        try { d.Cancel(); } catch { }   // unblocks its Receive → the deal thread unwinds cleanly
+    }
+
     private readonly List<BotPlayer> _bots = new();        // Alice can run as MANY of her own bots as she likes
     private readonly List<BotWindow> _botWindows = new();
 
@@ -187,28 +248,103 @@ public partial class MainWindow : Window
     private void JoinTable(string tableId, string tableName)
     {
         if (!CanPlay()) return;
+        AbortActiveDeal();   // a fresh join reclaims the table — a previously stuck deal can never block this
         _game?.StartNetworked(tableId, tableName);
         Tabs.SelectedIndex = 2; // Game
     }
 
     /// <summary>FUNDED-GATE: nothing (play / a table) happens until this wallet is funded — except on regtest,
     /// which can self-fund. Until then the user goes nowhere.</summary>
+    /// <summary>Best-effort: allow inbound TCP on the well-known lobby port through Windows Firewall (private/domain
+    /// networks) so SAME-NETWORK players can reach this node. Needs admin to add the rule; if it can't, Windows
+    /// shows its own one-time allow prompt. Never blocks startup. Same-machine play uses loopback and is unaffected.</summary>
+    private static void TryAllowFirewall()
+    {
+        try
+        {
+            string exe = ""; try { exe = System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName ?? ""; } catch { }
+            void Run(string args) { try { var p = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("netsh", args) { CreateNoWindow = true, UseShellExecute = false, WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden }); p?.WaitForExit(2000); } catch { } }
+            Run($"advfirewall firewall add rule name=\"BSV Poker port\" dir=in action=allow protocol=TCP localport={PeerDiscovery.WellKnownPort} profile=private,domain enable=yes");
+            if (exe.Length > 0) Run($"advfirewall firewall add rule name=\"BSV Poker app\" dir=in action=allow program=\"{exe}\" profile=private,domain enable=yes");
+        }
+        catch { }
+    }
+
+    /// <summary>Pull a REAL game off the chain by its START ADDRESS (base58) or any of its tx ids: fetch the
+    /// address's transaction history from the SPV server and return every transaction, in chain order, so Replay
+    /// can step through the actual game. No demo — this is the real on-chain game.</summary>
+    private async System.Threading.Tasks.Task<List<Chain.Tx>> FetchGameFromChain(string key)
+    {
+        var result = new List<Chain.Tx>();
+        using var cli = new BsvPoker.Net.Bsv.ElectrumSvpClient();
+        if (!await cli.ConnectAnyAsync(BsvPoker.Net.Bsv.ElectrumSvpClient.ServersFor(_currentNet.Network))) return result;
+        byte[] script = Array.Empty<byte>();
+        string k = key.Trim();
+        bool isTxid = k.Length == 64 && k.All(Uri.IsHexDigit);
+        try
+        {
+            if (isTxid)
+            {
+                var tx = Chain.Deserialize(await cli.GetTransactionAsync(k));
+                if (tx.Outs.Count > 0) script = tx.Outs[0].Script;   // scan the address this game tx pays
+            }
+            else
+            {
+                var payload = BsvPoker.Crypto.Base58.CheckDecode(k); // version ‖ hash160
+                if (payload.Length >= 2) { var h160 = payload[1..]; script = payload[0] == _currentNet.ScriptVersion ? Chain.P2shLockFromHash(h160) : Chain.P2pkhLock(h160); }
+            }
+        }
+        catch { return result; }
+        if (script.Length == 0) return result;
+        var sh = BsvPoker.Net.Bsv.ElectrumSvpClient.ScriptHashOf(script);
+        foreach (var (txid, _) in await cli.GetHistoryAsync(sh))
+        {
+            try { result.Add(Chain.Deserialize(await cli.GetTransactionAsync(txid))); } catch { }
+        }
+        return result;
+    }
+
     private bool CanPlay()
     {
-        // ORDER: Wallet → Fund → on-chain Identity → Game. A game needs a real (on-chain) identity, which needs
-        // funds to broadcast. (regtest can self-fund and is allowed through for local testing.)
-        if (_currentNet.Network == BsvNetwork.Regtest) return true;
-        if (!_wallet.IsFunded)
+        // ONE-TIME ENROLLMENT AT JOIN: if this wallet has no identity yet, register it NOW — once, ever. Registration
+        // is offered ONLY here (never as a tab checkbox). After it, play proceeds. Once registered, this never asks
+        // again — the wallet just plays. (Registration funds the 1-sat on-chain identity token; fund the wallet first.)
+        if (!_wallet.HasIdentity)
         {
-            MessageBox.Show("Fund this wallet with real BSV first (your coins appear automatically once on-chain). No funds → no identity → no game.", "Fund first");
-            return false;
-        }
-        if (!_wallet.HasOnChainIdentity)
-        {
-            MessageBox.Show("Create your identity ON-CHAIN first (Identity tab → Register). An identity is a funded on-chain transaction; a game requires it.", "Identity required");
-            return false;
+            if (!_wallet.EnsureRegistered()) return false;   // they cancelled or couldn't complete enrollment
         }
         return true;
+    }
+
+    /// <summary>Spin up one of MY bots purely as a CHAT IDENTITY — no game window, no hand. It is derived from my
+    /// identity (Type-42), wired so its messages reach miners + peers, seeded into gossip both ways, and added to
+    /// my address book so it appears in chat and can be messaged or put in a group immediately. Returns its
+    /// (name, pubkey-hex), or null if the wallet is locked. This is what the chat "Add a bot" button calls.</summary>
+    private (string Name, string PubHex)? AddChatBot()
+    {
+        try
+        {
+            if (!Dispatcher.CheckAccess()) return Dispatcher.Invoke(AddChatBot);
+            if (_idPriv == null || _idPriv.Length != 32) return null;
+            if (!_wallet.HasIdentity) { CanPlay(); return null; }   // nothing but receiving funds until registered on-chain
+            var ownerHandle = string.IsNullOrWhiteSpace(_wallet.MyHandle) ? _profile.Name.Replace(" ", "") : _wallet.MyHandle;
+            var bot = new BotPlayer(_currentNet, LocalIp(), _idPriv, _idPub, ++_botCount, ownerHandle);
+            bot.OnBroadcast += raw =>
+            {
+                try { _bsvNode?.Broadcast(raw); } catch { }
+                foreach (var p in (_gossip?.Peers ?? new List<PokerGossip.Peer>()).ToList())
+                { var (h, pt) = ParseHostPort(p.Endpoint); if (h != null) _ = TxLink.SendTxAsync(_currentNet, h, pt, raw); }
+            };
+            var myHex = Convert.ToHexString(_idPub).ToLowerInvariant();
+            bot.AddPeer(myHex, MyEndpoint());                 // the bot can reach me
+            _gossip?.AddSeed(bot.PubHex, bot.Endpoint);        // I can reach the bot
+            _wallet.ImportContact(bot.Name, bot.PubHex);       // it appears in chat + groups everywhere
+            _bots.Add(bot);
+            bot.Announce();
+            UpdateNetInfo();
+            return (bot.Name, bot.PubHex);
+        }
+        catch { return null; }
     }
 
     private void PlayBot()
@@ -217,9 +353,10 @@ public partial class MainWindow : Window
         var ownerHandle = string.IsNullOrWhiteSpace(_wallet.MyHandle) ? _profile.Name.Replace(" ", "") : _wallet.MyHandle;
         var bot = new BotPlayer(_currentNet, LocalIp(), _idPriv, _idPub, ++_botCount, ownerHandle);
         var myHex = Convert.ToHexString(_idPub).ToLowerInvariant();
-        bot.AddPeer(myHex, MyEndpoint());                  // the bot knows how to reach us
-        _gossip?.AddSeed(bot.PubHex, bot.Endpoint);        // we know how to reach the bot
-        _wallet.ImportContact(bot.Name, bot.PubHex);       // add the bot to the address book so it's named everywhere
+        bot.AddPeer(myHex, MyEndpoint());                  // the bot knows how to reach us (plumbing only — it does not act yet)
+        _gossip?.AddSeed(bot.PubHex, bot.Endpoint);        // we know how to reach the bot (plumbing only)
+        // LIFECYCLE: the bot must NOT appear in chat or announce/act before ITS GAME has started. So we do NOT
+        // ImportContact or Announce here — those happen AFTER _game.StartBot below (see "bot now joins chat …").
         // ONE-CLICK funding: the BotWindow's amount + button calls this — send the sats from MY wallet to the bot
         // and credit it immediately; the bot refunds to my receive address on close.
         var myRefund = _wallet.PublicReceiveAddress();
@@ -228,36 +365,78 @@ public partial class MainWindow : Window
             var tx = await _wallet.FundBotAsync(bot.ReceiveAddress(), sat);
             return tx != null && bot.CreditRaw(tx, myRefund);
         }) { Owner = this };
+        // the bot has no miner connection — when it settles (e.g. the close-out refund) the host broadcasts for it,
+        // to miners AND to every known peer, so the user's money actually comes back on-chain.
+        bot.OnBroadcast += raw =>
+        {
+            try { _bsvNode?.Broadcast(raw); } catch { }
+            foreach (var p in (_gossip?.Peers ?? new List<PokerGossip.Peer>()).ToList())
+            { var (h, pt) = ParseHostPort(p.Endpoint); if (h != null) _ = TxLink.SendTxAsync(_currentNet, h, pt, raw); }
+        };
         _bots.Add(bot); _botWindows.Add(win);
         win.Closed += (_, _) => { _bots.Remove(bot); _botWindows.Remove(win); UpdateNetInfo(); };
         win.Show();
+        Tabs.SelectedIndex = 2;   // show the Game board
+
+        // IMMEDIATE, PLAYABLE HAND: deal a real hand on the visible table right now so you HAVE cards and can act
+        // this instant — no waiting on a gossip handshake, no "a hand is already in progress" wall. This is the
+        // hand you see and play. The on-chain mental-poker hand vs the BotPlayer settles in the BACKGROUND below
+        // (funding the bot, minting your card NFTs, landing the escrow+settlement on-chain) and never blocks play.
+        _game?.StartBot(_lobby?.SelectedVariant ?? Variant.TexasHoldem);
+
+        // The bot now JOINS chat and ANNOUNCES — strictly AFTER its game has started, never before. This is the
+        // lifecycle fix: a bot must not act or appear in chat ahead of its own game.
+        _wallet.ImportContact(bot.Name, bot.PubHex);       // add the bot to the address book so it's named everywhere
         bot.Announce();
         UpdateNetInfo();
-        Tabs.SelectedIndex = 2;   // show the Game board
-        // ONE CLICK = a REAL on-chain hand vs your bot: auto-fund the bot, then run the genuine two-party
-        // mental-poker hand (RunLiveHandAgainst) — every move an on-chain Bitcoin tx, your cards minted as NFTs.
+
+        // FULLY ON-CHAIN bot hand: when funded, play a complete heads-up Hold'em hand vs your bot as a real
+        // transaction tape — every move (cards, bets, board, showdown, settlement) is broadcast on-chain, with
+        // NO off-chain deck or messaging of any kind. The resulting tape is loaded into the REPLAY tab so you can
+        // step through it move by move. The visible table hand above stays playable regardless; this is the
+        // on-chain record. If the wallet is not funded we simply skip it (the table hand still plays).
         _ = Dispatcher.InvokeAsync(async () =>
         {
             try
             {
-                if (!_wallet.IsFunded) { MessageBox.Show("Fund this wallet with real BSV first, then click Play my bot.", "Fund first"); return; }
-                var tx = await _wallet.FundBotAsync(bot.ReceiveAddress(), BotPlayer.LiveStake + 5000);
-                if (tx != null) bot.CreditRaw(tx, myRefund);
-                await System.Threading.Tasks.Task.Delay(1500);   // let the funding + gossip settle
-                var peer = new PokerGossip.Peer(bot.PubHex, bot.Endpoint, DateTimeOffset.UtcNow.ToUnixTimeSeconds());
-                var status = RunLiveHandAgainst(peer);
-                MessageBox.Show(status, "Play my bot — on-chain hand");
+                if (!_wallet.IsFunded) return;
+                var (msg, tape, _) = await _wallet.RunOnChainHoldemVsBot(BotPlayer.LiveStake);
+                if (tape != null) _replay?.Load(tape);   // make the on-chain hand replayable
+                _game?.ShowOnChainNote(tape != null
+                    ? "This hand was also played fully ON-CHAIN vs your bot — open the Replay tab to step through it."
+                    : msg);
             }
-            catch (Exception ex) { MessageBox.Show("Could not start the on-chain hand: " + ex.Message, "Play my bot"); }
+            catch { /* the visible table hand is unaffected */ }
         });
     }
 
     /// <summary>Play a full ON-CHAIN Blackjack hand vs the dealer: every move a Bitcoin tx, cards as NFTs. The
     /// wallet builds and broadcasts the whole transaction tape and re-syncs the balance from the chain.</summary>
+    private BlackjackWindow? _bjWindow;
     private async System.Threading.Tasks.Task PlayBlackjack()
     {
-        var status = await _wallet.RunOnChainBlackjack(20);   // 20-sat table (per-satoshi)
-        MessageBox.Show(status, "On-chain Blackjack");
+        // Open the VISIBLE Blackjack table and show the hand the INSTANT it is dealt (before the on-chain
+        // broadcast finishes) — so clicking Blackjack always SHOWS a game, never "money gone, no screen".
+        Action<WalletView.BlackjackResult> onDealt = null!;
+        onDealt = r =>
+        {
+            if (_bjWindow == null || !_bjWindow.IsVisible)
+            {
+                _bjWindow = new BlackjackWindow(this);
+                _bjWindow.Closed += (_, _) => _bjWindow = null;
+                _bjWindow.Show();
+            }
+            _bjWindow.ShowHand(r, "Played fully on-chain. Open the Replay tab to step through every move.");
+        };
+        _wallet.OnBlackjackDealt += onDealt;
+        try
+        {
+            var status = await _wallet.RunOnChainBlackjack(20);   // 20-sat table (per-satoshi)
+            if (_wallet.LastTape != null) _replay?.Load(_wallet.LastTape);   // make the on-chain Blackjack hand replayable
+            // if for some reason no hand was dealt (e.g. unfunded), tell the user plainly — no silent loss
+            if (_wallet.LastBlackjack == null) MessageBox.Show(status, "On-chain Blackjack");
+        }
+        finally { _wallet.OnBlackjackDealt -= onDealt; }
     }
 
     /// <summary>
@@ -273,7 +452,7 @@ public partial class MainWindow : Window
     {
         if (!Dispatcher.CheckAccess()) return Dispatcher.Invoke(() => ChooseOpponent(peers));
         var list = new System.Windows.Controls.ListBox { Height = 200, Width = 460 };
-        foreach (var p in peers) { var h = _wallet.IdentityLabelFor(p.PubHex); list.Items.Add((h != null ? h + "  " : "") + p.PubHex[..Math.Min(16, p.PubHex.Length)] + "…  @ " + p.Endpoint); }
+        foreach (var p in peers) { var h = _wallet.IdentityLabelFor(p.PubHex); list.Items.Add((h ?? "(player without an identity)") + "  @ " + p.Endpoint); }
         list.SelectedIndex = 0;
         var ok = new System.Windows.Controls.Button { Content = "Play this opponent", Margin = new Thickness(0, 10, 0, 0), Padding = new Thickness(12, 6, 12, 6) };
         var sp = new System.Windows.Controls.StackPanel { Margin = new Thickness(12) };
@@ -290,7 +469,8 @@ public partial class MainWindow : Window
     {
         // STANDALONE SPV: there is NO "connect to the BSV network" requirement. A hand is peer-to-peer
         // (transactions handed IP-to-IP to the opponent) and the same txs are sent to a miner to land on-chain.
-        if (_activeDeal != null) return "A hand is already in progress.";
+        // A stale deal is reclaimed (cancelled) rather than blocking — you can always start a hand.
+        if (_activeDeal != null) { try { _activeDeal.Cancel(); } catch { } _activeDeal = null; }
         var peers = _gossip?.Peers.ToList() ?? new();
         if (peers.Count == 0) return "No opponent discovered yet — the gossip overlay is still finding poker peers. A fair deal needs a real peer's entropy; there is NO local or bot deck.";
         var peer = ChooseOpponent(peers);   // the HUMAN picks the opponent — never auto-selected
@@ -303,7 +483,9 @@ public partial class MainWindow : Window
     /// of your cards is minted as a real on-chain encrypted NFT. No local deck, no shared RNG.</summary>
     private string RunLiveHandAgainst(PokerGossip.Peer peer)
     {
-        if (_activeDeal != null) return "A hand is already in progress.";
+        // A previously stalled deal must NEVER permanently block a new one. If one is still marked active, cancel
+        // it (its Receive unblocks and its thread unwinds) and reclaim the table — the user can always start a hand.
+        if (_activeDeal != null) { try { _activeDeal.Cancel(); } catch { } _activeDeal = null; }
         byte[] peerPub; try { peerPub = Convert.FromHexString(peer.PubHex); } catch { return "discovered peer has a bad key."; }
         var seat = _wallet.ReserveSeat(LiveStake + 5000);
         if (seat == null) return $"No spendable coin ≥ {LiveStake + 5000:N0} sat to seat the hand — fund your wallet first (poker is real-money only).";
@@ -332,7 +514,14 @@ public partial class MainWindow : Window
                     "On-chain hand complete")));
             }
             catch (Exception ex) { Dispatcher.BeginInvoke(new Action(() => MessageBox.Show("Hand did not complete: " + ex.Message, "On-chain hand"))); }
-            finally { _activeDeal = null; }
+            finally { if (ReferenceEquals(_activeDeal, ch)) _activeDeal = null; }   // only clear OUR deal, never a newer one
+        });
+        // OVERALL WATCHDOG: even with the per-message Receive timeout, never let a deal own the table indefinitely.
+        // After a hard cap, cancel the channel (its Receive unblocks → the thread unwinds → the finally clears it).
+        var watch = ch;
+        System.Threading.Tasks.Task.Delay(180_000).ContinueWith(_ =>
+        {
+            if (ReferenceEquals(_activeDeal, watch)) { try { watch.Cancel(); } catch { } }
         });
         return $"Opponent {peerHex[..12]}… found — playing a real two-party on-chain hand for {LiveStake:N0} sat ({(initiator ? "you deal first" : "opponent deals first")}). Every message is a Bitcoin transaction.";
     }
@@ -350,8 +539,12 @@ public partial class MainWindow : Window
         byte[] rpub;
         try { rpub = Convert.FromHexString(recipientPubHex); } catch { return "Recipient public key must be 66 hex chars."; }
         if (rpub.Length != 33) return "Recipient public key must be a 33-byte compressed key.";
-        var script = OnChainChat.BuildScript(rpub, _idPub, text);
-        var (raw, status) = _wallet.FundTx(script, 1, 1);   // tiny: a 1-sat message output + 1-sat fee
+        // per-message index = monotonic unix-millis; the symmetric key is derived from our two IDENTITY keys +
+        // the chat marker + this index, so either party recovers the whole conversation forever (wallet saves it).
+        var script = OnChainChat.BuildScript(rpub, _idPriv, _idPub, (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), text);
+        // pay a 1-sat discovery dust to the recipient's identity address so they find this on-chain even if they
+        // were OFFLINE when it was sent (store-and-forward). Everything in spendable outputs — no OP_RETURN.
+        var (raw, status) = _wallet.FundChatTx(script, new[] { rpub }, 1);
         if (raw == null) return status;
         var (host, port) = ParseHostPort(endpoint);
         if (host != null) _ = TxLink.SendTxAsync(_currentNet, host, port, raw);
@@ -359,17 +552,94 @@ public partial class MainWindow : Window
         return "";
     }
 
-    /// <summary>Send a PUBLIC broadcast chat message (plaintext, readable by everyone incl. bots): fund a tiny
-    /// ChatGroup tx, push it to EVERY known peer, and broadcast to miners.</summary>
+    /// <summary>"Broadcast to everyone" = the principal's key-graph BROADCAST-ENCRYPTION PATENT (GB 2623780 B)
+    /// sealed to EVERY known recipient (all current peers) + myself — NEVER plaintext send-to-all. Delegates to
+    /// the encrypted group send: one envelope each recipient opens with their own key, pushed IP-to-IP to every
+    /// peer AND to miners (redundant). A sealed scheme has an explicit recipient set by design, so a party we do
+    /// not yet know is not a recipient; with no known peers it seals to me alone (still on-chain, never plaintext).</summary>
     private string SendBroadcastChat(string text)
     {
         if (string.IsNullOrWhiteSpace(text)) return "Type a message.";
-        var (raw, status) = _wallet.FundTx(OnChainChat.BuildBroadcast(_idPub, text), 1, 1);
+        var members = (_gossip?.Peers ?? new List<PokerGossip.Peer>())
+            .Select(p => p.PubHex).Where(h => !string.IsNullOrWhiteSpace(h))
+            .Select(h => h.ToLowerInvariant()).Distinct().ToList();
+        if (members.Count == 0) return "No recipients are known yet — broadcast encryption seals to a recipient set, so there must be at least one known peer.";
+        return SendGroupChat(members, text);     // SendGroupChat always adds me + seals via the patent + dual-path sends
+    }
+
+    /// <summary>
+    /// GROUP send using the user's key-graph BROADCAST ENCRYPTION (GB 2623780 B): seal ONE message to the
+    /// selected member pubkeys, fund a tiny ChatGroup tx carrying the self-contained envelope, push it IP-to-IP
+    /// to every member we have an endpoint for, and broadcast to miners so OFFLINE members get it on-chain
+    /// (store-and-forward) when they next sync. Only the selected members can decrypt it.
+    /// </summary>
+    private string SendGroupChat(IReadOnlyList<string> memberPubs, string text)
+    {
+        if (!_wallet.HasIdentity) return "Set up your identity on-chain first — until then the only thing you can do is receive funds.";
+        if (string.IsNullOrWhiteSpace(text)) return "Type a message.";
+        if (memberPubs.Count == 0) return "The group has no members.";
+        // ALWAYS include myself as a member: the message lives on-chain, so on a later login I must be able to
+        // decrypt my OWN group history (WhatsApp-grade). Without this, the sender is locked out of their own messages.
+        var myHex = Convert.ToHexString(_idPub).ToLowerInvariant();
+        var members = memberPubs.Select(m => m.ToLowerInvariant()).Append(myHex).Distinct().ToList();
+        byte[] raw; string status;
+        try
+        {
+            var dataScript = OnChainChat.BuildGroup(members, _idPriv, _idPub, text);
+            // a 1-sat discovery dust to EACH member's identity address → offline members retrieve it on next sync
+            var memberPubsBytes = members.Select(m => { try { return Convert.FromHexString(m); } catch { return Array.Empty<byte>(); } })
+                                         .Where(b => b.Length == 33).ToList();
+            (raw, status) = _wallet.FundChatTx(dataScript, memberPubsBytes, 1);
+        }
+        catch (Exception ex) { return "Could not build the group message: " + ex.Message; }
         if (raw == null) return status;
-        foreach (var p in (_gossip?.Peers ?? new List<PokerGossip.Peer>()).ToList())
-        { var (h, pt) = ParseHostPort(p.Endpoint); if (h != null) _ = TxLink.SendTxAsync(_currentNet, h, pt, raw); }
+        // push IP-to-IP to any member we currently have an endpoint for (the rest receive it on-chain)
+        var byPub = (_gossip?.Peers ?? new List<PokerGossip.Peer>()).ToList();
+        var targets = members.ToHashSet();
+        foreach (var p in byPub)
+            if (targets.Contains(p.PubHex.ToLowerInvariant()))
+            { var (h, pt) = ParseHostPort(p.Endpoint); if (h != null) _ = TxLink.SendTxAsync(_currentNet, h, pt, raw); }
         _bsvNode?.Broadcast(raw);
-        return "";
+        return $"Sent to the group ({members.Count} members, encrypted).";
+    }
+
+    /// <summary>Fund a chat output into a real tx; returns (raw, "") on success or (null, error).</summary>
+    private (byte[] Raw, string Status) ToRawOrError(byte[] script)
+    {
+        var (raw, status) = _wallet.FundTx(script, 1, 1);
+        return raw == null ? (null!, status) : (raw, "");
+    }
+
+    /// <summary>The REDUNDANT DUAL-PATH entry point for EVERY on-chain move tx: send it IP-to-IP to every known
+    /// peer AND to the BSV nodes/miners (directive 20260612-102704 — all players, both paths, fully redundant,
+    /// so a zero-conf move cannot be raced by a double-spend). Used for game moves, the deal tape, and chat.</summary>
+    public Task<int> BroadcastMove(byte[] rawTx)
+        => new RedundantMoveBroadcast(
+               () => (_gossip?.Peers ?? new List<PokerGossip.Peer>())
+                     .Select(p => ParseHostPort(p.Endpoint))
+                     .Where(hp => hp.Item1 != null)
+                     .Select(hp => (hp.Item1!, hp.Item2))
+                     .ToList(),
+               (h, pt, raw) => TxLink.SendTxAsync(_currentNet, h, pt, raw),
+               raw => { _bsvNode?.Broadcast(raw); })
+           .Broadcast(rawTx);
+
+    /// <summary>Turn one of MY in-game moves into a REAL on-chain transaction (a typed Bet output funded ~1 sat
+    /// from my wallet) and dual-path broadcast it (IP-to-IP to every peer AND to the nodes). Every move I make is
+    /// a transaction. Only MY moves are funded here (the mover pays); peers fund their own. Silent if unfunded.</summary>
+    private void EmitMoveOnChain(NetGame.MoveRecord m)
+    {
+        if (!m.Mine || m.Kind != "bet") return;
+        try
+        {
+            var handId = new byte[16]; BitConverter.GetBytes(m.HandNo).CopyTo(handId, 0);
+            byte action = m.Action switch { "Fold" => 0, "Check" => 1, "Call" => 2, "Bet" => 3, "Raise" => 4, "AllIn" => 5, _ => 9 };
+            var script = TxTemplates.BuildOutput(TxKind.Bet,
+                new[] { handId, new[] { (byte)Math.Max(0, m.Seat) }, new[] { action }, BitConverter.GetBytes(m.Amount) }, _idPub);
+            var (raw, _) = _wallet.FundTx(script, 1, 1);
+            if (raw != null) _ = BroadcastMove(raw);   // funded → every move on-chain, both paths
+        }
+        catch { /* a move broadcast must never crash the game; the in-session move already stands */ }
     }
 
     /// <summary>
@@ -377,6 +647,31 @@ public partial class MainWindow : Window
     /// network (seeds nodes that don't know us yet), and (2) the poker gossip overlay's announce/query, which
     /// floods our presence across the overlay and pulls peers others know.
     /// </summary>
+    /// <summary>Beacon MY presence to the mesh: identity pubkey + my reachable chat endpoint + my @handle, signed
+    /// by my identity key (so no one can announce as me or steal my handle). Every other app lists me in its live
+    /// "who's online" directory automatically. Off-chain gossip only — never spends a coin.</summary>
+    private void AnnouncePresence()
+    {
+        try
+        {
+            if (!_viewsBuilt || _idPub.Length != 33) return;   // need an identity first
+            var myHex = Convert.ToHexString(_idPub).ToLowerInvariant();
+            _ = _node.HeartbeatAsync(myHex, MyEndpoint(), _wallet.MyHandle ?? "");
+        }
+        catch { }
+    }
+
+    /// <summary>The live directory of people online right now (identity pubkey + reachable endpoint + @handle),
+    /// excluding myself — handed to the chat so it shows who can be messaged instantly.</summary>
+    private IReadOnlyList<(string PubHex, string Endpoint, string Handle)> OnlineDirectory()
+    {
+        var myHex = _idPub.Length == 33 ? Convert.ToHexString(_idPub).ToLowerInvariant() : "";
+        return _node.ListPresence()
+            .Where(p => !string.Equals(p.playerId, myHex, StringComparison.OrdinalIgnoreCase))
+            .Select(p => (p.playerId, p.addr, p.handle))
+            .ToList();
+    }
+
     private void Announce()
     {
         // NEVER auto-spend the user's coins. A funded on-chain announce is an EXPLICIT user action — NEVER a
@@ -384,6 +679,42 @@ public partial class MainWindow : Window
         // DESTROYED the user's 1,000,000-sat coin. Peer discovery here is OFF-CHAIN gossip only — no tx, no spend.
         _gossip?.Announce();   // poker overlay: announce to known peers (they forward it onward)
         _gossip?.Query();      // and pull the peers they know
+    }
+
+    // Record a node seed read from the on-chain registry, keep the NEWEST per node, and hand the current LIVE
+    // endpoints to the TCP discovery so it dials them. Reading/dialing is FREE — it never spends a coin.
+    private void ConsiderNodeSeed(NodeSeedRegistry.Seed seed)
+    {
+        try
+        {
+            var key = Convert.ToHexString(seed.Pub);
+            lock (_seedRecords)
+            {
+                if (_seedRecords.TryGetValue(key, out var existing) && existing.UnixTime >= seed.UnixTime) return; // keep newest
+                _seedRecords[key] = seed;
+                long now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                var live = NodeSeedRegistry.LiveEndpoints(_seedRecords.Values.ToList(), now);
+                _discovery?.SetOnChainSeeds(live);
+            }
+        }
+        catch { }
+    }
+
+    /// <summary>EXPLICIT user action: publish THIS node's seed (IP:port + expiry) to the on-chain registry so
+    /// players anywhere can discover and TCP-connect to us. Spends ~3 sats (1 to the registry + 1 record + 1
+    /// fee). NEVER auto-spent — the user presses this; the previous auto-spend timer destroyed a coin, so all
+    /// coin-spending discovery is opt-in. A node stays listed for the TTL; press again to refresh before it.</summary>
+    private string PublishMyNodeSeed(int ttlSeconds = 3600)
+    {
+        if (!CanPlay()) return "Open and unlock your wallet first.";
+        var endpoint = $"{LocalIp()}:{_node.BoundPort}";
+        var (raw, status) = _wallet.BuildNodeSeedPublish(_idPub, endpoint, ttlSeconds);
+        if (raw == null) return "Could not publish node seed: " + status;
+        try { _bsvNode?.Broadcast(raw); } catch { }
+        // also flood it on our own gossip/IP-to-IP path so already-connected peers learn it immediately
+        foreach (var p in (_gossip?.Peers ?? new List<PokerGossip.Peer>()).ToList())
+        { var (h, pt) = ParseHostPort(p.Endpoint); if (h != null) _ = TxLink.SendTxAsync(_currentNet, h, pt, raw); }
+        return $"Your node is published on-chain to the directory as {endpoint} (valid {ttlSeconds / 60} min). Players anywhere can now discover and connect to you.";
     }
 
     private static string LocalIp()
@@ -401,10 +732,21 @@ public partial class MainWindow : Window
     /// <summary>Send a chat message AS a Bitcoin transaction: fund it, push IP-to-IP to the peer, broadcast to miners.</summary>
     private string SendChatTx(string recipientPubHex, string peerHostPort, string text, bool broadcast)
     {
+        // Until your identity is registered ON-CHAIN, the ONLY thing this wallet can do is receive funds. Nothing
+        // else — chat included — happens before registration.
+        if (!_wallet.HasIdentity) return "Set up your identity on-chain first (fund the wallet, then open the Identity tab). Until then the only thing you can do is receive funds.";
         if (string.IsNullOrWhiteSpace(text)) return "Type a message.";
-        if (broadcast) { var be = SendBroadcastChat(text); return be == "" ? "Sent to everyone (public broadcast)." : be; }
+        if (broadcast) return SendBroadcastChat(text);   // encrypted broadcast (patent); returns its own status message
+        // JUST WORKS: if we were not handed a live endpoint, look the recipient up in the presence directory so an
+        // ONLINE recipient gets the message INSTANTLY (IP-to-IP). If they are offline, it still goes on-chain
+        // (store-and-forward) and reaches them on their next sync — either way the sender does nothing extra.
+        if (string.IsNullOrWhiteSpace(peerHostPort))
+            peerHostPort = _node.ListPresence().FirstOrDefault(p => string.Equals(p.playerId, recipientPubHex, StringComparison.OrdinalIgnoreCase))?.addr ?? "";
         var err = SendEncrypted(recipientPubHex, peerHostPort, text);
-        return err == "" ? $"Sent (encrypted) to {peerHostPort}." : err;
+        if (err != "") return err;
+        return string.IsNullOrWhiteSpace(peerHostPort)
+            ? "Sent (encrypted, on-chain) — they will receive it the moment they come online."
+            : $"Sent (encrypted) — delivered to {peerHostPort}.";
     }
 
     private static (string? Host, int Port) ParseHostPort(string s)
@@ -595,7 +937,10 @@ public partial class MainWindow : Window
         // STANDALONE SPV: the client connects to no node network. Payments arrive as SPV envelopes (merkle
         // proof + header) IP-to-IP; players are discovered peer-to-peer. There is no "connected" state.
         int players = _gossip?.Peers.Count ?? 0;
-        NetInfo.Text = $"   {name} · SPV (online) · poker gossip overlay · players discovered: {players}";
-        Title = $"BSV Poker — {_profile.Name} — {name}";
+        // Identity is the PSEUDONYM the user registered — never a raw key string. Fall back to the profile name
+        // only if no pseudonym/handle has been set yet.
+        var me = !string.IsNullOrWhiteSpace(_wallet?.MyHandle) ? "@" + _wallet!.MyHandle : _profile.Name;
+        NetInfo.Text = $"   {me} · {name} · SPV (online) · poker gossip overlay · players discovered: {players}";
+        Title = $"BSV Poker — {me} — {name}";
     }
 }

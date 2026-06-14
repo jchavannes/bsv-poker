@@ -242,6 +242,7 @@ public static class Secp256k1
             var r = FromBytes(sig64[..32]);
             var s = FromBytes(sig64[32..]);
             if (r <= 0 || r >= N || s <= 0 || s >= N) return false;
+            if (s > N / 2) return false;   // reject non-canonical HIGH-S: BSV consensus requires low-S (everything we sign is low-S normalised)
             var pub = Decompress(pub33);
             var e = Mod(FromBytes(digest32), N);
             var w = InvMod(s, N);

@@ -24,6 +24,35 @@ public static class OnChainWalletTests
 
         T.Run("balance sums the UTXOs", () => T.Eq(Funded().Balance, 150000L, "3 × 50000"));
 
+        T.Run("1-of-2 RECOVERABLE CUSTODY: the bot spends with ITS key, AND the user can always reclaim with THEIRS", () =>
+        {
+            var userSeed = WalletKeys.NewSeed();
+            var botSeed = WalletKeys.NewSeed();
+            var userPub = WalletKeys.Account(userSeed, 0, 0).Pub;
+            var botPub = WalletKeys.Account(botSeed, 0, 0).Pub;
+            // the user funds a custody output to MultisigLock1of2(botPub, userPub) — EITHER party can spend it,
+            // the money stays the user's, and they can reclaim it unilaterally at any time.
+            var custodyTxid = "ca57".PadRight(64, '7');   // hex-only fake txid
+            const long lockValue = 10_000L;
+
+            // (1) the BOT spends the custody coin (stake / chat / refund) with ITS OWN key — no user signature needed
+            var botW = new OnChainWallet(botSeed);
+            botW.Add(new OnChainWallet.Utxo(custodyTxid, 0, lockValue, 0, 0, botPub, userPub));
+            var botSpend = botW.BuildAction(Chain.P2pkhLockForPub(recipient), 9000, 1000);
+            T.True(botW.VerifySpend(botSpend), "the bot's 1-of-2 spend is valid (bot key alone suffices)");
+
+            // (2) the USER can ALWAYS reclaim the SAME custody coin with THEIR OWN key (recoverable; money is theirs)
+            var userW = new OnChainWallet(userSeed);
+            userW.Add(new OnChainWallet.Utxo(custodyTxid, 0, lockValue, 0, 0, botPub, userPub));
+            var userReclaim = userW.BuildAction(Chain.P2pkhLockForPub(userPub), 9000, 1000);
+            T.True(userW.VerifySpend(userReclaim), "the user reclaims the same custody coin with their key alone (recoverable)");
+
+            // a plain P2PKH coin in the same wallet is unaffected (additive change, nothing regressed)
+            var mix = new OnChainWallet(botSeed);
+            mix.Add(new OnChainWallet.Utxo("dd".PadRight(64, '4'), 0, 5000, 0, 0));
+            T.True(mix.VerifySpend(mix.BuildAction(Chain.P2pkhLockForPub(recipient), 3000, 1000)), "ordinary P2PKH spend still works");
+        });
+
         T.Run("a payment selects coins, signs every input, returns change, and conserves value", () =>
         {
             var w = Funded();

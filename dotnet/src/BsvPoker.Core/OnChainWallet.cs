@@ -10,8 +10,21 @@ namespace BsvPoker.Core;
 /// </summary>
 public sealed class OnChainWallet
 {
-    /// <summary>An unspent output owned by this wallet, with the (chain,index) of the key that locks it.</summary>
-    public sealed record Utxo(string Txid, uint Vout, long Value, uint KeyChain, uint KeyIndex);
+    /// <summary>An unspent output owned by this wallet, with the (chain,index) of the key that locks it. If
+    /// <paramref name="CustodyPubA"/>/<paramref name="CustodyPubB"/> are set, the coin is a 1-of-2 RECOVERABLE
+    /// CUSTODY output (<c>MultisigLock1of2(CustodyPubA, CustodyPubB)</c>) that EITHER party can spend — this
+    /// wallet signs it with its own key (the one of A/B it holds). Both null = an ordinary P2PKH coin.</summary>
+    public sealed record Utxo(string Txid, uint Vout, long Value, uint KeyChain, uint KeyIndex, byte[]? CustodyPubA = null, byte[]? CustodyPubB = null);
+
+    /// <summary>Sign input <paramref name="i"/> for coin <paramref name="u"/>: P2PKH normally, or a 1-of-2 custody
+    /// signature (with this wallet's key) when the coin is a custody output. One place so every build path agrees.</summary>
+    private Chain.Tx SignInput(Chain.Tx tx, int i, Utxo u)
+    {
+        var k = WalletKeys.Account(_seed, u.KeyChain, u.KeyIndex);
+        if (u.CustodyPubA == null || u.CustodyPubB == null) return Chain.SignP2pkhInput(tx, i, k.Priv, k.Pub, u.Value);
+        var sig = Chain.SignMultisig1of2(tx, i, u.CustodyPubA, u.CustodyPubB, u.Value, k.Priv);   // either party's key spends
+        return Chain.ApplyMultisig1of2ScriptSig(tx, i, sig);
+    }
 
     private readonly byte[] _seed;
     private readonly List<Utxo> _utxos = new();
@@ -53,11 +66,7 @@ public sealed class OnChainWallet
             outs.Add(new Chain.TxOut(change, Chain.P2pkhLockForPub(changePub)));
         }
         var tx = new Chain.Tx(2, ins, outs, 0);
-        for (int i = 0; i < chosen.Count; i++)
-        {
-            var k = WalletKeys.Account(_seed, chosen[i].KeyChain, chosen[i].KeyIndex);
-            tx = Chain.SignP2pkhInput(tx, i, k.Priv, k.Pub, chosen[i].Value);
-        }
+        for (int i = 0; i < chosen.Count; i++) tx = SignInput(tx, i, chosen[i]);
         return new Spend(tx, chosen, fee, change);
     }
 
@@ -79,11 +88,7 @@ public sealed class OnChainWallet
         var outs = new List<Chain.TxOut> { new(outputValue, outputScript) };
         if (change > 0) outs.Add(new Chain.TxOut(change, Chain.P2pkhLockForPub(WalletKeys.Account(_seed, 1, _nextChange++).Pub)));
         var tx = new Chain.Tx(2, ins, outs, 0);
-        for (int i = 0; i < chosen.Count; i++)
-        {
-            var k = WalletKeys.Account(_seed, chosen[i].KeyChain, chosen[i].KeyIndex);
-            tx = Chain.SignP2pkhInput(tx, i, k.Priv, k.Pub, chosen[i].Value);
-        }
+        for (int i = 0; i < chosen.Count; i++) tx = SignInput(tx, i, chosen[i]);
         return new Spend(tx, chosen, fee, change);
     }
 
@@ -105,11 +110,7 @@ public sealed class OnChainWallet
         var outs = outputs.Select(o => new Chain.TxOut(o.Value, o.Script)).ToList();
         if (change > 0) outs.Add(new Chain.TxOut(change, Chain.P2pkhLockForPub(WalletKeys.Account(_seed, 1, _nextChange++).Pub)));
         var tx = new Chain.Tx(2, ins, outs, 0);
-        for (int i = 0; i < chosen.Count; i++)
-        {
-            var k = WalletKeys.Account(_seed, chosen[i].KeyChain, chosen[i].KeyIndex);
-            tx = Chain.SignP2pkhInput(tx, i, k.Priv, k.Pub, chosen[i].Value);
-        }
+        for (int i = 0; i < chosen.Count; i++) tx = SignInput(tx, i, chosen[i]);
         return new Spend(tx, chosen, fee, change);
     }
 
@@ -144,8 +145,10 @@ public sealed class OnChainWallet
         for (int i = 0; i < s.Inputs.Count; i++)
         {
             var u = s.Inputs[i];
-            var pub = WalletKeys.Account(_seed, u.KeyChain, u.KeyIndex).Pub;
-            if (!Chain.VerifyP2pkhInput(s.Tx, i, pub, u.Value)) return false;
+            if (u.CustodyPubA != null && u.CustodyPubB != null)
+            { if (!Chain.VerifyMultisig1of2(s.Tx, i, u.CustodyPubA, u.CustodyPubB, u.Value)) return false; }
+            else
+            { var pub = WalletKeys.Account(_seed, u.KeyChain, u.KeyIndex).Pub; if (!Chain.VerifyP2pkhInput(s.Tx, i, pub, u.Value)) return false; }
             inSum += u.Value;
         }
         long outSum = s.Tx.Outs.Sum(o => o.Value);

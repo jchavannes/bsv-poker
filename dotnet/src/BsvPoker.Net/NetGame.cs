@@ -68,16 +68,27 @@ public sealed class NetGame
     public HoldemState? Hand { get; private set; }
     public string Status { get; private set; } = "Waiting for players to join…";
     public event Action? OnUpdate;
+
+    /// <summary>One in-game MOVE, surfaced so the app can turn it into a funded on-chain n-of-n move tx and
+    /// dual-path broadcast it (IP-to-IP + nodes). DEFAULT null ⇒ no on-chain emission (the simulation/stress
+    /// engine is unchanged). The live game wires this to make every move a real transaction.</summary>
+    public sealed record MoveRecord(int HandNo, string Kind, int Seat, string Action, long Amount, bool Mine, IReadOnlyList<(string Pub, long Stack)>? Stacks);
+    public event Action<MoveRecord>? OnMove;
+    private void RaiseMove(MoveRecord m) { try { OnMove?.Invoke(m); } catch { } }
     public Variant Variant { get; }
     public int SeatCount => _seatCount;
     public int HandNumber => _handNo;
     public long TableChips => _stacks.Values.Sum();
     public bool Eliminated { get; private set; }
 
-    // Accountable abort: if the deal or a reveal makes no progress within this window (a peer is
-    // withholding), the hand is aborted instead of hanging forever. With real funds this is where the
-    // pre-signed nLockTime recovery would be broadcast so no satoshi is stranded.
-    public int AbortMs { get; set; } = 30000;
+    // Accountable abort: if the DEAL or a REVEAL makes NO PROGRESS within this window (a peer is genuinely
+    // withholding card material), the hand is aborted instead of hanging forever. This timer covers ONLY the
+    // automated deal/reveal exchange — it is NEVER running while it is a human's turn to act (betting has no
+    // timeout at all; take all the time you want, the whole game can run for hours). Every new piece of deal
+    // state RESETS this clock (see _progressTick in OnMessage), so a slow-but-advancing deal never aborts.
+    // The window is deliberately generous (this is an ONLINE game, not a speed round): a full minute and a
+    // half of total silence from a peer before the deal is abandoned.
+    public int AbortMs { get; set; } = 90_000;
     public bool Aborted { get; private set; }
     /// <summary>Set true the moment a peer reveals a card-scalar that does NOT open its published commitment
     /// (a provable card-substitution attempt). The offending reveal is rejected and the hand stalls to abort.</summary>
@@ -141,7 +152,7 @@ public sealed class NetGame
 
     // Every message is signed by the sender's identity key and bound to this table; the signature covers a
     // canonical (sorted-key) form of the message excluding the pub/sig fields, prefixed with the table id.
-    private void Send(object o)
+    private void Send(object o, bool ephemeral = false)
     {
         var json = JsonSerializer.Serialize(o);
         using var doc = JsonDocument.Parse(json);
@@ -149,6 +160,16 @@ public sealed class NetGame
         var sig = Convert.ToHexString(Secp256k1.SignDigest(_priv, digest)).ToLowerInvariant();
         var node = JsonNode.Parse(json)!.AsObject();
         node["pub"] = _myPubHex; node["sig"] = sig;
+        var payload = Encoding.UTF8.GetBytes(node.ToJsonString());
+        // EPHEMERAL (presence/"hello"): a FRESH id every time so it is ALWAYS delivered — never deduped. This is
+        // essential for the join handshake: the HOST is already flooding hello before the JOINER subscribes to the
+        // table topic, so the host's hello reaches the joiner's node and gets marked "seen" while there is still
+        // no local subscriber (it is dropped). With a stable id the re-flood is then discarded at the seen-check
+        // BEFORE delivery, so the joiner — now subscribed — would NEVER learn the host exists and the game would
+        // never start ("Waiting for players 1/2" forever). A random id makes each beacon a new frame, so the very
+        // next hello after the joiner subscribes is delivered. Presence is idempotent (TryAdd), so re-delivery is
+        // free; only hello uses this path.
+        if (ephemeral) { _ = _node.PublishAsync(_table, payload); return; }
         // A STABLE per-sender id for this logical message: hash(sender pubkey ‖ signing digest). The digest
         // covers the table + canonical content but EXCLUDES pub/sig, so two different players sending
         // structurally identical content (e.g. "hello") would otherwise collide and the second be wrongly
@@ -158,7 +179,7 @@ public sealed class NetGame
         var fidBytes = new byte[33 + digest.Length];
         Convert.FromHexString(_myPubHex).CopyTo(fidBytes, 0); digest.CopyTo(fidBytes, 33);
         var fid = Convert.ToHexString(Hashes.Sha256(fidBytes)).ToLowerInvariant();
-        _ = _node.PublishAsync(_table, Encoding.UTF8.GetBytes(node.ToJsonString()), fid);
+        _ = _node.PublishAsync(_table, payload, fid);
     }
 
     private byte[] Digest(JsonElement msg)
@@ -204,7 +225,7 @@ public sealed class NetGame
         {
             lock (_gate)
             {
-                Send(new { t = "hello", pub = _myPubHex });
+                Send(new { t = "hello", pub = _myPubHex }, ephemeral: true);   // presence beacon: fresh id, never deduped
                 if (_sessionSeats == null) { TryAssignSeats(); return; }
                 if (Eliminated || State == Phase.Done) return;
                 // a deal or reveal that makes no progress within AbortMs means a peer is withholding → abort
@@ -260,7 +281,18 @@ public sealed class NetGame
         _inPubs = _sessionSeats!.Where(p => _stacks[p] > 0).ToArray();
         if (_inPubs.Length < 2) { SessionOver(); return; }
         _myHandSeat = Array.IndexOf(_inPubs, _myPubHex);
-        if (_myHandSeat < 0) { Eliminated = true; State = Phase.Done; Status = "You were eliminated. The remaining players continue."; Raise(); return; }
+        if (_myHandSeat < 0)
+        {
+            // Not seated. Two different cases — say which, so a joiner never just sees "eliminated":
+            //  • the table was already FULL when I arrived (I am not in the admitted set at all), or
+            //  • I busted out mid-session (I was admitted, now have 0 chips).
+            Eliminated = true; State = Phase.Done;
+            bool everAdmitted = _sessionSeats != null && Array.IndexOf(_sessionSeats, _myPubHex) >= 0;
+            Status = everAdmitted
+                ? "You were eliminated. The remaining players continue."
+                : $"This table is already full ({_seatCount}/{_seatCount}). Host your own table or open another to play.";
+            Raise(); return;
+        }
         _handButton = _handNo % _inPubs.Length;
         _ecGlobal = MentalPokerEC.NewScalar();
         _ecPerCard = MentalPokerEC.NewPerCardScalars(_n);
@@ -394,6 +426,7 @@ public sealed class NetGame
         if (_handFinalized || Hand is not { Complete: true }) return;
         _handFinalized = true;
         for (int i = 0; i < _inPubs.Length; i++) _stacks[_inPubs[i]] = Hand.Seats[i].Stack;
+        RaiseMove(new MoveRecord(_handNo, "settle", -1, "settle", 0, false, _inPubs.Select(p => (p, _stacks[p])).ToList()));
         _handLog.Add($"Hand #{_handNo + 1}: {Hand.Message}");
         if (_handLog.Count > 100) _handLog.RemoveAt(0);
         StartHand();
@@ -509,6 +542,7 @@ public sealed class NetGame
         try
         {
             Hand.Apply(new GameAction(kind, seat, amt)); _applied++; Status = Hand.Message; Raise();
+            RaiseMove(new MoveRecord(_handNo, "bet", seat, kind.ToString(), amt, false, null));
             if (Hand.Complete) FinalizeHand(); else DriveStreet();
         }
         catch { }
@@ -525,6 +559,7 @@ public sealed class NetGame
             catch (Exception ex) { Status = ex.Message; Raise(); return; }
             Send(new { t = "act", h = _handNo, seat = _myHandSeat, seq, kind = kind.ToString(), amount });
             Status = Hand.Message; Raise();
+            RaiseMove(new MoveRecord(_handNo, "bet", _myHandSeat, kind.ToString(), amount, true, null));
             if (Hand.Complete) FinalizeHand(); else DriveStreet();
         }
     }

@@ -33,6 +33,9 @@ public sealed class BotPlayer : IDisposable
     public string Endpoint { get; }
     public long Balance { get { lock (_lock) return _balance; } }
     public event Action<string>? OnLog;
+    /// <summary>The bot has NO miner connection of its own; when it must settle a tx (e.g. the close-out refund)
+    /// it raises this so the HOST (the owner's app) broadcasts it to miners + peers. Wired in PlayBot.</summary>
+    public event Action<byte[]>? OnBroadcast;
 
     private readonly byte[] _ownerPub;     // the bot belongs to this identity and plays ONLY this identity
     public string Name { get; }            // e.g. "Alice-Bot-001"
@@ -110,6 +113,15 @@ public sealed class BotPlayer : IDisposable
 
     private void Ingest(Chain.Tx tx)
     {
+        // GROUP message (broadcast encryption): the bot reads it iff it was selected as a member. Show it so
+        // group chat is visibly delivered to the bot; skip its own messages.
+        var grp = OnChainChat.TryReadGroupTx(tx, Priv, Pub);
+        if (grp != null)
+        {
+            if (!grp.SenderPub.AsSpan().SequenceEqual(Pub))
+                Log($"[group] {Convert.ToHexString(grp.SenderPub).ToLowerInvariant()[..12]}…: {grp.Text}");
+            return;
+        }
         var msg = OnChainChat.TryReadTx(tx, Priv, Pub);
         if (msg == null) return;
         var senderHex = Convert.ToHexString(msg.SenderPub).ToLowerInvariant();
@@ -178,14 +190,19 @@ public sealed class BotPlayer : IDisposable
         try
         {
             var rpub = Convert.FromHexString(recipientPubHex);
-            var script = OnChainChat.BuildScript(rpub, Pub, text);
+            var script = OnChainChat.BuildScript(rpub, Priv, Pub, (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), text);
+            byte[] raw;
             lock (_lock)
             {
-                if (_wallet.Balance < 1500) return "bot has no sats to send a message";
-                var spend = _wallet.SpendAction(script, 1000, 500);
+                if (_wallet.Balance < 2) return "bot has no sats to send a message";   // ~1-sat per-tx mandate
+                var spend = _wallet.SpendAction(script, 1, 1);   // 1-sat message output + 1-sat fee
+                raw = Chain.Serialize(spend.Tx);
                 var (host, port) = ParseHostPort(endpoint);
-                if (host != null) _ = TxLink.SendTxAsync(_net, host, port, Chain.Serialize(spend.Tx));
+                if (host != null) _ = TxLink.SendTxAsync(_net, host, port, raw);
             }
+            // EVERYTHING ON-CHAIN: a real chat reply or game move (DEAL:) must be MINED, not just pushed IP-to-IP —
+            // the bot has no miner connection, so the host broadcasts it. Gossip is overlay plumbing → not mined.
+            if (!text.StartsWith("GOSSIP:", StringComparison.Ordinal)) { try { OnBroadcast?.Invoke(raw); } catch { } }
             return "";
         }
         catch (Exception ex) { return ex.Message; }
@@ -198,14 +215,22 @@ public sealed class BotPlayer : IDisposable
         {
             if (_funderAddress == null) return;
             var payload = Base58.CheckDecode(_funderAddress);
+            byte[]? raw = null; long amount = 0;
             lock (_lock)
             {
                 if (_wallet.Balance <= 1000) return;
-                var spend = _wallet.BuildAction(Chain.P2pkhLock(payload[1..]), _wallet.Balance - 1000, 1000);
-                Log($"refunding {_wallet.Balance - 1000:N0} sat to the funder {_funderAddress}");
-                // (broadcast handled by the host node; the bot has no miner connection of its own)
-                _ = spend;
+                amount = _wallet.Balance - 1000;
+                var spend = _wallet.SpendAction(Chain.P2pkhLock(payload[1..]), amount, 1000);   // marks the coins spent
+                raw = Chain.Serialize(spend.Tx);
+                _balance = _wallet.Balance;
             }
+            // The bot has no miner connection — the host (owner's app) broadcasts to miners + peers, AND we push it
+            // IP-to-IP to the owner so it settles even if the host event isn't wired. The money goes back to the user.
+            Log($"refunding {amount:N0} sat to the funder {_funderAddress}");
+            try { OnBroadcast?.Invoke(raw); } catch { }
+            var ownerHex = Convert.ToHexString(_ownerPub).ToLowerInvariant();
+            var ownerPeer = Gossip.Peers.FirstOrDefault(p => string.Equals(p.PubHex, ownerHex, StringComparison.OrdinalIgnoreCase));
+            if (ownerPeer != null) { var (host, port) = ParseHostPort(ownerPeer.Endpoint); if (host != null) _ = TxLink.SendTxAsync(_net, host, port, raw); }
         }
         catch (Exception ex) { Log("refund failed: " + ex.Message); }
     }

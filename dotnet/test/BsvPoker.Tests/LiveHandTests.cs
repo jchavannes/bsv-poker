@@ -42,7 +42,7 @@ public static class LiveHandTests
         public void Connect(int peerPort) => _peerPort = peerPort;
         public void Send(string msg)
         {
-            var script = OnChainChat.BuildScript(_peerPub, _myPub, msg);
+            var script = OnChainChat.BuildScript(_peerPub, _myPriv, _myPub, (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), msg);
             var tx = new Chain.Tx(2, new() { new("00".PadRight(64, '0'), 0, Array.Empty<byte>(), 0xffffffff) }, new() { new(1, script) }, 0);
             BsvPoker.Net.Bsv.TxLink.SendTxAsync(_net, "127.0.0.1", _peerPort, Chain.Serialize(tx)).GetAwaiter().GetResult();
         }

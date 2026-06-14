@@ -63,6 +63,17 @@ public sealed class BroadcastEncryption
     public byte[] UserDecrypt(ulong user, byte[] leafKey, IReadOnlyList<Item> items, byte[] sealedMsg)
     {
         if (!_userLeaf.TryGetValue(user, out var leaf)) throw new InvalidOperationException("user not eligible");
+        return DecryptPath(leaf, leafKey, items, sealedMsg);
+    }
+
+    /// <summary>The leaf node id assigned to a user (root=1, leaves=n..2n-1). Public so a remote member who only
+    /// holds its leaf key + the published items can decrypt without the sender's full graph.</summary>
+    public int LeafOf(ulong user) => _userLeaf.TryGetValue(user, out var leaf) ? leaf : -1;
+
+    /// <summary>Decrypt up a leaf→root path using ONLY the leaf node id, the leaf key, the published items and the
+    /// sealed message — no graph instance needed (this is what a remote group member runs). Throws if not eligible.</summary>
+    public static byte[] DecryptPath(int leaf, byte[] leafKey, IReadOnlyList<Item> items, byte[] sealedMsg)
+    {
         var path = LeafToRoot(leaf).ToList();
         var current = (byte[])leafKey.Clone();
         for (int i = 0; i + 1 < path.Count; i++)

@@ -45,7 +45,7 @@ public sealed class P2PNode : IDisposable
     private readonly ConcurrentQueue<string> _seenOrder = new();
     private readonly ConcurrentDictionary<string, bool> _dialing = new();
     private readonly ConcurrentDictionary<string, (string Name, int Members, DateTime Exp)> _directory = new();
-    private readonly ConcurrentDictionary<string, (string Addr, DateTime Exp)> _presence = new();
+    private readonly ConcurrentDictionary<string, (string Addr, string Handle, DateTime Exp)> _presence = new();
     private readonly ConcurrentDictionary<string, TableAnnounce> _ownTables = new();
     private readonly ConcurrentDictionary<string, PresenceAnnounce> _ownPresence = new();
     private Timer? _reannounceTimer;
@@ -60,7 +60,9 @@ public sealed class P2PNode : IDisposable
     private Thread? _consumer;
 
     public sealed record TableAnnounce(string id, string name, int members);
-    public sealed record PresenceAnnounce(string playerId, string addr);
+    // playerId = the player's IDENTITY pubkey (hex); addr = their live endpoint (host:port); handle = their
+    // self-attested @handle (signed alongside, so it cannot be spoofed). This is the "who's online" directory.
+    public sealed record PresenceAnnounce(string playerId, string addr, string handle = "");
     public sealed record PeerAddr(string Host, int Port);
     private sealed record Frame(string t, string d, string id);
     private sealed class RateState { public double Tokens; public long Last; }
@@ -92,10 +94,10 @@ public sealed class P2PNode : IDisposable
         catch { return false; }
     }
     private static string TableCanon(string id, string name, int members) => $"tbl|{id}|{name}|{members}";
-    private static string PresenceCanon(string playerId, string addr) => $"pres|{playerId}|{addr}";
+    private static string PresenceCanon(string playerId, string addr, string handle) => $"pres|{playerId}|{addr}|{handle}";
 
     private string TableJson(TableAnnounce a) => JsonSerializer.Serialize(new { a.id, a.name, a.members, pub = _idPubHex ?? "", sig = SignHex(TableCanon(a.id, a.name, a.members)) });
-    private string PresenceJson(PresenceAnnounce p) => JsonSerializer.Serialize(new { p.playerId, p.addr, sig = SignHex(PresenceCanon(p.playerId, p.addr)) });
+    private string PresenceJson(PresenceAnnounce p) => JsonSerializer.Serialize(new { p.playerId, p.addr, p.handle, sig = SignHex(PresenceCanon(p.playerId, p.addr, p.handle)) });
 
     public int BoundPort { get; private set; }
     public int PeerCount => _peers.Count;
@@ -107,8 +109,10 @@ public sealed class P2PNode : IDisposable
     {
         var addr = _bindHost == "0.0.0.0" ? IPAddress.Any : IPAddress.Parse(_bindHost);
         if (_bindHost == "0.0.0.0") LanEnabled = true;
-        _listener = new TcpListener(addr, _port);
-        _listener.Start();
+        // Try the requested (well-known) port first so same-network peers can find us at a known port; if it is
+        // already in use (e.g. a second instance on this machine), fall back to an ephemeral port automatically.
+        try { _listener = new TcpListener(addr, _port); _listener.Start(); }
+        catch { _listener = new TcpListener(addr, 0); _listener.Start(); }
         BoundPort = ((IPEndPoint)_listener.LocalEndpoint).Port;
         StartConsumer();
         _ = AcceptLoop(_listener);
@@ -333,12 +337,14 @@ public sealed class P2PNode : IDisposable
             using var doc = JsonDocument.Parse(text);
             var r = doc.RootElement;
             string playerId = r.GetProperty("playerId").GetString() ?? "", addr = r.GetProperty("addr").GetString() ?? "";
+            string handle = r.TryGetProperty("handle", out var he) ? he.GetString() ?? "" : "";
             string sig = r.TryGetProperty("sig", out var se) ? se.GetString() ?? "" : "";
             if (string.IsNullOrEmpty(playerId) || string.IsNullOrEmpty(addr)) { Drop("presence: empty"); return; }
-            // presence MUST be signed by the player's own key (playerId is that pubkey) — no spoofing others
-            if (!VerifyHex(playerId, PresenceCanon(playerId, addr), sig)) { Drop("presence: bad/missing signature"); return; }
+            // presence MUST be signed by the player's own key (playerId is that pubkey) — no spoofing others, and
+            // the handle is covered by the signature so a player cannot claim another player's @handle either.
+            if (!VerifyHex(playerId, PresenceCanon(playerId, addr, handle), sig)) { Drop("presence: bad/missing signature"); return; }
             if (!_presence.ContainsKey(playerId) && _presence.Count >= MaxDirectory) { var oldest = _presence.Keys.FirstOrDefault(); if (oldest != null) _presence.TryRemove(oldest, out _); }
-            _presence[playerId] = (addr, DateTime.UtcNow + EntryTtl);
+            _presence[playerId] = (addr, handle, DateTime.UtcNow + EntryTtl);
         }
         catch { Drop("presence: parse error"); }
     }
@@ -351,9 +357,9 @@ public sealed class P2PNode : IDisposable
 
     private void EnsureReannounce() { if (_reannounceTimer == null && !_closed) _reannounceTimer = new Timer(_ => RepublishOwn(), null, Reannounce, Reannounce); }
 
-    public Task HeartbeatAsync(string playerId, string addr)
+    public Task HeartbeatAsync(string playerId, string addr, string handle = "")
     {
-        var a = new PresenceAnnounce(playerId, addr);
+        var a = new PresenceAnnounce(playerId, addr, handle);
         _ownPresence[playerId] = a; OnPresenceAnnounce(PresenceJson(a)); EnsureReannounce();
         return PublishAsync(PresenceTopic, Encoding.UTF8.GetBytes(PresenceJson(a)));
     }
@@ -361,7 +367,7 @@ public sealed class P2PNode : IDisposable
     public IReadOnlyList<PresenceAnnounce> ListPresence()
     {
         var now = DateTime.UtcNow; var outp = new List<PresenceAnnounce>();
-        foreach (var kv in _presence.ToArray()) { if (kv.Value.Exp <= now) { _presence.TryRemove(kv.Key, out _); continue; } outp.Add(new PresenceAnnounce(kv.Key, kv.Value.Addr)); }
+        foreach (var kv in _presence.ToArray()) { if (kv.Value.Exp <= now) { _presence.TryRemove(kv.Key, out _); continue; } outp.Add(new PresenceAnnounce(kv.Key, kv.Value.Addr, kv.Value.Handle)); }
         return outp;
     }
 

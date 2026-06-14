@@ -30,10 +30,17 @@ public sealed class ElectrumSvpClient : IDisposable
     {
         ("electrontest.cascharia.com", 51002), ("tsv.usebsv.com", 51002),
     };
+    // REGTEST runs LOCALLY: a regtest ElectrumSVP/ElectrumX server on this machine. Try the common local ports
+    // (SSL 50002/51002 and plain 50001/51001) so the app finds and broadcasts to whatever the user has up.
+    public static readonly (string Host, int Port)[] Regtest =
+    {
+        ("127.0.0.1", 50002), ("127.0.0.1", 51002), ("127.0.0.1", 50001), ("127.0.0.1", 51001),
+        ("localhost", 50002), ("localhost", 50001),
+    };
 
     public static (string Host, int Port)[] ServersFor(BsvNetwork net) => net switch
     {
-        BsvNetwork.Testnet => Testnet, BsvNetwork.Mainnet => Mainnet, _ => Array.Empty<(string, int)>(),
+        BsvNetwork.Testnet => Testnet, BsvNetwork.Mainnet => Mainnet, BsvNetwork.Regtest => Regtest, _ => Array.Empty<(string, int)>(),
     };
 
     private TcpClient? _tcp;

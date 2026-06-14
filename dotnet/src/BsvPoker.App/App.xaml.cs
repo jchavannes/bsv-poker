@@ -31,10 +31,13 @@ public partial class App : Application
         if (w.RunStartupLogin())   // selector → password (each alone); false => the user cancelled => exit
         {
             MainWindow = w;        // ShutdownMode.OnMainWindowClose now binds to the real window
+            // NEVER steal focus or jump in front of whatever the user is doing: open the window WITHOUT activating
+            // it (no Activate(), no Topmost toggle) and never maximised. It appears on the taskbar; the user
+            // brings it forward when THEY choose. (Removed the forced foreground that popped up over the user's
+            // other work — the principal's explicit rule: never full-screen, never in front of my typing.)
+            w.ShowActivated = false;
+            w.WindowState = WindowState.Normal;
             w.Show();
-            // EVERY instance is its own player — bring this one to the front so a 2nd/3rd copy is never lost behind
-            // another, and let each window be moved/maximised independently on whichever screen you want.
-            try { w.Activate(); w.Topmost = true; w.Topmost = false; } catch { }
         }
         else Shutdown();
     }

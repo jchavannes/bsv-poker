@@ -28,10 +28,16 @@ public sealed class GameView : UserControl
     private int _button;
     private HoldemState? _practice;
     private NetGame? _net;
+
+    /// <summary>Raised for every in-game move so the host (MainWindow) can fund it as an on-chain tx and
+    /// dual-path broadcast it (IP-to-IP + nodes). Every move becomes a real transaction.</summary>
+    public event Action<NetGame.MoveRecord>? OnMove;
     private bool _botMode;
     private Variant _botVariant = Variant.TexasHoldem;
     private int _lastMintedHand = -1; // mint my hole-card NFTs once per dealt hand (by hand number)
     private bool _practiceMinted;     // mint my NFTs once per practice/bot hand too (ALL MINT)
+    private int _practiceHandSeq;     // increments each practice/bot deal — a stable per-hand key for the clock
+    private int _netResultHand = -1;  // which networked hand number the start-stack was captured for
 
     private readonly StackPanel _topCards = new() { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
     private readonly StackPanel _board = new() { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 8, 0, 8) };
@@ -39,6 +45,19 @@ public sealed class GameView : UserControl
     private readonly TextBlock _topInfo = new() { Foreground = Brushes.White, FontWeight = FontWeights.SemiBold, HorizontalAlignment = HorizontalAlignment.Center };
     private readonly TextBlock _botInfo = new() { Foreground = Brushes.White, FontWeight = FontWeights.Bold, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 6, 0, 0) };
     private readonly TextBlock _pot = new() { Foreground = new SolidColorBrush(Color.FromRgb(0xFF, 0xE0, 0x82)), FontSize = 18, FontWeight = FontWeights.Bold, HorizontalAlignment = HorizontalAlignment.Center };
+    // The BIG plain-language outcome banner — "YOU WIN +50 chips!" / "You lost this hand (−20)". Shown only when
+    // a hand has finished, so a player who does not know poker ALWAYS sees clearly whether they won or lost.
+    private readonly Border _resultBox = new() { CornerRadius = new CornerRadius(8), Padding = new Thickness(16, 8, 16, 8), Margin = new Thickness(0, 8, 0, 8), HorizontalAlignment = HorizontalAlignment.Center, Visibility = Visibility.Collapsed };
+    private readonly TextBlock _result = new() { FontSize = 22, FontWeight = FontWeights.Bold, HorizontalAlignment = HorizontalAlignment.Center, TextWrapping = TextWrapping.Wrap, TextAlignment = TextAlignment.Center };
+    private long _myStackBefore = -1;   // my stack at the start of the current hand, to compute "you won/lost N this hand"
+    // PER-HAND COUNTDOWN: a visible clock on screen, starting at HandSeconds, that RESETS at the start of every
+    // hand and ticks down while a hand is live. It is shown so the player always sees how long is left in the
+    // current hand. (One minute per hand, restarting each hand — the user's explicit rule.)
+    private readonly TextBlock _clock = new() { FontSize = 17, FontWeight = FontWeights.Bold, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 2, 0, 2) };
+    public int HandSeconds { get; set; } = 60;          // the per-hand countdown length (resets every hand)
+    private int _secondsLeft;                            // seconds remaining in the current hand
+    private int _clockHandKey = -1;                      // which hand the clock is currently counting (to detect a new hand)
+    private System.Windows.Threading.DispatcherTimer? _clockTimer;
     private readonly TextBlock _msg = new() { Foreground = new SolidColorBrush(Color.FromRgb(0xE8, 0xF5, 0xE9)), FontSize = 15, HorizontalAlignment = HorizontalAlignment.Center, TextWrapping = TextWrapping.Wrap };
     private readonly TextBlock _standings = new() { Foreground = new SolidColorBrush(Color.FromRgb(0xCF, 0xD8, 0xDC)), FontSize = 12, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 4, 0, 0), TextWrapping = TextWrapping.Wrap };
     private readonly TextBox _bet = new() { Width = 70, Text = "6", VerticalContentAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 4, 0) };
@@ -52,6 +71,16 @@ public sealed class GameView : UserControl
 
     /// <summary>Raised when the player leaves the table (so the host can stop any bot, etc.).</summary>
     public event Action? OnLeaveTable;
+
+    /// <summary>Resolves an identity pubkey (hex) to a friendly label (pseudonym/@handle). Set by the host so the
+    /// table shows the player's PSEUDONYM rather than a raw key. Falls back to "You" when unset/unknown.</summary>
+    private Func<string, string?>? _labelFor;
+    public void SetIdentityLabelResolver(Func<string, string?> labelFor) => _labelFor = labelFor;
+    private string MyLabel()
+    {
+        try { var l = _labelFor?.Invoke(Convert.ToHexString(_pub).ToLowerInvariant()); if (!string.IsNullOrWhiteSpace(l)) return l; } catch { }
+        return "You";
+    }
 
     public GameView(P2PNode node, byte[] priv, byte[] pub, CardVault vault, Action onCardsChanged,
         Func<IReadOnlyList<Card>, long, string>? onChainSettle = null)
@@ -69,7 +98,8 @@ public sealed class GameView : UserControl
         var top = new StackPanel { VerticalAlignment = VerticalAlignment.Top, HorizontalAlignment = HorizontalAlignment.Center };
         top.Children.Add(_topInfo); top.Children.Add(_topCards); Grid.SetRow(top, 0); g.Children.Add(top);
         var mid = new StackPanel { VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
-        mid.Children.Add(_pot); mid.Children.Add(_board); mid.Children.Add(_msg); mid.Children.Add(_standings); Grid.SetRow(mid, 1); g.Children.Add(mid);
+        _resultBox.Child = _result;
+        mid.Children.Add(_clock); mid.Children.Add(_pot); mid.Children.Add(_board); mid.Children.Add(_resultBox); mid.Children.Add(_msg); mid.Children.Add(_standings); Grid.SetRow(mid, 1); g.Children.Add(mid);
         var bot = new StackPanel { VerticalAlignment = VerticalAlignment.Bottom, HorizontalAlignment = HorizontalAlignment.Center };
         bot.Children.Add(_botCards); bot.Children.Add(_botInfo); Grid.SetRow(bot, 2); g.Children.Add(bot);
         inner.Child = g; felt.Child = inner;
@@ -93,7 +123,38 @@ public sealed class GameView : UserControl
         var barHost = new Border { Background = new SolidColorBrush(Color.FromRgb(0x16, 0x16, 0x16)), Padding = new Thickness(8) };
         barHost.Child = bar; Grid.SetRow(barHost, 1); root.Children.Add(barHost);
         Content = root;
+        // the on-screen per-hand countdown ticks once a second
+        _clockTimer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        _clockTimer.Tick += (_, _) => ClockTick();
+        _clockTimer.Start();
         Render();
+    }
+
+    // Identify the current live hand (practice/bot or networked) by a stable key, or -1 if no hand is in play.
+    private int CurrentHandKey()
+    {
+        if (_net != null) return _net.Hand != null && !_net.Hand.Complete ? _net.HandNumber : -1;
+        if (_practice is { Complete: false }) return _practiceHandSeq;
+        return -1;
+    }
+
+    private void ClockTick()
+    {
+        int key = CurrentHandKey();
+        if (key < 0)
+        {
+            // no live hand → hide/freeze the clock (between hands, or at a finished hand showing the result)
+            _clock.Text = "";
+            return;
+        }
+        if (key != _clockHandKey) { _clockHandKey = key; _secondsLeft = HandSeconds; }   // NEW hand → reset to a full minute
+        else if (_secondsLeft > 0) _secondsLeft--;
+        // show MM:SS, turning amber then red as it runs down, so the player always sees the time left in THIS hand
+        int s = Math.Max(0, _secondsLeft);
+        _clock.Text = $"⏱ Hand time: 0:{s:D2}";
+        _clock.Foreground = s > 20 ? new SolidColorBrush(Color.FromRgb(0xCF, 0xD8, 0xDC))
+                          : s > 10 ? new SolidColorBrush(Color.FromRgb(0xFF, 0xC1, 0x07))
+                                   : new SolidColorBrush(Color.FromRgb(0xFF, 0x6B, 0x6B));
     }
 
     public void StartNetworked(string tableId, string tableName)
@@ -103,6 +164,7 @@ public sealed class GameView : UserControl
         _lastMintedHand = -1;
         _net = new NetGame(_node, tableId, _priv, _pub);
         _net.OnUpdate += () => Dispatcher.BeginInvoke(DispatcherPriority.Normal, new Action(Render));
+        _net.OnMove += m => OnMove?.Invoke(m);   // surface every move so the host turns it into a funded on-chain dual-path tx
         _net.Start();
         Render();
     }
@@ -113,12 +175,70 @@ public sealed class GameView : UserControl
         return new Button { Content = text, Width = 110, Margin = new Thickness(4), Padding = new Thickness(0, 8, 0, 8), Foreground = Brushes.White, BorderThickness = new Thickness(0), Background = new SolidColorBrush(c) };
     }
 
+    /// <summary>
+    /// Show the BIG, unmistakable end-of-hand result so a player who does NOT know poker always knows whether
+    /// they won or lost, by how much, and (at a showdown) with what hand. Computes my net chip change this hand
+    /// from the stack I started the hand with, names the winner from the engine's payouts, and colours the
+    /// banner green for a win, red for a loss, grey for a tie/no-change.
+    /// </summary>
+    private void ShowResultBanner(HoldemState st, int mySeat, string opponentLabel)
+    {
+        long after = st.Seats[mySeat].Stack;
+        long net = _myStackBefore >= 0 ? after - _myStackBefore : 0;   // chips I gained (+) or lost (−) this hand
+        bool iWon = st.Payouts.TryGetValue(mySeat, out var myWin) && myWin > 0;
+        bool tie = st.Payouts.Count > 1 && iWon;                        // I shared the pot
+
+        // name MY best hand if there was a real showdown (a full board + my cards face-up)
+        string handName = "";
+        try
+        {
+            if (st.Board.Count >= 3 && st.Seats[mySeat].Hole.All(c => !c.IsFaceDown))
+                handName = HandEval.BestForVariant(st.Seats[mySeat].Hole, st.Board, Variants.ExactlyTwoHole(st.Variant)).Category;
+        }
+        catch { }
+
+        string headline;
+        Color bg, fg = Colors.White;
+        if (net > 0)
+        {
+            headline = (tie ? "YOU SPLIT THE POT" : "YOU WIN!") + $"   +{net} chips";
+            if (handName.Length > 0) headline += $"\nwith {Article(handName)} {handName.ToLowerInvariant()}";
+            bg = Color.FromRgb(0x2E, 0x7D, 0x32);   // green
+        }
+        else if (net < 0)
+        {
+            headline = $"You lost this hand   {net} chips";
+            headline += $"\n{opponentLabel} won the pot.";
+            bg = Color.FromRgb(0xB0, 0x2A, 0x2A);   // red
+        }
+        else
+        {
+            headline = "Hand over — no chips changed (tie / blinds returned).";
+            bg = Color.FromRgb(0x4A, 0x4A, 0x4A);   // grey
+        }
+        _result.Text = headline;
+        _result.Foreground = new SolidColorBrush(fg);
+        _resultBox.Background = new SolidColorBrush(bg);
+        _resultBox.Visibility = Visibility.Visible;
+    }
+
+    private static string Article(string word) => "AEIOU".IndexOf(char.ToUpperInvariant(word[0])) >= 0 ? "an" : "a";
+
+    /// <summary>Surface a non-disruptive note under the table (e.g. that the hand was also recorded on-chain and
+    /// is replayable). Shown in the standings line so it never interrupts play or steals focus.</summary>
+    public void ShowOnChainNote(string note)
+    {
+        if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(new Action(() => ShowOnChainNote(note))); return; }
+        if (!string.IsNullOrWhiteSpace(note)) _standings.Text = note;
+    }
+
     /// <summary>Lobby "Play a bot" — you (seat 0) vs a practice bot (seat 1) at the chosen variant.</summary>
     public void StartBot(Variant variant)
     {
         _net?.Stop(); _net = null; _botMode = true; _botVariant = variant; _practiceMinted = false;
         for (int i = 0; i < 2; i++) if (_stacks[i] < 2) _stacks[i] = 100;
         var deck = MentalPoker.ShuffledFrom(new[] { MentalPoker.FreshEntropy(), MentalPoker.FreshEntropy() }, Variants.CardSet(variant));
+        _myStackBefore = _stacks[0]; _practiceHandSeq++; _resultBox.Visibility = Visibility.Collapsed;  // new hand → fresh clock + clear last result
         _practice = HoldemState.Create(_stacks, _button, 1, 2, deck, variant);
         _button ^= 1;
         Render();
@@ -130,6 +250,7 @@ public sealed class GameView : UserControl
         _net?.Stop(); _net = null; _botMode = true; // the practice button now plays a bot at the current variant
         for (int i = 0; i < 2; i++) if (_stacks[i] < 2) _stacks[i] = 100;
         var deck = MentalPoker.ShuffledFrom(new[] { MentalPoker.FreshEntropy(), MentalPoker.FreshEntropy() }, Variants.CardSet(_botVariant));
+        _myStackBefore = _stacks[0]; _practiceHandSeq++; _resultBox.Visibility = Visibility.Collapsed;  // new hand → fresh clock + clear last result
         _practice = HoldemState.Create(_stacks, _button, 1, 2, deck, _botVariant);
         _button ^= 1;
         Render();
@@ -209,11 +330,13 @@ public sealed class GameView : UserControl
         {
             for (int i = 0; i < 2; i++) { _topCards.Children.Add(new CardView()); _botCards.Children.Add(new CardView()); }
             for (int i = 0; i < 5; i++) _board.Children.Add(new CardView());
-            _pot.Text = "Pot: 0"; _msg.Text = ng.Status; _botInfo.Text = "You"; _topInfo.Text = "Opponent";
+            _pot.Text = "Pot: 0"; _msg.Text = ng.Status; _botInfo.Text = MyLabel(); _topInfo.Text = "Opponent";
             _fold.IsEnabled = _check.IsEnabled = _call.IsEnabled = _betBtn.IsEnabled = false;
             return;
         }
         int me = ng.MySeat < 0 ? 0 : ng.MySeat;
+        // capture my starting stack ONCE per networked hand so the result banner can show what I won/lost
+        if (_netResultHand != ng.HandNumber && !hand.Complete) { _netResultHand = ng.HandNumber; _myStackBefore = hand.Seats[me].Stack + hand.Seats[me].TotalCommit; _resultBox.Visibility = Visibility.Collapsed; }
         // Cards are NFTs: mint MY hole cards into my wallet vault (sealed to me) once per dealt hand.
         if (_lastMintedHand != ng.HandNumber && ng.MySeat >= 0 && hand.Seats[me].Hole.All(c => !c.IsFaceDown))
         {
@@ -237,7 +360,8 @@ public sealed class GameView : UserControl
         for (int i = 0; i < 5; i++) { var cv = new CardView(); if (i < hand.Board.Count) cv.ShowCard(hand.Board[i]); else cv.ShowEmpty(); _board.Children.Add(cv); }
         _pot.Text = $"Pot: {hand.Pot}";
         bool myTurn = !hand.Complete && hand.ToAct == me;
-        _botInfo.Text = $"You (seat {me}) — stack {hand.Seats[me].Stack}{(myTurn ? "  ◀ your turn" : "")}";
+        _botInfo.Text = $"{MyLabel()} (seat {me}) — stack {hand.Seats[me].Stack}{(myTurn ? "  ◀ your turn" : "")}";
+        if (hand.Complete) ShowResultBanner(hand, me, opponentLabel: "your opponent");
         _msg.Text = ng.Status + (ng.HandLog.Count > 0 ? "   •   " + ng.HandLog[^1] : "");
         _standings.Text = "Session — " + ng.Standings;
         var la = myTurn ? hand.Legal() : null;
@@ -257,7 +381,7 @@ public sealed class GameView : UserControl
             _msg.Text = "Join a table in the Lobby to play someone — or press Practice deal (hot-seat).";
             for (int i = 0; i < 2; i++) { _topCards.Children.Add(new CardView()); _botCards.Children.Add(new CardView()); }
             for (int i = 0; i < 5; i++) _board.Children.Add(new CardView());
-            _pot.Text = "Pot: 0"; _botInfo.Text = $"You — {_stacks[0]}"; _topInfo.Text = $"Player 2 — {_stacks[1]}";
+            _pot.Text = "Pot: 0"; _botInfo.Text = $"{MyLabel()} — {_stacks[0]}"; _topInfo.Text = $"Player 2 — {_stacks[1]}";
             _deal.IsEnabled = true; _fold.IsEnabled = _check.IsEnabled = _call.IsEnabled = _betBtn.IsEnabled = false;
             return;
         }
@@ -275,9 +399,11 @@ public sealed class GameView : UserControl
         for (int i = 0; i < 5; i++) { var cv = new CardView(); if (i < st.Board.Count) cv.ShowCard(st.Board[i]); else cv.ShowEmpty(); _board.Children.Add(cv); }
         _pot.Text = $"Pot: {st.Pot}";
         bool myTurn = !st.Complete && st.ToAct == 0;
-        _botInfo.Text = $"You (seat 0) — {st.Seats[0].Stack}{(myTurn ? "  ◀ your turn" : "")}";
-        _topInfo.Text = (_botMode ? "Bot" : "Seat 1") + $" — {st.Seats[1].Stack}";
-        _msg.Text = st.Message;
+        _botInfo.Text = $"{MyLabel()} (seat 0) — {st.Seats[0].Stack}{(myTurn ? "  ◀ your turn" : "")}";
+        _topInfo.Text = (_botMode ? "Bot (opponent)" : "Seat 1") + $" — {st.Seats[1].Stack}";
+        // When the hand is OVER, show a BIG plain-language result so a non-poker player always knows what happened.
+        if (st.Complete) ShowResultBanner(st, mySeat: 0, opponentLabel: _botMode ? "the bot" : "Seat 1");
+        _msg.Text = st.Complete ? "Press \"Deal\" (or Practice deal) to play the next hand." : st.Message;
         var la = st.Complete ? null : st.Legal();
         _deal.IsEnabled = st.Complete;
         _fold.IsEnabled = la?.CanFold ?? false;

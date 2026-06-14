@@ -34,6 +34,7 @@ public sealed class WalletView : UserControl
     private sealed class SendRec { public string Txid { get; set; } = ""; public long Amount { get; set; } public long Fee { get; set; } public string To { get; set; } = ""; public string Time { get; set; } = ""; public string RawHex { get; set; } = ""; }
     private sealed class Contact { public string Handle { get; set; } = ""; public string IdentityPub { get; set; } = ""; public string Note { get; set; } = ""; public string DisplayName { get; set; } = ""; public string Email { get; set; } = ""; public bool Verified { get; set; } }
     private sealed class PayRequest { public string Address { get; set; } = ""; public long Amount { get; set; } public string Memo { get; set; } = ""; public string Time { get; set; } = ""; public string Expires { get; set; } = ""; }
+    private sealed class ChatGroupRec { public string Name { get; set; } = ""; public List<string> MemberPubs { get; set; } = new(); }   // a named broadcast-encryption group
     private sealed class File_
     {
         public string Seed { get; set; } = "";
@@ -44,6 +45,7 @@ public sealed class WalletView : UserControl
         public Dictionary<string, string> TxLabels { get; set; } = new();  // txid -> user label
         public Dictionary<string, string> AddrLabels { get; set; } = new();// address -> user label
         public List<Contact> Contacts { get; set; } = new();               // handle -> identity pubkey
+        public List<ChatGroupRec> Groups { get; set; } = new();            // named chat groups (broadcast-encryption members)
         public List<PayRequest> Requests { get; set; } = new();            // payment requests we issued
         public string Handle { get; set; } = "";                           // this wallet's own identity handle
         public List<string> SweptKeys { get; set; } = new();               // external private keys (hex) being swept in
@@ -93,13 +95,28 @@ public sealed class WalletView : UserControl
 
     /// <summary>This wallet's own identity handle (for naming the owner's bots: &lt;handle&gt;-Bot-NNN).</summary>
     public string MyHandle => _w.Handle;
+    /// <summary>The most recent on-chain hand tape (Blackjack or Hold'em-vs-bot) — handed to the Replay tab so any
+    /// hand the wallet plays can be stepped through move by move. Null until a hand has been played.</summary>
+    public BsvPoker.Core.Games.OnChainHandTape.Tape? LastTape { get; private set; }
+
+    /// <summary>The dealt cards + result of the most recent Blackjack hand, so the host can SHOW it on a real
+    /// screen (not just a status line). Set the instant the hand is dealt, before broadcasting completes.</summary>
+    public sealed record BlackjackResult(IReadOnlyList<Card> Player, int PlayerTotal, IReadOnlyList<Card> Dealer, int DealerTotal, string Verdict, bool YouWin, long Bet);
+    public BlackjackResult? LastBlackjack { get; private set; }
+    /// <summary>Raised the instant a Blackjack hand is dealt (cards known) so the UI can show the game immediately,
+    /// before the on-chain broadcast finishes.</summary>
+    public event Action<BlackjackResult>? OnBlackjackDealt;
 
     /// <summary>True once the seed is in memory and the wallet can derive keys (needed before the SPV filter is built).</summary>
     public bool IsUnlocked => !_locked;
     /// <summary>True when the wallet holds spendable confirmed coin — nothing (play / on-chain identity) happens until funded.</summary>
     public bool IsFunded => !_locked && Balance > 0;
-    /// <summary>True once the identity has been written on-chain (a confirmed NFT tx) — a draft is not an identity.</summary>
+    /// <summary>True once the identity has been written on-chain (a confirmed NFT tx). On-chain is an OPTIONAL
+    /// permanence upgrade — see <see cref="HasIdentity"/> for whether the player has set their identity at all.</summary>
     public bool HasOnChainIdentity => _w.Identity is { IsOnChain: true };
+    /// <summary>True once the player has SET their identity (a self-signed, fixed handle) — whether or not it has
+    /// also been made permanent on-chain. This is all that is required to PLAY (a game is played by identities).</summary>
+    public bool HasIdentity => _w.Identity is { Pseudonym.Length: > 0 };
     /// <summary>Raised the moment the wallet becomes usable (fresh, unlocked, or restored) so the node can load our SPV filter.</summary>
     public event Action? OnUnlocked;
 
@@ -126,6 +143,7 @@ public sealed class WalletView : UserControl
     private bool _freshWallet;                                      // true when Load() had to create a brand-new wallet
     private readonly TabControl _tabs = new() { Background = new SolidColorBrush(Color.FromRgb(0x12, 0x12, 0x12)), Foreground = Brushes.White, BorderThickness = new Thickness(0) };
     private TabItem? _identityTab;   // rebuilt on Render so registration status is never stale
+    private ContentControl? _idCard;
     private TabItem? _nftTab;        // rebuilt on Render so newly-minted/owned NFTs show without a restart
     private readonly TextBox _sendPayTo = new() { Width = 520, FontFamily = new FontFamily("Consolas"), AcceptsReturn = true, Height = 56, TextWrapping = TextWrapping.Wrap, ToolTip = "An address, an identity handle (@bob), an identity pubkey (hex), or a bitcoin:/pay: URI" };
     private readonly TextBox _sendLabel = new() { Width = 520 };
@@ -164,6 +182,14 @@ public sealed class WalletView : UserControl
     /// <summary>The opened wallet's identity (Base ID) — for the rest of the app to use instead of any profile key.</summary>
     public byte[] WalletIdentityPriv => _identityPriv;
     public byte[] WalletIdentityPub => _identityPub;
+
+    /// <summary>Raised when a chat message addressed to me is found ON-CHAIN during a history sync (this is how an
+    /// OFFLINE message is delivered when I come back online). Args: (senderPubHex, text). MainWindow forwards it
+    /// to the chat view. Deduped by txid so a re-sync never re-delivers.</summary>
+    public event Action<string, string>? OnChatReceived;
+    private readonly HashSet<string> _deliveredChat = new();   // "txid:vout" already surfaced to chat
+    private bool _historyBusy;     // re-entrancy guard: never let two history syncs overlap (they peg the CPU)
+    private bool _discoverBusy;    // re-entrancy guard for the SPV discover sync
     /// <summary>A receive address of this wallet (for the bot to refund to). Empty if locked.</summary>
     public string PublicReceiveAddress() => _seed.Length == 32 ? ReceiveAddress() : "";
 
@@ -564,7 +590,7 @@ public sealed class WalletView : UserControl
     /// <summary>Export my registered identity as a portable, self-signed certificate (JSON) others can verify.</summary>
     private void ExportIdentityCert()
     {
-        if (_w.Identity == null) { _status.Text = "Register your identity first."; RegisterDialog(); return; }
+        if (_w.Identity == null) { _status.Text = "Set up your identity first."; RegisterDialog(); return; }
         var json = JsonSerializer.Serialize(_w.Identity, new JsonSerializerOptions { WriteIndented = true });
         var box = new TextBox { Text = json, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, FontFamily = new FontFamily("Consolas"), Height = 220, Width = 520, Background = FieldBg, Foreground = Accent, BorderBrush = Line, BorderThickness = new Thickness(1) };
         var copy = new Button { Content = "Copy", Margin = new Thickness(0, 8, 0, 0), Padding = new Thickness(12, 6, 12, 6) };
@@ -611,7 +637,7 @@ public sealed class WalletView : UserControl
         var save = new Button { Content = "Save details", Margin = new Thickness(0, 12, 8, 0), Padding = new Thickness(16, 6, 16, 6), IsDefault = true };
         var sp = new StackPanel { Margin = new Thickness(16) };
         sp.Children.Add(new TextBlock { Text = "🔒 Your identity is permanent", FontSize = 18, FontWeight = FontWeights.Bold, Foreground = Ink });
-        sp.Children.Add(new TextBlock { Text = $"{id.DisplayName}  (@{id.Pseudonym})  ·  {id.Email}\nRegistered on-chain — this can NEVER be changed. You may update only the optional details below.", Foreground = SubInk, TextWrapping = TextWrapping.Wrap, MaxWidth = 340, Margin = new Thickness(0, 4, 0, 8) });
+        sp.Children.Add(new TextBlock { Text = $"{id.DisplayName}  (@{id.Pseudonym})  ·  {id.Email}\nSet on-chain — this can NEVER be changed. You may update only the optional details below.", Foreground = SubInk, TextWrapping = TextWrapping.Wrap, MaxWidth = 340, Margin = new Thickness(0, 4, 0, 8) });
         sp.Children.Add(new TextBlock { Text = "Country (optional)", Foreground = SubInk }); sp.Children.Add(country);
         sp.Children.Add(new TextBlock { Text = "Website (optional)", Foreground = SubInk, Margin = new Thickness(0, 6, 0, 0) }); sp.Children.Add(website);
         sp.Children.Add(new TextBlock { Text = "Bio (optional)", Foreground = SubInk, Margin = new Thickness(0, 6, 0, 0) }); sp.Children.Add(bio);
@@ -646,18 +672,18 @@ public sealed class WalletView : UserControl
         var bio = new TextBox { Width = 320, Height = 50, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap }; ThemeOne(bio);
         if (_w.Identity != null) { name.Text = _w.Identity.DisplayName; pseud.Text = _w.Identity.Pseudonym; email.Text = _w.Identity.Email; country.Text = _w.Identity.Country; website.Text = _w.Identity.Website; bio.Text = _w.Identity.Bio; }
         var note = new TextBlock { Foreground = SubInk, Margin = new Thickness(0, 6, 0, 0), TextWrapping = TextWrapping.Wrap, MaxWidth = 340 };
-        var ok = new Button { Content = "Register", Margin = new Thickness(0, 12, 8, 0), Padding = new Thickness(16, 6, 16, 6), IsEnabled = false };
+        var ok = new Button { Content = "Set up identity", Margin = new Thickness(0, 12, 8, 0), Padding = new Thickness(16, 6, 16, 6), IsEnabled = false };
         void Recheck()
         {
             bool nm = name.Text.Trim().Length > 0, ps = pseud.Text.Trim().Length > 0, em = ValidEmail(email.Text.Trim());
-            note.Text = !nm ? "Enter your display name." : !ps ? "Choose a pseudonym/handle." : !em ? "Enter a valid email (name@domain.tld)." : "Ready to register — this is signed by your identity key.";
+            note.Text = !nm ? "Enter your display name." : !ps ? "Choose a pseudonym/handle." : !em ? "Enter a valid email (name@domain.tld)." : "Ready — this is signed by your identity key.";
             note.Foreground = (nm && ps && em) ? Accent : Brushes.IndianRed;
             ok.IsEnabled = nm && ps && em;
         }
         name.TextChanged += (_, _) => Recheck(); pseud.TextChanged += (_, _) => Recheck(); email.TextChanged += (_, _) => Recheck();
         var sp = new StackPanel { Margin = new Thickness(16) };
-        sp.Children.Add(new TextBlock { Text = "Register your identity", FontSize = 18, FontWeight = FontWeights.Bold, Foreground = Ink });
-        sp.Children.Add(new TextBlock { Text = "This creates your identity — everything (payments, chat, contacts, your bots, the game) is bound to it. The details are self-signed by your identity key so the claim is verifiable. Nothing in the wallet works until you register.", Foreground = SubInk, TextWrapping = TextWrapping.Wrap, MaxWidth = 340, Margin = new Thickness(0, 4, 0, 8) });
+        sp.Children.Add(new TextBlock { Text = "Set up your identity", FontSize = 18, FontWeight = FontWeights.Bold, Foreground = Ink });
+        sp.Children.Add(new TextBlock { Text = "This creates your identity — everything (payments, chat, contacts, your bots, the game) is bound to it. The details are self-signed by your identity key so the claim is verifiable. Until your identity exists, this wallet can only receive funds.", Foreground = SubInk, TextWrapping = TextWrapping.Wrap, MaxWidth = 340, Margin = new Thickness(0, 4, 0, 8) });
         sp.Children.Add(new TextBlock { Text = "Display name *", Foreground = SubInk }); sp.Children.Add(name);
         sp.Children.Add(new TextBlock { Text = "Pseudonym / handle *", Foreground = SubInk, Margin = new Thickness(0, 6, 0, 0) }); sp.Children.Add(pseud);
         sp.Children.Add(new TextBlock { Text = "Email *", Foreground = SubInk, Margin = new Thickness(0, 6, 0, 0) }); sp.Children.Add(email);
@@ -666,7 +692,7 @@ public sealed class WalletView : UserControl
         sp.Children.Add(new TextBlock { Text = "Bio (optional)", Foreground = SubInk, Margin = new Thickness(0, 6, 0, 0) }); sp.Children.Add(bio);
         sp.Children.Add(note);
         sp.Children.Add(ok);
-        var win = new Window { Title = "Identity registration", Width = 400, Height = 620, WindowStartupLocation = WindowStartupLocation.CenterOwner, Owner = Window.GetWindow(this), Background = WinBg, Content = new ScrollViewer { Content = sp } };
+        var win = new Window { Title = "Set up your identity", Width = 400, Height = 620, WindowStartupLocation = WindowStartupLocation.CenterOwner, Owner = Window.GetWindow(this), Background = WinBg, Content = new ScrollViewer { Content = sp } };
         Recheck();
         ok.Click += async (_, _) =>
         {
@@ -681,7 +707,7 @@ public sealed class WalletView : UserControl
                     cur.Country = country.Text.Trim(); cur.Website = website.Text.Trim(); cur.Bio = bio.Text.Trim();
                     cur.Signature = WalletExtras.SignMessage(_identityPriv, cur.Canonical());
                     _w.Handle = cur.Pseudonym; Save(); Render();
-                    MessageBox.Show($"You are already registered ON-CHAIN as @{cur.Pseudonym} (tx {cur.OnChainTxid}). Your profile was updated — NO new transaction and NO fee. You can play now.", "Already registered");
+                    MessageBox.Show($"Your identity is already ON-CHAIN as @{cur.Pseudonym} (tx {cur.OnChainTxid}). Your profile was updated — NO new transaction and NO fee. You can play now.", "Identity already on-chain");
                     win.Close(); return;
                 }
                 var reg = new Registration
@@ -691,31 +717,83 @@ public sealed class WalletView : UserControl
                     IdentityPub = Convert.ToHexString(_identityPub).ToLowerInvariant(),
                     CreatedAt = DateTime.UtcNow.ToString("o"),
                 };
-                reg.Signature = WalletExtras.SignMessage(_identityPriv, reg.Canonical());   // self-signed identity certificate
-                // AN IDENTITY IS ONLY REAL ON-CHAIN: write it as a funded Bitcoin transaction (an NFT). Without
-                // funds there is no identity — we never persist an off-chain identity as if it were real.
+                reg.Signature = WalletExtras.SignMessage(_identityPriv, reg.Canonical());   // attestation over the claim
+
+                // YOUR IDENTITY IS A ONE-SAT ON-CHAIN TOKEN — ALWAYS. A token is ONE sat. ONE. Not two. The identity
+                // NFT output is 1 sat and there is NO extra fee on top of it (a token is not doubled). Everything in
+                // this wallet is on-chain; nothing is free; a draft that never broadcast is NOT an identity. So
+                // registration REQUIRES the wallet to hold the one sat. With no funds we do NOT fabricate a free local
+                // identity — fund a sat first (regtest self-funds). The identity exists only once the tx is on-chain.
+                const long idFee = 0;       // a token is ONE sat — the 1-sat NFT output IS the cost; never doubled
+                if (Balance < 1)
+                {
+                    MessageBox.Show("Your identity is a ONE-SAT on-chain token (1 sat — never two). Nothing here is free or off-chain. Add one satoshi to this wallet (Receive tab → Fund (regtest) on regtest), then set it up and it is written on-chain, permanent and immutable.", "Fund one sat — identity is on-chain");
+                    win.Close(); return;
+                }
                 var attPriv = Type42.UniqueKey(_seed, "bsvpoker/identity/attestation");
                 var idScript = OnChainIdentity.BuildScript(_identityPub, attPriv, reg.Pseudonym, reg.Email);
-                var (raw, status) = FundTx(idScript, 1, 500);
-                if (raw == null)
-                {
-                    MessageBox.Show("Your identity must be written on-chain (it is an NFT), which needs a funded wallet. " +
-                        "Fund this wallet first, then register.\n\n" + status, "Identity requires funding");
-                    return;   // NO off-chain identity is saved
-                }
+                var (raw, status) = FundTx(idScript, 1, idFee);
+                if (raw == null) { MessageBox.Show("Could not build the on-chain identity transaction: " + status, "Identity transaction failed"); win.Close(); return; }
                 var (bok, binfo) = await BroadcastEverywhere(raw);
-                if (!bok) { MessageBox.Show("Could not broadcast the identity transaction (no real tx = no identity): " + binfo, "Identity"); return; }
+                if (!bok)
+                {
+                    MessageBox.Show("The identity transaction could not be broadcast to the network: " + binfo + "\n\nNO identity was set — an identity only counts once it is on-chain. Try again.", "Not on-chain");
+                    win.Close(); return;
+                }
+                // ON-CHAIN CONFIRMED — only NOW does the identity exist.
                 reg.OnChainTxid = binfo.Length >= 64 ? binfo : Chain.Txid(Chain.Deserialize(raw));
                 _w.Identity = reg; _w.Handle = reg.Pseudonym;
-                AppendTx("identity", -(1 + 500), $"Identity NFT registered ON-CHAIN — tx {reg.OnChainTxid}");  // a REAL tx, in history
-                _w.NftMints[reg.OnChainTxid] = reg.OnChainTxid;                                                 // the identity NFT (its on-chain tx)
-                Save(); PersistIdentityToCache(); Render();   // registered FOREVER — cached by identity key, survives any re-login
-                MessageBox.Show($"Identity is now ON-CHAIN as @{reg.Pseudonym}.\n\nReal transaction (an NFT) broadcast:\n{reg.OnChainTxid}\n\nIt is in your History and NFTs now and confirms shortly.", "Identity registered on-chain");
+                _w.NftMints[reg.OnChainTxid] = reg.OnChainTxid;
+                AppendTx("identity", -1, $"Identity NFT set ON-CHAIN (1-sat token) — tx {reg.OnChainTxid}");
+                Save(); PersistIdentityToCache(); Render();
+                MessageBox.Show($"Identity set ON-CHAIN as @{reg.Pseudonym} (NFT tx {reg.OnChainTxid[..Math.Min(16, reg.OnChainTxid.Length)]}…). This is permanent and immutable. You can play now.", "Identity is on-chain");
                 win.Close();
             }
-            catch (Exception ex) { MessageBox.Show("Registration failed: " + ex.Message); }
+            catch (Exception ex) { MessageBox.Show("Could not set up identity: " + ex.Message); }
         };
         win.ShowDialog();
+    }
+
+    /// <summary>ONE-TIME ENROLLMENT, at JOIN. If this wallet has no identity, run the registration flow ONCE
+    /// (collect the handle, fund the 1-sat token, write it on-chain). Returns whether an identity now exists.
+    /// This is the ONLY place registration is ever offered — the first time you join a game, once, ever. Once
+    /// registered it is permanent and this never appears again.</summary>
+    public bool EnsureRegistered()
+    {
+        if (!Dispatcher.CheckAccess()) return (bool)Dispatcher.Invoke(new Func<bool>(EnsureRegistered));
+        if (HasIdentity) return true;                       // already registered — never ask again
+        if (_locked || _seed.Length != 32) { _status.Text = "Open your wallet to enroll."; return false; }
+        RegisterDialog();                                   // the one-time enrollment (modal): handle → fund 1 sat → on-chain
+        return HasIdentity;
+    }
+
+    /// <summary>REGTEST SELF-FUND: a brand-new wallet has no peers to receive from, so on the local regtest chain
+    /// it mines its OWN first coins — a real trivial-PoW block whose tx pays this wallet, verified by the same SPV
+    /// merkle-proof + PoW path as any mined coin (no fake/optimistic credit). The coin is then spendable to register
+    /// the identity ON-CHAIN. Regtest only — mainnet/testnet have real coins and never self-fund.</summary>
+    private void RegtestSelfFund()
+    {
+        if (_net().Network != BsvNetwork.Regtest) { MessageBox.Show("Self-fund is only for the local Regtest chain. On Testnet use a faucet; on Mainnet receive real coins.", "Regtest only"); return; }
+        if (_seed.Length != 32) { _status.Text = "Unlock your wallet first."; return; }
+        try
+        {
+            var recv = WalletKeys.Account(_seed, 0, 0).Pub;                 // the wallet's spend key at chain0/index0
+            var f = RegtestFunder.Fund(recv, 1_000_000, new byte[32]);      // mine a real regtest block paying us
+            var chain = new HeadersChain(); chain.AddGenesis(f.Header);
+            var utxo = SpvFunding.Verify(new SpvFunding.Proof(f.Tx, f.Vout, f.Header.HashHex(), f.Branch, f.TxIndex), chain, recv, 0, 0);
+            if (utxo == null) { MessageBox.Show("The regtest funding did not verify.", "Self-fund failed"); return; }
+            if (_w.Utxos.Any(u => u.Txid == utxo.Txid && u.Vout == utxo.Vout)) { _status.Text = "Already funded (regtest)."; return; }
+            // credit the REAL, SPV-proven coin (its raw funding tx saved so it can be spent to register on-chain)
+            _w.Utxos.Add(new UtxoRec
+            {
+                Txid = utxo.Txid, Vout = utxo.Vout, Value = utxo.Value, KeyChain = 0, KeyIndex = 0, Confirmed = true,
+                RawTxHex = Convert.ToHexString(Chain.Serialize(f.Tx)).ToLowerInvariant(),
+            });
+            AppendTx("received", utxo.Value, $"Regtest self-fund — {utxo.Value:N0} sat (mined block {f.Header.HashHex()[..12]}…)");
+            Save(); VaultBackup(); Render();
+            MessageBox.Show($"Regtest self-fund: {utxo.Value:N0} sat mined to your wallet (a real local-chain block). You can now set up your identity ON-CHAIN (Identity tab) and then play.", "Funded (regtest)");
+        }
+        catch (Exception ex) { MessageBox.Show("Self-fund failed: " + ex.Message, "Self-fund failed"); }
     }
 
     /// <summary>The wizard welcome/splash page — shown before any choice (we never skip a step).</summary>
@@ -771,7 +849,7 @@ public sealed class WalletView : UserControl
         w2.ShowDialog();
 
         Render();
-        _status.Text = "New wallet ready — keys encrypted. Back up your seed (Account → Show seed backup) and fund it, then register your identity.";
+        _status.Text = "New wallet ready — keys encrypted. Back up your seed (Account → Show seed backup) and fund it, then set up your identity.";
     }
 
     /// <summary>Live connection diagnostics: P2P peers + log, an ElectrumSVP reachability test, your current receive
@@ -826,19 +904,58 @@ public sealed class WalletView : UserControl
     /// account has its own seed, coins, and history; the identity (chat/game/NFT) stays the profile identity.</summary>
     /// <summary>STARTUP: a wallet is NEVER opened automatically (assuming a wallet = fraud). The user MUST pick:
     /// an existing wallet in this profile, open a wallet file, or create a new one. No selection = no program.</summary>
-    // STARTUP TRACE → %TEMP%\poker_startup.txt (so the exact launch sequence can be read without a screen).
-    private static void Trace(string s) { try { System.IO.File.AppendAllText(System.IO.Path.Combine(System.IO.Path.GetTempPath(), "poker_startup.txt"), $"{DateTime.Now:HH:mm:ss.fff}  {s}\n"); } catch { } }
 
     /// <summary>Show the "Select your wallet" dialog as the FIRST thing on screen and open the chosen wallet.
     /// MUST be called AFTER the main window is shown (from MainWindow.Loaded) so the modal ShowDialog() actually
     /// runs its message loop and blocks. Returns true if a wallet was selected (and Load() ran); false if the
     /// user cancelled selection (in which case the app shuts down).</summary>
+    /// <summary>The file that records the LAST FEW wallet paths the user opened (ElectrumSV-style MRU), so a
+    /// wallet opened from ANYWHERE (a USB key, a backup, another drive) stays in the selector — independent of
+    /// where its file lives. Stored next to the BsvPoker data root.</summary>
+    private string RecentWalletsPath()
+    {
+        try
+        {
+            var profilesRoot = Path.GetDirectoryName(_dataDir);
+            var bsvRoot = profilesRoot != null ? Path.GetDirectoryName(profilesRoot) : null;
+            var dir = bsvRoot ?? _dataDir;
+            return Path.Combine(dir, "recent-wallets.txt");
+        }
+        catch { return Path.Combine(_dataDir, "recent-wallets.txt"); }
+    }
+
+    private const int MaxRecentWallets = 5;
+
+    private List<string> LoadRecentWallets()
+    {
+        try { var p = RecentWalletsPath(); return File.Exists(p) ? File.ReadAllLines(p).Where(l => l.Trim().Length > 0).ToList() : new(); }
+        catch { return new(); }
+    }
+
+    /// <summary>Record <paramref name="path"/> as the most-recently-opened wallet, keeping the last 5 (newest
+    /// first, de-duplicated). This is what makes "the last five wallets I opened stay in the list" work.</summary>
+    private void RememberRecentWallet(string path)
+    {
+        try
+        {
+            var full = Path.GetFullPath(path);
+            var list = LoadRecentWallets().Where(p => !string.Equals(Path.GetFullPath(p), full, StringComparison.OrdinalIgnoreCase)).ToList();
+            list.Insert(0, full);
+            if (list.Count > MaxRecentWallets) list = list.Take(MaxRecentWallets).ToList();
+            File.WriteAllLines(RecentWalletsPath(), list);
+        }
+        catch { }
+    }
+
     public bool SelectWalletAtStartup()
     {
-        Trace("=== SelectWalletAtStartup ENTER ===");
         // List EVERY previously-used wallet across ALL profiles (never assume one). The user picks which one —
         // or opens any wallet file anywhere on the machine (a USB key, an external drive, a backup), or creates new.
         var existing = new System.Collections.Generic.List<string>();
+        // FIRST: the last 5 wallets the user actually opened (ElectrumSV-style MRU), from ANY location, so a wallet
+        // opened from a USB key/backup STAYS in the list. These come before the directory scan and in recency order.
+        var recent = LoadRecentWallets().Where(File.Exists).ToList();
+        existing.AddRange(recent);
         try
         {
             var profilesRoot = Path.GetDirectoryName(_dataDir);               // ...\BsvPoker\profiles
@@ -872,7 +989,16 @@ public sealed class WalletView : UserControl
             }
             catch { return false; }
         }
-        existing = existing.Distinct().Where(IsReal).OrderBy(f => f).ToList();
+        // Keep RECENT wallets always (the user explicitly opened them — never hide them, even if brand-new with
+        // no handle/coins yet); for the rest, show only REAL ones. Preserve order: recents first (recency order),
+        // then the remaining real wallets alphabetically. De-dup by full path.
+        var recentFull = new HashSet<string>(recent.Select(p => { try { return Path.GetFullPath(p); } catch { return p; } }), StringComparer.OrdinalIgnoreCase);
+        var ordered = new List<string>();
+        var seenPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void AddOnce(string f) { string k; try { k = Path.GetFullPath(f); } catch { k = f; } if (seenPaths.Add(k)) ordered.Add(f); }
+        foreach (var f in recent) AddOnce(f);                                   // recents first, in recency order
+        foreach (var f in existing.Where(f => { try { return !recentFull.Contains(Path.GetFullPath(f)); } catch { return true; } }).Where(IsReal).OrderBy(f => f)) AddOnce(f);
+        existing = ordered;
         // ALWAYS show the selection FIRST — the principal's rule: "the first thing I do is select my wallet, then
         // I log in." A wallet is NEVER opened automatically (even when only one exists); an immediate password
         // prompt for an existing wallet is a failure. The user SELECTS here, and only the SELECTED wallet is then
@@ -887,11 +1013,17 @@ public sealed class WalletView : UserControl
         // the selector to the FRONT so a 2nd/3rd instance is never lost behind the first.
         win.Loaded += (_, _) => { try { win.Activate(); win.Topmost = true; win.Topmost = false; win.Focus(); } catch { } };
         Button Row(string label, Action act) { var b = new Button { Content = label, Margin = new Thickness(0, 3, 0, 3), Padding = new Thickness(12, 8, 12, 8), HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Left }; b.Click += (_, _) => act(); return b; }
-        foreach (var f in existing)
+        if (existing.Count > 0)
         {
-            var label = $"📂  {Path.GetFileName(Path.GetDirectoryName(f))}\\{Path.GetFileName(f)}";
-            var fc = f;
-            sp.Children.Add(Row(label, () => { chosen = fc; win.DialogResult = true; }));
+            var recentSet = new HashSet<string>(recent.Select(p => { try { return Path.GetFullPath(p); } catch { return p; } }), StringComparer.OrdinalIgnoreCase);
+            foreach (var f in existing)
+            {
+                string full; try { full = Path.GetFullPath(f); } catch { full = f; }
+                bool isRecent = recentSet.Contains(full);
+                var label = $"{(isRecent ? "🕘" : "📂")}  {Path.GetFileName(Path.GetDirectoryName(f))}\\{Path.GetFileName(f)}";
+                var fc = f;
+                sp.Children.Add(Row(label, () => { chosen = fc; win.DialogResult = true; }));
+            }
         }
         sp.Children.Add(Row("📂  Open a wallet file…", () =>
         {
@@ -904,9 +1036,7 @@ public sealed class WalletView : UserControl
             if (dlg.ShowDialog() == true) { chosen = dlg.FileName; win.DialogResult = true; }
         }));
         win.Content = new ScrollViewer { Content = sp };
-        Trace($"SELECT dialog SHOWING now ({existing.Count} wallets listed) — this is the FIRST window");
         var ok = win.ShowDialog();
-        Trace($"SELECT dialog closed: ok={ok} chosen={(chosen == null ? "(none)" : Path.GetFileName(chosen))}");
         if (ok != true || chosen == null)
         {
             _locked = true; _seed = Array.Empty<byte>(); _path = AccountPath(0);   // nothing opened
@@ -914,6 +1044,7 @@ public sealed class WalletView : UserControl
             return false;
         }
         _path = chosen;
+        RememberRecentWallet(chosen);   // keep it in the last-5 list so it ALWAYS reappears next time (any location)
         Load();   // opens (or, if the chosen file is new, creates) the SELECTED wallet — never a default
         // re-seal the card vault to the OPENED wallet's identity (NFTs belong to the wallet you opened, not a profile)
         if (_seed.Length == 32) _vault = new CardVault(_dataDir, _identityPriv, _identityPub);
@@ -1124,6 +1255,11 @@ public sealed class WalletView : UserControl
         var copyAddr = Btn("Copy address"); copyAddr.Click += (_, _) => { if (Guard()) CopyToClipboard(ReceiveAddress(), "Address copied."); };
         var newAddr = Btn("New address"); newAddr.Click += (_, _) => { if (Guard()) { _w.RecvIndex++; Save(); Render(); } };
         addrBtns.Children.Add(copyAddr); addrBtns.Children.Add(newAddr);
+        // REGTEST self-fund: a brand-new empty wallet has no peers to receive from, so on the local regtest chain it
+        // mines its own first coins (real trivial-PoW block + SPV proof). This is how a new player goes
+        // fund → register identity on-chain → play without an external faucet. Regtest only.
+        var fundRt = Btn("Fund (regtest)"); fundRt.Click += (_, _) => { if (Guard()) RegtestSelfFund(); };
+        addrBtns.Children.Add(fundRt);
         addrPanel.Children.Add(addrBtns);
         FormRow(form, r++, "Receiving destination", addrPanel);
         FormRow(form, r++, "Requested amount", _reqAmount);
@@ -1369,7 +1505,7 @@ public sealed class WalletView : UserControl
                 if (!long.TryParse(amt.Text.Trim(), out var value) || value <= 0) { MessageBox.Show("Bad amount."); return; }
                 var node = _node(); if (node == null || node.PeerCount == 0) { MessageBox.Show("No BSV peers."); return; }
                 var redeem = Convert.FromHexString(v.RedeemHex);
-                var (raw, status) = FundTx(Chain.P2shLock(redeem), value, 600);
+                var (raw, status) = FundTx(Chain.P2shLock(redeem), value, 1);   // tiny 1-sat fee, not 600
                 if (raw == null) { MessageBox.Show(status); return; }
                 node.Broadcast(raw);
                 var tx = Chain.Deserialize(raw);
@@ -1536,6 +1672,35 @@ public sealed class WalletView : UserControl
         win.ShowDialog();
     }
 
+    /// <summary>The identity status card — FRESH controls only (no reused member controls), so it can be rebuilt on
+    /// every Render without re-parenting anything. Shows ONLY the identity (if stored) or, if none, that the wallet
+    /// can only receive funds. The word "registration"/"register" is BANNED here in EVERY state.</summary>
+    private UIElement BuildIdentityCard()
+    {
+        var regBox = new Border { Background = PanelBg, BorderBrush = Line, BorderThickness = new Thickness(1), Padding = new Thickness(10), Margin = new Thickness(0, 8, 0, 8), CornerRadius = new CornerRadius(4) };
+        var regSp = new StackPanel();
+        if (_w.Identity is { } id && id.Pseudonym.Length > 0)
+        {
+            var idHex = _identityPub.Length == 33 ? Convert.ToHexString(_identityPub).ToLowerInvariant() : "";
+            regSp.Children.Add(new TextBlock { Text = $"Your identity: {id.DisplayName}  (@{id.Pseudonym})", Foreground = Accent, FontWeight = FontWeights.Bold });
+            regSp.Children.Add(new TextBlock { Text = $"Email: {id.Email}" + (id.Country.Length > 0 ? $"   Country: {id.Country}" : ""), Foreground = SubInk });
+            if (id.Website.Length > 0) regSp.Children.Add(new TextBlock { Text = $"Website: {id.Website}", Foreground = SubInk });
+            if (id.Bio.Length > 0) regSp.Children.Add(new TextBlock { Text = $"Bio: {id.Bio}", Foreground = SubInk, TextWrapping = TextWrapping.Wrap, MaxWidth = 560 });
+            regSp.Children.Add(new TextBlock { Text = $"Identity key (share this so people can pay/message you): {idHex}", Foreground = SubInk, TextWrapping = TextWrapping.Wrap, MaxWidth = 560, Margin = new Thickness(0, 4, 0, 0) });
+            var share = Btn("Copy my identity (@handle + key)"); share.Click += (_, _) => CopyToClipboard($"@{id.Pseudonym} {idHex}", "Identity copied — share it with other players.");
+            var edit = Btn("Edit profile (country / website / bio)…"); edit.Click += (_, _) => EditOptionalDetails();
+            var row = new WrapPanel(); row.Children.Add(share); row.Children.Add(edit);
+            regSp.Children.Add(row);
+        }
+        else
+        {
+            regSp.Children.Add(new TextBlock { Text = "No identity on this wallet yet.", Foreground = SubInk, FontWeight = FontWeights.Bold, TextWrapping = TextWrapping.Wrap, MaxWidth = 560 });
+            regSp.Children.Add(new TextBlock { Text = "Until your identity exists, this wallet can only RECEIVE funds (Receive tab). Your identity is set up automatically the first time you join a game.", Foreground = SubInk, TextWrapping = TextWrapping.Wrap, MaxWidth = 560, Margin = new Thickness(0, 2, 0, 6) });
+        }
+        regBox.Child = regSp;
+        return regBox;
+    }
+
     // ---- IDENTITY: your Base ID key (login/handle), master public key, what it is ----
     private UIElement BuildIdentityTab()
     {
@@ -1543,43 +1708,11 @@ public sealed class WalletView : UserControl
         sp.Children.Add(H("Your identity (Base ID key)"));
         sp.Children.Add(new TextBlock { Text = "Your Base ID key is your identity — like an NFT you own. It is NEVER used as an address; it only derives one-time ECDH sub-keys (Type-42), all linked in an HMAC hash chain. Give others your handle or identity public key so they can pay and message you.", Foreground = Brushes.Gainsboro, TextWrapping = TextWrapping.Wrap, MaxWidth = 620, HorizontalAlignment = HorizontalAlignment.Left });
 
-        // Registration card — the self-signed identity certificate (everything is bound to this).
-        var regBox = new Border { Background = PanelBg, BorderBrush = Line, BorderThickness = new Thickness(1), Padding = new Thickness(10), Margin = new Thickness(0, 8, 0, 8), CornerRadius = new CornerRadius(4) };
-        var regSp = new StackPanel();
-        if (_w.Identity is { } id)
-        {
-            bool valid = false; try { valid = WalletExtras.VerifyMessage(_identityPub, id.Canonical(), id.Signature); } catch { }
-            regSp.Children.Add(new TextBlock { Text = $"Registered: {id.DisplayName}  (@{id.Pseudonym})", Foreground = Ink, FontWeight = FontWeights.Bold });
-            regSp.Children.Add(new TextBlock { Text = $"Email: {id.Email}" + (id.Country.Length > 0 ? $"   Country: {id.Country}" : ""), Foreground = SubInk });
-            if (id.Website.Length > 0) regSp.Children.Add(new TextBlock { Text = $"Website: {id.Website}", Foreground = SubInk });
-            if (id.Bio.Length > 0) regSp.Children.Add(new TextBlock { Text = $"Bio: {id.Bio}", Foreground = SubInk, TextWrapping = TextWrapping.Wrap, MaxWidth = 560 });
-            regSp.Children.Add(new TextBlock { Text = $"Registered at: {id.CreatedAt}", Foreground = SubInk });
-            regSp.Children.Add(new TextBlock { Text = valid ? "✔ Identity certificate signature VALID (self-signed by your key)" : "✖ certificate signature INVALID", Foreground = valid ? Accent : Brushes.IndianRed, Margin = new Thickness(0, 4, 0, 0) });
-            if (id.IsOnChain)
-            {
-                regSp.Children.Add(new TextBlock { Text = "🔒 PERMANENT — your identity is registered ON-CHAIN. Your name and @handle are who you are and can NEVER be changed or re-registered. Only the optional details may be edited.", Foreground = SubInk, TextWrapping = TextWrapping.Wrap, MaxWidth = 560, Margin = new Thickness(0, 4, 0, 0) });
-                var edit = Btn("Edit optional details (country / website / bio)…"); edit.Click += (_, _) => EditOptionalDetails();
-                regSp.Children.Add(edit);
-            }
-            else
-            {
-                var edit = Btn("Complete registration…"); edit.Click += (_, _) => RegisterDialog();
-                regSp.Children.Add(edit);
-            }
-        }
-        else if (_locked || _seed.Length != 32)
-        {
-            // The wallet is NOT loaded yet (locked / no seed). We do NOT know the identity, so we must NEVER claim
-            // "not registered" here — that false message is exactly what made a registered wallet look unregistered.
-            regSp.Children.Add(new TextBlock { Text = "🔒 Unlock your wallet to view your identity.", Foreground = SubInk, TextWrapping = TextWrapping.Wrap });
-        }
-        else
-        {
-            regSp.Children.Add(new TextBlock { Text = "NOT REGISTERED — this wallet has no on-chain identity yet. Register to create it (one-time, permanent).", Foreground = Brushes.IndianRed, FontWeight = FontWeights.Bold, TextWrapping = TextWrapping.Wrap });
-            var reg = Btn("Register your identity…"); reg.Background = new SolidColorBrush(Color.FromRgb(0x2E, 0x7D, 0x32)); reg.Foreground = Brushes.White; reg.Click += (_, _) => RegisterDialog();
-            regSp.Children.Add(reg);
-        }
-        regBox.Child = regSp; sp.Children.Add(regBox);
+        // The identity card lives in its OWN refreshable holder built from FRESH controls only (no reused member
+        // controls), so Render can update it every time WITHOUT the "already the logical child of another element"
+        // crash that previously left the whole tab frozen on its first (no-identity) build.
+        _idCard = new ContentControl { Content = BuildIdentityCard() };
+        sp.Children.Add(_idCard);
 
         sp.Children.Add(Lbl("Handle (your name, e.g. bob)"));
         var hrow = new WrapPanel();
@@ -1948,6 +2081,10 @@ public sealed class WalletView : UserControl
     public async System.Threading.Tasks.Task SpvServerDiscoverAsync()
     {
         if (_locked || _seed.Length != 32) return;
+        if (_discoverBusy) return;                // never overlap two discover syncs (CPU + server hammering)
+        _discoverBusy = true;
+        try
+        {
         using var cli = new ElectrumSvpClient();
         if (!await cli.ConnectAnyAsync(ElectrumSvpClient.ServersFor(_net().Network))) return;
         uint gap = Math.Min(Math.Max((uint)_w.RecvIndex + 30, 60), 120);   // bounded so it stays well under 15s
@@ -2034,6 +2171,8 @@ public sealed class WalletView : UserControl
         // unspent set across every address we queried.) serverUnspent/onChainUnspent retained for clarity.
         _ = serverUnspent; _ = queriedScriptHex; _ = onChainUnspent;
         if (changed) await Dispatcher.InvokeAsync(() => { Save(); Render(); });
+        }
+        finally { _discoverBusy = false; }
     }
 
     /// <summary>FULL transaction history, ElectrumSVP-style: ask the SPV servers for EVERY transaction that ever
@@ -2044,6 +2183,10 @@ public sealed class WalletView : UserControl
     public async System.Threading.Tasks.Task FetchServerHistoryAsync()
     {
         if (_locked || _seed.Length != 32) return;
+        if (_historyBusy) return;                 // a previous sync is still running — do NOT stack (CPU killer)
+        _historyBusy = true;
+        try
+        {
         using var cli = new ElectrumSvpClient();
         if (!await cli.ConnectAnyAsync(ElectrumSvpClient.ServersFor(_net().Network))) return;
         uint gap = Math.Min(Math.Max((uint)_w.RecvIndex + 30, 60), 120);
@@ -2051,6 +2194,10 @@ public sealed class WalletView : UserControl
         var scripts = new System.Collections.Generic.List<byte[]>();
         for (uint c = 0; c <= 1; c++) for (uint i = 0; i <= gap; i++) { var s = Core.Chain.P2pkhLockForPub(WalletKeys.Account(_seed, c, i).Pub); scripts.Add(s); ourScriptHex.Add(Convert.ToHexString(s)); }
         foreach (var addr in _w.WatchAddresses) { try { var p = Base58.CheckDecode(addr); if (p.Length == 21) { var s = Core.Chain.P2pkhLock(p[1..]); scripts.Add(s); ourScriptHex.Add(Convert.ToHexString(s)); } } catch { } }
+        // SUBSCRIBE TO MY IDENTITY ADDRESS: chat/group messages pay a 1-sat discovery output to the recipient's
+        // identity address (a fixed scripthash) — so messages sent while I was OFFLINE are found here on sync.
+        byte[]? idScript = null;
+        if (_identityPub.Length == 33) { idScript = Core.Chain.P2pkhLockForPub(_identityPub); scripts.Add(idScript); ourScriptHex.Add(Convert.ToHexString(idScript)); }
         // 1) collect EVERY txid touching any of our addresses (with its height)
         var heights = new System.Collections.Generic.Dictionary<string, int>();
         foreach (var s in scripts)
@@ -2077,7 +2224,31 @@ public sealed class WalletView : UserControl
             rows.Add(new Tx { Height = h, Time = h > 0 ? "on-chain" : "mempool", Type = (recv - sent) >= 0 ? "received" : "sent",
                 Amount = recv - sent, Memo = txid + (_w.TxLabels.TryGetValue(txid, out var lb) ? "  — " + lb : "") });
         }
+        // STORE-AND-FORWARD DELIVERY: scan every fetched tx for a chat/group message addressed to MY identity and
+        // surface it to the chat. Deduped by txid so re-syncs never re-deliver. This is how an offline message
+        // arrives when I come back online — the message has been sitting on-chain the whole time.
+        if (_identityPub.Length == 33 && _identityPriv.Length == 32 && OnChatReceived != null)
+        {
+            foreach (var (txid, tx) in txCache)
+            {
+                if (!_deliveredChat.Add(txid)) continue;                                  // already surfaced
+                try
+                {
+                    var dm = OnChainChat.TryReadTx(tx, _identityPriv, _identityPub);
+                    if (dm != null && !dm.SenderPub.AsSpan().SequenceEqual(_identityPub))
+                    { var s = Convert.ToHexString(dm.SenderPub).ToLowerInvariant(); var t = dm.Text;
+                      await Dispatcher.InvokeAsync(() => OnChatReceived?.Invoke(s, t)); continue; }
+                    var gm = OnChainChat.TryReadGroupTx(tx, _identityPriv, _identityPub);
+                    if (gm != null && !gm.SenderPub.AsSpan().SequenceEqual(_identityPub))
+                    { var s = Convert.ToHexString(gm.SenderPub).ToLowerInvariant(); var t = "[group] " + gm.Text;
+                      await Dispatcher.InvokeAsync(() => OnChatReceived?.Invoke(s, t)); continue; }
+                }
+                catch { }
+            }
+        }
         await Dispatcher.InvokeAsync(() => { _w.History = rows; Save(); ApplyHistoryFilter(); });
+        }
+        finally { _historyBusy = false; }
     }
 
     /// <summary>
@@ -2149,7 +2320,9 @@ public sealed class WalletView : UserControl
     /// sats, advancing wallet state, and return the signed raw transaction to push IP-to-IP + to miners.
     /// Everything the app sends between machines goes through a real funded Bitcoin transaction like this.
     /// </summary>
-    public (byte[]? Raw, string Status) FundTx(byte[] outputScript, long value = 1000, long fee = 500)
+    // Default fee is 1 sat — the everything-on-chain rule (tiny ~1-sat per-tx fees), NOT a fixed 500. Callers
+    // that want a size-based fee pass EstimateFee(...); callers that omit it get the minimal 1-sat fee.
+    public (byte[]? Raw, string Status) FundTx(byte[] outputScript, long value = 1000, long fee = 1)
     {
         if (_locked) return (null, "🔒 Unlock the wallet first.");
         var w = new OnChainWallet(_seed);
@@ -2189,6 +2362,87 @@ public sealed class WalletView : UserControl
         catch (Exception ex) { return (null, ex.Message); }
     }
 
+    /// <summary>
+    /// Fund a CHAT message so it is RETRIEVABLE OFFLINE (store-and-forward). The tx carries the encrypted data
+    /// output PLUS a tiny 1-sat "discovery" output to EACH recipient's identity address — a fixed, indexable
+    /// scripthash. Because the message is broadcast to miners (on-chain, permanent) and lands on each recipient's
+    /// identity address, a recipient who was OFFLINE finds it in their SPV history on next sync and decrypts it.
+    /// </summary>
+    public (byte[]? Raw, string Status) FundChatTx(byte[] dataScript, IReadOnlyList<byte[]> recipientPubs, long fee = 1)
+    {
+        if (_locked) return (null, "🔒 Unlock the wallet first.");
+        var w = new OnChainWallet(_seed);
+        foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.DoubleSpent && !u.WatchOnly && IsRealCoin(u))) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
+        var outs = new List<(byte[] Script, long Value)> { (dataScript, 1) };
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var rp in recipientPubs)
+            try { if (rp != null && rp.Length == 33 && seen.Add(Convert.ToHexString(rp))) outs.Add((Chain.P2pkhLockForPub(rp), 1)); } catch { }
+        long need = outs.Sum(o => o.Value) + fee;
+        if (w.Balance < need) return (null, $"Insufficient SPENDABLE sats: have {w.Balance:N0}, need {need:N0}.");
+        try
+        {
+            var spend = w.BuildActionMany(outs, fee);
+            foreach (var inp in spend.Inputs)
+                foreach (var u in _w.Utxos.Where(u => u.Txid == inp.Txid && u.Vout == inp.Vout)) u.Spent = true;
+            if (spend.Change > 0)
+            {
+                uint cvout = (uint)(spend.Tx.Outs.Count - 1);
+                var ctxid = Chain.Txid(spend.Tx);
+                if (!_w.Utxos.Any(u => u.Txid == ctxid && u.Vout == cvout))
+                    _w.Utxos.Add(new UtxoRec { Txid = ctxid, Vout = cvout, Value = spend.Change, KeyChain = 1, KeyIndex = 0,
+                        Confirmed = false, RawTxHex = Convert.ToHexString(Chain.Serialize(spend.Tx)).ToLowerInvariant() });
+            }
+            AppendTx("message", -need, $"on-chain message {Chain.Txid(spend.Tx)[..12]}…");
+            Save(); Render();
+            return (Chain.Serialize(spend.Tx), "");
+        }
+        catch (Exception ex) { return (null, ex.Message); }
+    }
+
+    /// <summary>
+    /// Publish THIS node's seed to the on-chain NODE-SEED REGISTRY (the well-known address): build a real tx that
+    /// pays 1 sat to the registry address (so the record is discoverable by scanning that address) AND carries a
+    /// typed PUSHDATA record output {nodePub, endpoint, timestamp, ttl} (no OP_RETURN). Returns the raw tx to
+    /// broadcast, or null + a reason. The node re-publishes periodically (before its ttl) to stay listed.
+    /// </summary>
+    public (byte[]? Raw, string Status) BuildNodeSeedPublish(byte[] nodePub33, string endpoint, int ttlSeconds, long fee = 1)
+    {
+        if (_locked) return (null, "🔒 Unlock the wallet first.");
+        var w = new OnChainWallet(_seed);
+        foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.DoubleSpent && !u.WatchOnly && IsRealCoin(u))) w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
+        byte[] recordOut, registryOut;
+        try
+        {
+            recordOut = NodeSeedRegistry.BuildRecordOutput(nodePub33, endpoint, ttlSeconds);
+            registryOut = NodeSeedRegistry.RegistryMarkerLock(NodeSeedRegistry.RegistryAddressMainnet);
+        }
+        catch (Exception ex) { return (null, "bad node-seed record: " + ex.Message); }
+        var outs = new List<(byte[] Script, long Value)>
+        {
+            (registryOut, NodeSeedRegistry.RegistryMarkerSats),   // 1-sat marker to the registry address (discoverable)
+            (recordOut, 1),                                       // the typed record output (the data), 1 sat
+        };
+        long need = outs.Sum(o => o.Value) + fee;
+        if (w.Balance < need) return (null, $"Insufficient SPENDABLE sats to publish node seed: have {w.Balance:N0}, need {need:N0}.");
+        try
+        {
+            var spend = w.BuildActionMany(outs, fee);
+            foreach (var inp in spend.Inputs)
+                foreach (var u in _w.Utxos.Where(u => u.Txid == inp.Txid && u.Vout == inp.Vout)) u.Spent = true;
+            if (spend.Change > 0)
+            {
+                uint cvout = (uint)(spend.Tx.Outs.Count - 1);
+                var ctxid = Chain.Txid(spend.Tx);
+                if (!_w.Utxos.Any(u => u.Txid == ctxid && u.Vout == cvout))
+                    _w.Utxos.Add(new UtxoRec { Txid = ctxid, Vout = cvout, Value = spend.Change, KeyChain = 1, KeyIndex = 0,
+                        Confirmed = false, RawTxHex = Convert.ToHexString(Chain.Serialize(spend.Tx)).ToLowerInvariant() });
+            }
+            Save();
+            return (Chain.Serialize(spend.Tx), "");
+        }
+        catch (Exception ex) { return (null, ex.Message); }
+    }
+
     /// <summary>ONE-CLICK bot funding from THIS wallet: build, sign and broadcast a real on-chain payment of
     /// <paramref name="amountSat"/> to the bot's address, and return the funding transaction so the caller credits
     /// the bot from it immediately (no SPV-envelope cut-and-paste). The funds are real and on-chain; the bot
@@ -2220,17 +2474,113 @@ public sealed class WalletView : UserControl
             w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
         long need = bet * 2 + 2000;   // pot (both stakes) + ~15 step txs at ~1-sat fees + buffer
         if (w.Balance < need) return $"Need ≥ {need:N0} sat spendable to play Blackjack on-chain (have {w.Balance:N0}). Fund your wallet first.";
-        var player = WalletKeys.Account(_seed, 0, 0);
-        var dealer = WalletKeys.Account(_seed, 7, 0);   // the dealer/house key, derived from your seed
+        // PLAYER = your IDENTITY key, so the dealt cards are sealed to your identity and show up as NFTs you can
+        // open in the wallet (the vault is sealed to your identity). The dealer/house key is derived from your seed.
+        var dealer = WalletKeys.Account(_seed, 7, 0);
         var deck = MentalPoker.ShuffledFrom(new[] { MentalPoker.FreshEntropy(), MentalPoker.FreshEntropy() }, Variants.CardSet(Variant.TexasHoldem));
+
+        // REPLAY the SAME deal the on-chain tape plays (engine + hit-below-17 policy) so we have the CONCRETE
+        // dealt hands. A result is NEVER announced on a default/empty state — it is the outcome of THESE cards.
+        var g = BsvPoker.Core.Games.Blackjack.Create(deck, bet);
+        while (!g.PlayerDone && g.Outcome == BsvPoker.Core.Games.BjOutcome.InPlay)
+        {
+            if (BsvPoker.Core.Games.Blackjack.Value(g.Player).Total < 17) g.Act(BsvPoker.Core.Games.BjAction.Hit);
+            else g.Act(BsvPoker.Core.Games.BjAction.Stand);
+        }
+        var myCards = g.Player.ToList();          // the cards actually dealt to / drawn by YOU
+        var dealerCards = g.Dealer.ToList();      // the dealer's played-out hand
+        string CardsStr(IEnumerable<BsvPoker.Core.Card> cc) => string.Join(" ", cc.Select(CardLabel));
+
         BsvPoker.Core.Games.OnChainHandTape.Tape tape;
-        try { tape = BsvPoker.Core.Games.OnChainHandTape.BuildBlackjack(w, (player.Priv, player.Pub), (dealer.Priv, dealer.Pub), deck, bet, new byte[16], stepValue: 1, fee: 1); }
+        try { tape = BsvPoker.Core.Games.OnChainHandTape.BuildBlackjack(w, (_identityPriv, _identityPub), (dealer.Priv, dealer.Pub), deck, bet, new byte[16], stepValue: 1, fee: 1); }
         catch (Exception ex) { return "Could not build the Blackjack hand: " + ex.Message; }
+
+        // RESULT KNOWN — surface it for a real on-screen Blackjack display IMMEDIATELY (before broadcasting), so the
+        // player SEES the game (their cards, the dealer's cards, the outcome), never "money vanished, no game".
+        {
+            int pT = BsvPoker.Core.Games.Blackjack.Value(myCards).Total, dT = BsvPoker.Core.Games.Blackjack.Value(dealerCards).Total;
+            bool youWinNow = tape.WinnerSeat == 0 && !tape.Split;
+            string verdictNow = tape.Split ? "PUSH (stakes returned)" : youWinNow ? "YOU WIN" : "dealer wins";
+            LastBlackjack = new BlackjackResult(myCards, pT, dealerCards, dT, verdictNow, youWinNow, bet);
+            var bj = LastBlackjack;
+            try { await Dispatcher.InvokeAsync(() => OnBlackjackDealt?.Invoke(bj)); } catch { }
+        }
+
+        // SURFACE THE DEALT HAND FIRST — your cards become encrypted NFTs sealed to your identity (NFTs tab) and
+        // the played-out hand is shown — BEFORE any winner is announced. No silent auto-resolve before you see cards.
+        try
+        {
+            foreach (var c in myCards)
+                _vault.AddSealed(CardNft.SealToPub(c.Index, System.Security.Cryptography.RandomNumberGenerator.GetBytes(32), _identityPub));
+            await Dispatcher.InvokeAsync(() => { RefreshCards(); Render(); Notify($"Blackjack dealt — your hand: {CardsStr(myCards)} ({BsvPoker.Core.Games.Blackjack.Value(myCards).Total}) vs dealer {CardsStr(dealerCards)} ({BsvPoker.Core.Games.Blackjack.Value(dealerCards).Total}). Playing the hand on-chain…"); });
+        }
+        catch { }
+
+        LastTape = tape;   // make this on-chain hand replayable in the Replay tab
+
+        int sent = 0;
+        foreach (var step in tape.Steps) { try { var (ok, _) = await BroadcastEverywhere(Chain.Serialize(step.Tx)); if (ok) sent++; } catch { } }
+
+        _ = SpvServerDiscoverAsync();   // re-sync the balance from the chain (authoritative)
+        // NOW the hand has been dealt, shown, and played out on-chain — report the result of THOSE cards.
+        bool youWin = tape.WinnerSeat == 0 && !tape.Split;
+        string verdict = tape.Split ? "PUSH (stakes returned)" : youWin ? "YOU WIN" : "dealer wins";
+        await Dispatcher.InvokeAsync(() => { Render(); Notify($"On-chain Blackjack result — your {CardsStr(myCards)} ({BsvPoker.Core.Games.Blackjack.Value(myCards).Total}) vs dealer {CardsStr(dealerCards)} ({BsvPoker.Core.Games.Blackjack.Value(dealerCards).Total}): {verdict}. {tape.Steps.Count} txs, pot {tape.Pot:N0} sat."); });
+        return $"On-chain Blackjack: {tape.Steps.Count} transactions broadcast ({sent} accepted), every move on-chain, your cards minted as NFTs.\nYour hand {CardsStr(myCards)} ({BsvPoker.Core.Games.Blackjack.Value(myCards).Total}) vs dealer {CardsStr(dealerCards)} ({BsvPoker.Core.Games.Blackjack.Value(dealerCards).Total}) → {verdict}. Pot {tape.Pot:N0} sat.";
+    }
+
+    /// <summary>
+    /// Play a heads-up Texas Hold'em hand vs YOUR BOT entirely ON-CHAIN — no off-chain deck or messaging of any
+    /// kind. Builds the full <see cref="OnChainHandTape"/> (table/game/hand genesis, the funded 2-of-2 pot, the
+    /// mental-poker shuffle, every card dealt, every board street, every bet, the showdown reveals, and the real
+    /// settlement) and BROADCASTS every step. The bot is the second seat (its key derived from your seed, like the
+    /// Blackjack dealer). Returns the tape so the UI can REPLAY it move-by-move, plus a plain win/loss result.
+    /// </summary>
+    public async System.Threading.Tasks.Task<(string Message, BsvPoker.Core.Games.OnChainHandTape.Tape? Tape, bool YouWon)> RunOnChainHoldemVsBot(long pot)
+    {
+        if (_locked || _seed.Length != 32) return ("Unlock your wallet first.", null, false);
+        if (pot <= 0) pot = 20_000;
+        var w = new OnChainWallet(_seed);
+        foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.DoubleSpent && !u.WatchOnly && IsRealCoin(u)))
+            w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
+        long need = pot + 4000;   // the pot + ~20 step txs at ~1-sat fees + buffer
+        if (w.Balance < need) return ($"Need ≥ {need:N0} sat spendable to play your bot ON-CHAIN (have {w.Balance:N0}). Fund your wallet first — all bot play is on-chain, no off-chain anything.", null, false);
+        // SEAT 0 = you (your identity key); SEAT 1 = your bot (a key derived from your seed). Both real keys.
+        var me = (_identityPriv, _identityPub);
+        var botK = WalletKeys.Account(_seed, 8, 0);
+        var bot = (botK.Priv, botK.Pub);
+        var deck = MentalPoker.ShuffledFrom(new[] { MentalPoker.FreshEntropy(), MentalPoker.FreshEntropy() }, Variants.CardSet(Variant.TexasHoldem));
+
+        BsvPoker.Core.Games.OnChainHandTape.Tape tape;
+        try { tape = BsvPoker.Core.Games.OnChainHandTape.BuildHoldem(w, me, bot, deck, pot, new byte[16], stepValue: 1, fee: 1); }
+        catch (Exception ex) { return ("Could not build the on-chain hand: " + ex.Message, null, false); }
+        LastTape = tape;   // make this on-chain hand replayable in the Replay tab
+
+        // your hole cards become encrypted NFTs sealed to your identity (NFTs tab)
+        try
+        {
+            foreach (var c in new[] { deck[0], deck[1] })
+                _vault.AddSealed(CardNft.SealToPub(c.Index, System.Security.Cryptography.RandomNumberGenerator.GetBytes(32), _identityPub));
+            await Dispatcher.InvokeAsync(() => { RefreshCards(); Render(); });
+        }
+        catch { }
+
         int sent = 0;
         foreach (var step in tape.Steps) { try { var (ok, _) = await BroadcastEverywhere(Chain.Serialize(step.Tx)); if (ok) sent++; } catch { } }
         _ = SpvServerDiscoverAsync();   // re-sync the balance from the chain (authoritative)
-        await Dispatcher.InvokeAsync(() => { Render(); Notify($"On-chain Blackjack: {tape.Steps.Count} txs, you {(tape.WinnerSeat == 0 ? "WIN" : "lose")} the {tape.Pot:N0} sat pot."); });
-        return $"On-chain Blackjack: {tape.Steps.Count} transactions broadcast ({sent} accepted), every move on-chain, your cards minted as NFTs. Pot {tape.Pot:N0} sat — {(tape.WinnerSeat == 0 ? "YOU WIN" : "dealer wins")}.";
+
+        bool youWon = tape.WinnerSeat == 0;
+        string verdict = tape.Split ? "SPLIT POT" : youWon ? "YOU WIN" : "your bot wins";
+        var msg = $"On-chain hand vs your bot: {tape.Steps.Count} transactions broadcast ({sent} accepted) — every move on-chain, no off-chain anything.\nResult: {verdict} · pot {tape.Pot:N0} sat. Open the Replay tab to step through it move by move.";
+        return (msg, tape, youWon);
+    }
+
+    /// <summary>Human-readable label for a card (rank + suit), e.g. "A♠" — used when surfacing a dealt hand.</summary>
+    private static string CardLabel(BsvPoker.Core.Card c)
+    {
+        string r = c.Rank switch { 14 => "A", 13 => "K", 12 => "Q", 11 => "J", 10 => "T", _ => c.Rank.ToString() };
+        string s = c.Suit switch { BsvPoker.Core.Suit.Spades => "♠", BsvPoker.Core.Suit.Hearts => "♥", BsvPoker.Core.Suit.Diamonds => "♦", _ => "♣" };
+        return r + s;
     }
 
     private const long OnChainHandReserve = 60_000; // headroom for the ~20 per-step values + fees of one hand
@@ -2259,7 +2609,7 @@ public sealed class WalletView : UserControl
                 var blind = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
                 var sealedHex = CardNft.SealToPub(ci, blind, _identityPub);     // encrypted to my identity
                 var script = CardNft.NftLock(sealedHex, _identityPub);          // 1-sat on-chain NFT output
-                var (raw, status) = FundTx(script, 1, 500);
+                var (raw, status) = FundTx(script, 1, 1);                       // 1-sat NFT + 1-sat fee (not 500)
                 if (raw == null) return $"minted {minted} card NFT(s); stopped: {status}";
                 node.Broadcast(raw);
                 _vault.AddSealed(sealedHex);
@@ -2533,9 +2883,12 @@ public sealed class WalletView : UserControl
         var win = new Window { Title = "Sign a message with your key", Width = 500, Height = 220, Owner = Window.GetWindow(this), Content = new StackPanel { Margin = new Thickness(12), Children = { new TextBlock { Text = "Message:", Foreground = Brushes.Gainsboro }, msg, go } } };
         go.Click += (_, _) =>
         {
-            var k = WalletKeys.Account(_seed, 0, 0);
-            var sig = WalletExtras.SignMessage(k.Priv, msg.Text);
-            MessageBox.Show($"pubkey: {Convert.ToHexString(k.Pub).ToLowerInvariant()}\n\nsignature (base64):\n{sig}", "Signed");
+            // Sign AS YOUR IDENTITY — the SAME key the Identity tab shows as "Identity public key (share this)"
+            // and that everything else (chat, the game, certificates) treats as you. Previously this signed with
+            // a different account sub-key, so a message you signed "as your identity" would NOT verify against
+            // your identity key — that is the "verify does not work for identity" failure. Now they match.
+            var sig = WalletExtras.SignMessage(_identityPriv, msg.Text);
+            MessageBox.Show($"identity pubkey (verify against this):\n{Convert.ToHexString(_identityPub).ToLowerInvariant()}\n\nsignature (base64):\n{sig}", "Signed by your identity");
         };
         win.ShowDialog();
     }
@@ -2589,11 +2942,23 @@ public sealed class WalletView : UserControl
 
     private void Load()
     {
-        Trace("LOAD enter path=" + Path.GetFileName(_path));
         try { if (File.Exists(_path)) _w = JsonSerializer.Deserialize<File_>(File.ReadAllText(_path)) ?? new File_(); } catch { _w = new File_(); }
-        // AN IDENTITY IS ONLY REAL ON-CHAIN: a registration that was never broadcast (no OnChainTxid) is a DRAFT
-        // and does not survive a restart — drop it so it is never treated as an identity.
-        if (_w.Identity is { IsOnChain: false }) _w.Identity = null;
+        // #1 RULE — PROTECT REGISTERED ACCOUNTS: a registered identity is NEVER deleted, downgraded, or
+        // un-registered, EVER. We do NOT drop it even if its stored signature fails to re-verify — a version change
+        // to the canonical form or key derivation can invalidate an OLD signature without the identity being fake,
+        // and silently wiping a registered account (e.g. CsTominaga) is an abject breach. Once registered, forever
+        // registered. If the wallet is UNLOCKED and the signature is stale, we REFRESH it with this wallet's own
+        // identity key (it is our identity) instead of ever deleting it; while locked we simply keep it untouched.
+        if (_w.Identity is { } existing && existing.Pseudonym.Length > 0)
+        {
+            try
+            {
+                if (_seed.Length == 32 && _identityPriv.Length == 32
+                    && !WalletExtras.VerifyMessage(_identityPub, existing.Canonical(), existing.Signature))
+                    existing.Signature = WalletExtras.SignMessage(_identityPriv, existing.Canonical());
+            }
+            catch { /* never drop a real identity on an error */ }
+        }
         // A coin is CONFIRMED only if its SAVED SPV proof re-verifies (offline). Set that first.
         foreach (var u in _w.Utxos) u.Confirmed = ReverifyProof(u);
         // FRAUD MUST NOT EXIST: the optimistic Announce/FundTx machinery fabricated "coins" with NO transaction
@@ -2602,23 +2967,24 @@ public sealed class WalletView : UserControl
         // proof) or a watch address is KEPT, and every prior state remains in the read-only claude\backups vault.
         _w.Utxos.RemoveAll(u => !u.WatchOnly && !u.Confirmed
             && string.IsNullOrEmpty(u.RawTxHex) && string.IsNullOrEmpty(u.MerkleBlockHex) && string.IsNullOrEmpty(u.EnvelopeWire));
+        // PERSIST the fraud-detection cleanup (dropped draft identity + removed phantom UTXOs) NOW: the Unlock /
+        // SetPassword paths below return early, so without this Save() the mutation would be lost and re-done every
+        // run — and the backup-every-write rule would be skipped. Safe even while locked (Save only writes _w).
+        if (File.Exists(_path)) { try { Save(); } catch { } }
         // EVERY path requires a login — there is no no-login outcome (DecideLogin proves this, tested 100×).
         switch (DecideLogin(_w.Seed))
         {
             case StartupLogin.Unlock:
-                Trace("LOAD: encrypted seed -> Unlock (password required)");
                 _locked = true;            // encrypted on disk — must be unlocked with the password before use
                 Unlock();                  // prompt now (modal); if cancelled, the wallet stays locked
                 return;
             case StartupLogin.SetPassword:
                 // SECURITY (no-login is fraud): an EXISTING plaintext wallet MUST be password-protected before
                 // use. Force a password now and encrypt the SAME seed in place — seed/addresses/coins RETAINED.
-                Trace("LOAD: plaintext seed -> RequirePasswordForExistingWallet (must set a password)");
                 _seed = WalletKeys.BackupToSeed(_w.Seed);
                 RequirePasswordForExistingWallet();
                 return;
             default: // NewWizard — brand-new wallet: a fresh seed, EMPTY (no play money, no opening balance).
-                Trace("LOAD: new/invalid seed -> fresh wallet + AccountWizard (set seed + password)");
                 _seed = WalletKeys.NewSeed();
                 _w = new File_ { Seed = WalletKeys.SeedToBackup(_seed), RecvIndex = 0 };
                 _freshWallet = true;       // first run → run the ElectrumSVP-style account wizard
@@ -2708,22 +3074,24 @@ public sealed class WalletView : UserControl
     private string IdentityCachePath() => Path.Combine(IdentityCacheDir(), Convert.ToHexString(_identityPub).ToLowerInvariant() + ".json");
     private void PersistIdentityToCache()
     {
-        try { if (_seed.Length == 32 && _w.Identity is { IsOnChain: true } id)
+        // Cache ANY set identity (on-chain OR self-signed local) keyed by the identity key, so the SAME seed always
+        // finds its identity again — set once, yours forever. (Previously only on-chain identities were cached.)
+        try { if (_seed.Length == 32 && _w.Identity is { Pseudonym.Length: > 0 } id)
             File.WriteAllText(IdentityCachePath(), JsonSerializer.Serialize(id, new JsonSerializerOptions { WriteIndented = true })); }
         catch { }
     }
-    /// <summary>On unlock: if the wallet-file lost the registration but this identity key was registered on-chain
-    /// before (cached), RESTORE it — registered forever. If the wallet already has it, refresh the cache.</summary>
+    /// <summary>On unlock: if the wallet-file lost the registration but this identity key set one before (cached),
+    /// RESTORE it — set once, yours forever, on-chain or not. If the wallet already has it, refresh the cache.</summary>
     private void RestoreIdentityFromCache()
     {
         try
         {
             if (_seed.Length != 32) return;
-            if (_w.Identity is { IsOnChain: true }) { PersistIdentityToCache(); return; }
+            if (_w.Identity is { Pseudonym.Length: > 0 }) { PersistIdentityToCache(); return; }
             var path = IdentityCachePath();
             if (!File.Exists(path)) return;
             var id = JsonSerializer.Deserialize<Registration>(File.ReadAllText(path));
-            if (id is { IsOnChain: true }) { _w.Identity = id; if (string.IsNullOrEmpty(_w.Handle)) _w.Handle = id.Pseudonym; Save(); }
+            if (id is { Pseudonym.Length: > 0 }) { _w.Identity = id; if (string.IsNullOrEmpty(_w.Handle)) _w.Handle = id.Pseudonym; Save(); }
         }
         catch { }
     }
@@ -2964,11 +3332,13 @@ public sealed class WalletView : UserControl
             return;
         }
         if (_ring == null && _seed.Length == 32) _ring = new KeyRing(_seed, Math.Max(1, _w.RecvIndex));
-        // Rebuild the dynamic tabs so their state is NEVER stale: the Identity tab must flip to "Registered" the
-        // instant registration completes (it was built once and never refreshed — so it kept showing "NOT
-        // REGISTERED" even after a successful, confirmed on-chain registration), and NFTs must appear without a
-        // restart. Only when not actively focused inside them, so typing isn't interrupted.
-        try { if (_identityTab != null && !_identityTab.IsKeyboardFocusWithin) _identityTab.Content = BuildIdentityTab(); } catch { }
+        // BULLETPROOF identity restore + PROTECT REGISTERED ACCOUNTS: if this wallet file lost its identity (wiped by
+        // an old bug) but this identity KEY registered before (cached, keyed by the identity pubkey), bring it back
+        // NOW — a registered account is never left showing "not registered".
+        if (_seed.Length == 32 && (_w.Identity == null || _w.Identity.Pseudonym.Length == 0)) RestoreIdentityFromCache();
+        // ALWAYS refresh the identity card so its state can NEVER be stale — a set identity must never keep
+        // showing "no identity". Only the card (fresh controls) is rebuilt, so nothing is ever re-parented.
+        try { if (_idCard != null) _idCard.Content = BuildIdentityCard(); } catch { }
         try { if (_nftTab != null && !_nftTab.IsKeyboardFocusWithin) _nftTab.Content = BuildNftTab(); } catch { }
         _bal.Text = Balance.ToString("N0") + " sat" + (Pending > 0 ? $"   (+{Pending:N0} pending)" : "");
         _recv.Text = ReceiveAddress() + $"   (#{_w.RecvIndex})";
@@ -3044,14 +3414,53 @@ public sealed class WalletView : UserControl
     /// game show @handles instead of raw keys — the wallet's Contacts are the app-wide address book.</summary>
     public string? HandleFor(string identityPubHex)
     {
+        // My OWN identity resolves to MY pseudonym/handle (I am never in my own contact list).
+        if (string.Equals(identityPubHex, Convert.ToHexString(_identityPub).ToLowerInvariant(), StringComparison.OrdinalIgnoreCase))
+            return _w.Identity is { Pseudonym.Length: > 0 } me ? me.Pseudonym : (string.IsNullOrWhiteSpace(_w.Handle) ? null : _w.Handle);
         var c = _w.Contacts.FirstOrDefault(x => string.Equals(x.IdentityPub, identityPubHex, StringComparison.OrdinalIgnoreCase));
         return c?.Handle;
+    }
+
+    /// <summary>The whole address book as (label, identity pubkey-hex): every saved identity/handle/bot the user
+    /// can pick as a chat recipient or group member — the Telegram-style contact list, not just discovered peers.</summary>
+    public IReadOnlyList<(string Label, string PubHex)> ContactList()
+        => _w.Contacts.Select(c => ((c.Verified && c.DisplayName.Length > 0 ? $"✓ {c.DisplayName} (@{c.Handle})" : "@" + c.Handle), c.IdentityPub.ToLowerInvariant())).ToList();
+
+    /// <summary>All named chat GROUPS the user created — each one a (name, member pubkey-hex list) for the
+    /// broadcast-encryption group send mode. Persisted in the wallet so groups survive across sessions.</summary>
+    public IReadOnlyList<(string Name, IReadOnlyList<string> Members)> GroupList()
+        => _w.Groups.Select(g => (g.Name, (IReadOnlyList<string>)g.MemberPubs.ToList())).ToList();
+
+    /// <summary>Create or replace a named group (members = identity pubkey hex). Persisted to the wallet file.</summary>
+    public void SaveGroup(string name, IReadOnlyList<string> memberPubs)
+    {
+        if (!Dispatcher.CheckAccess()) { Dispatcher.Invoke(() => SaveGroup(name, memberPubs)); return; }
+        name = name.Trim();
+        if (name.Length == 0 || memberPubs.Count == 0) return;
+        _w.Groups.RemoveAll(g => string.Equals(g.Name, name, StringComparison.OrdinalIgnoreCase));
+        _w.Groups.Add(new ChatGroupRec { Name = name, MemberPubs = memberPubs.Select(p => p.ToLowerInvariant()).Distinct().ToList() });
+        Save();
+    }
+
+    /// <summary>Delete a named group.</summary>
+    public void DeleteGroup(string name)
+    {
+        if (!Dispatcher.CheckAccess()) { Dispatcher.Invoke(() => DeleteGroup(name)); return; }
+        _w.Groups.RemoveAll(g => string.Equals(g.Name, name, StringComparison.OrdinalIgnoreCase));
+        Save();
     }
 
     /// <summary>A friendly, identity-aware label for a peer key: "✓ Bob Smith (@bob)" for a verified contact,
     /// "@bob" for an unverified contact, or null if unknown. Used by chat, the game, and the opponent chooser.</summary>
     public string? IdentityLabelFor(string identityPubHex)
     {
+        // My OWN identity → my registered pseudonym (with display name), so the game/chat never show me as raw hex.
+        if (string.Equals(identityPubHex, Convert.ToHexString(_identityPub).ToLowerInvariant(), StringComparison.OrdinalIgnoreCase))
+        {
+            if (_w.Identity is { Pseudonym.Length: > 0 } me)
+                return me.DisplayName.Length > 0 ? $"{me.DisplayName} (@{me.Pseudonym})" : "@" + me.Pseudonym;
+            return string.IsNullOrWhiteSpace(_w.Handle) ? null : "@" + _w.Handle;
+        }
         var c = _w.Contacts.FirstOrDefault(x => string.Equals(x.IdentityPub, identityPubHex, StringComparison.OrdinalIgnoreCase));
         if (c == null) return null;
         if (c.Verified && c.DisplayName.Length > 0) return $"✓ {c.DisplayName} (@{c.Handle})";
