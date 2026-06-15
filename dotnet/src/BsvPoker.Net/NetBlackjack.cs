@@ -59,10 +59,12 @@ public sealed class NetBlackjack
     // one (and an "act seq 0" from hand 2 cannot be deduped against the identical-looking one from hand 1).
     private int _handNo = -1;
     private long _handOverAt;                  // Environment.TickCount64 when the current hand settled
-    private const long HandPauseMs = 4500;     // pause to show the result before auto-dealing the next hand
+    /// <summary>Pause AFTER a hand settles before the next is dealt, so everyone can read who won/lost. Default 10s.</summary>
+    public long HandPauseMs { get; set; } = 10_000;
 
     // Bankroll per player (keyed by identity pubkey) carried across hands; the cash you walk away with on Leave.
     private long _buyIn;
+    private long _dealerBankroll;              // the HOUSE bankroll (real tokens) — wins what players lose, pays what they win
     private readonly ConcurrentDictionary<string, long> _bankroll = new();
     // A signed leave takes effect at a hand boundary: a player who announces "after hand k" plays hands ≤ k and is
     // excluded from k+1 on. The explicit number makes the active set identical on every node regardless of timing.
@@ -101,6 +103,12 @@ public sealed class NetBlackjack
     public int HandNumber => _handNo + 1;
     /// <summary>The cash you currently hold at the table (buy-in ± every hand's result) — what you cash out on Leave.</summary>
     public long MyBankroll => _bankroll.TryGetValue(_myPubHex, out var b) ? b : 0;
+    /// <summary>The HOUSE/dealer bankroll in real tokens — it wins what players lose and pays what they win. The
+    /// table closes if it cannot cover the players (a real money game can't run a house that can't pay).</summary>
+    public long DealerBankroll => _dealerBankroll;
+    /// <summary>True while waiting for a card you drew (Hit/Double) to be revealed by all players — you cannot act
+    /// again until you SEE it, so you can never blow past a bust by clicking fast.</summary>
+    public bool AwaitingMyCard { get { lock (_gate) return _mySeat >= 0 && _pendingDraw.ContainsValue(_mySeat); } }
     /// <summary>True once the whole session is over (you left, or fewer than two players remain).</summary>
     public bool SessionOver => State == Phase.Done;
     /// <summary>True after you have asked to leave; you finish the current hand, then cash out.</summary>
@@ -228,6 +236,7 @@ public sealed class NetBlackjack
             var order = SeatOrder.Assign(cands.Select(Convert.FromHexString).ToList(), SeatOrder.JointSeed(reveals));
             _roster = order.Select(i => cands[i]).ToArray();
             foreach (var p in _roster) _bankroll[p] = _buyIn;   // everyone buys in for the same amount
+            _dealerBankroll = _buyIn * _roster.Length;          // the house is staked to cover every seat's buy-in (real tokens)
             StartHand();                                        // deal the first hand; the table then runs continuously
         }
         else { int c = cands.Count(p => _seatCommits.ContainsKey(p)), r = cands.Count(p => _seatReveals.ContainsKey(p)); Status = $"Agreeing a fair seat order… commits {c}/{_seatCount}, reveals {r}/{_seatCount}"; }
@@ -242,6 +251,7 @@ public sealed class NetBlackjack
     {
         if (_roster == null) return;
         _handNo++;
+        if (_dealerBankroll <= 0) { EndSession(); return; }   // the house is busted — a real-token table cannot keep paying
         var active = _roster.Where(p => InFor(p, _handNo)).ToArray();
         if (active.Length < 2) { EndSession(); return; }
         _seats = active;
@@ -372,6 +382,10 @@ public sealed class NetBlackjack
                 Raise();
                 if (_toAct < 0) State = Phase.DealerPlay;
             }
+            // A hit's card arrives a few ticks AFTER the hit (it must be revealed by everyone). If it busted the
+            // actor, ResolvePendingDraws set _done but did not move the turn — so advance here, or the busted
+            // player would keep "acting" (the 27-and-still-playing bug).
+            if (State == Phase.Playing && _toAct >= 0 && _done[_toAct]) AdvanceTurn();
         }
         if (State == Phase.DealerPlay) DriveDealer();
     }
@@ -384,6 +398,8 @@ public sealed class NetBlackjack
         lock (_gate)
         {
             if (State != Phase.Playing || _toAct != _mySeat) return;
+            if (_done[_mySeat]) return;                       // already finished this hand (stood/doubled/busted)
+            if (_pendingDraw.ContainsValue(_mySeat)) return;  // a card you drew hasn't arrived yet — wait and SEE it first
             int seq = _applied;
             ApplyAction(_mySeat, a);
             Send(new { t = "act", h = _handNo, seq, seat = _mySeat, a = (int)a });
@@ -486,12 +502,14 @@ public sealed class NetBlackjack
             else if (d > p) { _outcome[s] = BjOutcome.DealerWin; _net[s] = -bet; }
             else { _outcome[s] = BjOutcome.Push; _net[s] = 0; }
         }
-        for (int s = 0; s < Seats; s++) _bankroll.AddOrUpdate(_seats![s], _net[s], (_, b) => b + _net[s]);   // carry the result into each player's bankroll
+        long playersNet = 0;
+        for (int s = 0; s < Seats; s++) { _bankroll.AddOrUpdate(_seats![s], _net[s], (_, b) => b + _net[s]); playersNet += _net[s]; }
+        _dealerBankroll -= playersNet;   // the house wins what players lose and pays what they win (real tokens, conserved)
         State = Phase.HandOver; _toAct = -1; _handOverAt = Environment.TickCount64;
         string results = string.Join("  ", Enumerable.Range(0, Seats).Select(s => $"P{s}:{_outcome[s]}({(_net[s] >= 0 ? "+" : "")}{_net[s]})"));
-        bool willEnd = _roster!.Count(p => InFor(p, _handNo + 1)) < 2;
-        Status = $"Hand #{HandNumber} complete. {results}.  Your bankroll: {MyBankroll} sat. " +
-                 (_leaving ? "Cashing you out…" : willEnd ? "Table closing — not enough players." : "Next hand starting…");
+        bool willEnd = _dealerBankroll <= 0 || _roster!.Count(p => InFor(p, _handNo + 1)) < 2;
+        Status = $"Hand #{HandNumber} complete. {results}.  Your bankroll: {MyBankroll} sat · house {_dealerBankroll} sat. " +
+                 (_leaving ? "Cashing you out…" : _dealerBankroll <= 0 ? "House is busted — table closing." : willEnd ? "Table closing — not enough players." : "Next hand starting…");
         Raise();
     }
 

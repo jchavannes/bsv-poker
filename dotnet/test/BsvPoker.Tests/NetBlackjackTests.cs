@@ -52,7 +52,7 @@ public static class NetBlackjackTests
                 T.True(Until(() => nodes.All(n => n.PeerCount >= N - 1), 20000), "the 3 nodes form one mesh");
                 const string table = "t-bj01~p3~b10";
                 g = ids.Select((id, i) => new NetBlackjack(nodes[i], table, id.Priv, id.Pub)).ToArray();
-                foreach (var x in g) x.Start();
+                foreach (var x in g) { x.HandPauseMs = 400; x.Start(); }   // short between-hand pause for fast tests (UI default is 10s)
 
                 T.True(Until(() => g.All(x => x.MyHand.Count == 2 && x.DealerCards.Count >= 1 && x.MySeat >= 0), 40000),
                     "each player is dealt 2 cards and sees the dealer up card (joint deal)");
@@ -91,7 +91,7 @@ public static class NetBlackjackTests
                 T.True(Until(() => nodes.All(n => n.PeerCount >= N - 1), 20000), "the 2 nodes form one mesh");
                 const string table = "t-bjcont~p2~b10";
                 g = ids.Select((id, i) => new NetBlackjack(nodes[i], table, id.Priv, id.Pub)).ToArray();
-                foreach (var x in g) x.Start();
+                foreach (var x in g) { x.HandPauseMs = 400; x.Start(); }   // short between-hand pause for fast tests (UI default is 10s)
                 T.True(Until(() => g.All(x => x.MyHand.Count == 2), 40000), "the first hand is dealt");
 
                 long buyIn = g[0].MyBankroll;   // the starting bankroll (buy-in)
@@ -118,7 +118,7 @@ public static class NetBlackjackTests
                 T.True(Until(() => nodes.All(n => n.PeerCount >= N - 1), 20000), "the 3 nodes form one mesh");
                 const string table = "t-bjleave~p3~b10";
                 g = ids.Select((id, i) => new NetBlackjack(nodes[i], table, id.Priv, id.Pub)).ToArray();
-                foreach (var x in g) x.Start();
+                foreach (var x in g) { x.HandPauseMs = 400; x.Start(); }   // short between-hand pause for fast tests (UI default is 10s)
                 T.True(DriveStand(g, () => g.All(x => x.HandNumber >= 2 && x.MyHand.Count == 2), 60000), "the table is dealing (reached hand #2)");
 
                 // pick the player NOT in the seat that is currently to act, so leaving is clean; any player works
@@ -137,6 +137,40 @@ public static class NetBlackjackTests
                 T.True(continued, "the remaining players keep playing more hands after one player left");
                 T.True(stayers.All(x => x.SeatPubs.Length == 2), "the table is now a 2-player game (the leaver was removed)");
                 T.True(stayers.All(x => !x.CheatDetected), "no false cheat detection after the membership change");
+            }
+            finally { foreach (var x in g) { try { x.Stop(); } catch { } } foreach (var n in nodes) { try { n.Dispose(); } catch { } } }
+        });
+
+        T.Run("BUST logic: a player who busts is done immediately — they can never keep acting past 21", () =>
+        {
+            const int N = 2;
+            var (nodes, ids) = Mesh(N);
+            NetBlackjack[] g = Array.Empty<NetBlackjack>();
+            try
+            {
+                T.True(Until(() => nodes.All(n => n.PeerCount >= N - 1), 20000), "the 2 nodes form one mesh");
+                const string table = "t-bjbust~p2~b10";
+                g = ids.Select((id, i) => new NetBlackjack(nodes[i], table, id.Priv, id.Pub)).ToArray();
+                foreach (var x in g) { x.HandPauseMs = 400; x.Start(); }
+                T.True(Until(() => g.All(x => x.MyHand.Count == 2), 40000), "the first hand is dealt");
+
+                // AGGRESSIVE strategy: always HIT while under 21 (hit to 17+). This drives players into busts; the
+                // engine must mark them done the instant they pass 21 and never let them act again. If the bust bug
+                // were present the busted player would stay "to act" and this driver would hit forever → timeout.
+                // Run several hands so a bust is virtually certain to occur.
+                bool reached = Until(() =>
+                {
+                    foreach (var x in g)
+                    {
+                        if (x.State != NetBlackjack.Phase.Playing || x.ToAct != x.MySeat || x.AwaitingMyCard) continue;
+                        // NEVER act after 21: if our own logic ever offered a turn at >21 that is the bug.
+                        T.True(Blackjack.Value(x.MyHand).Total <= 21, $"a turn is never offered after busting (had {Blackjack.Value(x.MyHand).Total})");
+                        if (Blackjack.Value(x.MyHand).Total < 17) x.Act(BjAction.Hit); else x.Act(BjAction.Stand);
+                    }
+                    return g.All(y => y.HandNumber >= 3);
+                }, 120000);
+                T.True(reached, "hands keep completing under an aggressive hit strategy (busts resolve and the turn advances)");
+                T.True(!g.Any(x => x.CheatDetected), "no false cheat detection");
             }
             finally { foreach (var x in g) { try { x.Stop(); } catch { } } foreach (var n in nodes) { try { n.Dispose(); } catch { } } }
         });

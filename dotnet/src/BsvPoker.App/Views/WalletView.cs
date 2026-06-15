@@ -96,17 +96,9 @@ public sealed class WalletView : UserControl
 
     /// <summary>This wallet's own identity handle (for naming the owner's bots: &lt;handle&gt;-Bot-NNN).</summary>
     public string MyHandle => _w.Handle;
-    /// <summary>The most recent on-chain hand tape (Blackjack or Hold'em-vs-bot) — handed to the Replay tab so any
-    /// hand the wallet plays can be stepped through move by move. Null until a hand has been played.</summary>
+    /// <summary>The most recent on-chain hand tape (Hold'em-vs-bot) — handed to the Replay tab so any hand the
+    /// wallet plays can be stepped through move by move. Null until a hand has been played.</summary>
     public BsvPoker.Core.Games.OnChainHandTape.Tape? LastTape { get; private set; }
-
-    /// <summary>The dealt cards + result of the most recent Blackjack hand, so the host can SHOW it on a real
-    /// screen (not just a status line). Set the instant the hand is dealt, before broadcasting completes.</summary>
-    public sealed record BlackjackResult(IReadOnlyList<Card> Player, int PlayerTotal, IReadOnlyList<Card> Dealer, int DealerTotal, string Verdict, bool YouWin, long Bet);
-    public BlackjackResult? LastBlackjack { get; private set; }
-    /// <summary>Raised the instant a Blackjack hand is dealt (cards known) so the UI can show the game immediately,
-    /// before the on-chain broadcast finishes.</summary>
-    public event Action<BlackjackResult>? OnBlackjackDealt;
 
     /// <summary>True once the seed is in memory and the wallet can derive keys (needed before the SPV filter is built).</summary>
     public bool IsUnlocked => !_locked;
@@ -2471,74 +2463,6 @@ public sealed class WalletView : UserControl
         Notify(ok ? $"Funded your bot with {amountSat:N0} sat (tx {Chain.Txid(Chain.Deserialize(raw))[..12]}…)." : "Bot funding broadcast issue: " + info);
         Save(); Render();
         return Chain.Deserialize(raw);
-    }
-
-    /// <summary>Play a full ON-CHAIN Blackjack hand: build the per-move transaction tape (genesis → 2-of-2 pot
-    /// escrow + recovery → committed mental-poker shuffle → sealed-NFT deal → each hit/stand → each dealer draw →
-    /// settle) from this wallet's coins and broadcast EVERY step. Cards are on-chain encrypted NFTs; the balance
-    /// re-syncs authoritatively from the chain afterwards. Bet is in satoshis (bet 20 = 20 sat).</summary>
-    public async System.Threading.Tasks.Task<string> RunOnChainBlackjack(long bet)
-    {
-        if (_locked || _seed.Length != 32) return "Unlock your wallet first.";
-        if (bet <= 0) bet = 20;
-        var w = new OnChainWallet(_seed);
-        foreach (var u in _w.Utxos.Where(u => !u.Spent && !u.DoubleSpent && !u.WatchOnly && IsRealCoin(u)))
-            w.Add(new OnChainWallet.Utxo(u.Txid, u.Vout, u.Value, u.KeyChain, u.KeyIndex));
-        long need = bet * 2 + 2000;   // pot (both stakes) + ~15 step txs at ~1-sat fees + buffer
-        if (w.Balance < need) return $"Need ≥ {need:N0} sat spendable to play Blackjack on-chain (have {w.Balance:N0}). Fund your wallet first.";
-        // PLAYER = your IDENTITY key, so the dealt cards are sealed to your identity and show up as NFTs you can
-        // open in the wallet (the vault is sealed to your identity). The dealer/house key is derived from your seed.
-        var dealer = WalletKeys.Account(_seed, 7, 0);
-        var deck = MentalPoker.ShuffledFrom(new[] { MentalPoker.FreshEntropy(), MentalPoker.FreshEntropy() }, Variants.CardSet(Variant.TexasHoldem));
-
-        // REPLAY the SAME deal the on-chain tape plays (engine + hit-below-17 policy) so we have the CONCRETE
-        // dealt hands. A result is NEVER announced on a default/empty state — it is the outcome of THESE cards.
-        var g = BsvPoker.Core.Games.Blackjack.Create(deck, bet);
-        while (!g.PlayerDone && g.Outcome == BsvPoker.Core.Games.BjOutcome.InPlay)
-        {
-            if (BsvPoker.Core.Games.Blackjack.Value(g.Player).Total < 17) g.Act(BsvPoker.Core.Games.BjAction.Hit);
-            else g.Act(BsvPoker.Core.Games.BjAction.Stand);
-        }
-        var myCards = g.Player.ToList();          // the cards actually dealt to / drawn by YOU
-        var dealerCards = g.Dealer.ToList();      // the dealer's played-out hand
-        string CardsStr(IEnumerable<BsvPoker.Core.Card> cc) => string.Join(" ", cc.Select(CardLabel));
-
-        BsvPoker.Core.Games.OnChainHandTape.Tape tape;
-        try { tape = BsvPoker.Core.Games.OnChainHandTape.BuildBlackjack(w, (_identityPriv, _identityPub), (dealer.Priv, dealer.Pub), deck, bet, new byte[16], stepValue: 1, fee: 1); }
-        catch (Exception ex) { return "Could not build the Blackjack hand: " + ex.Message; }
-
-        // RESULT KNOWN — surface it for a real on-screen Blackjack display IMMEDIATELY (before broadcasting), so the
-        // player SEES the game (their cards, the dealer's cards, the outcome), never "money vanished, no game".
-        {
-            int pT = BsvPoker.Core.Games.Blackjack.Value(myCards).Total, dT = BsvPoker.Core.Games.Blackjack.Value(dealerCards).Total;
-            bool youWinNow = tape.WinnerSeat == 0 && !tape.Split;
-            string verdictNow = tape.Split ? "PUSH (stakes returned)" : youWinNow ? "YOU WIN" : "dealer wins";
-            LastBlackjack = new BlackjackResult(myCards, pT, dealerCards, dT, verdictNow, youWinNow, bet);
-            var bj = LastBlackjack;
-            try { await Dispatcher.InvokeAsync(() => OnBlackjackDealt?.Invoke(bj)); } catch { }
-        }
-
-        // SURFACE THE DEALT HAND FIRST — your cards become encrypted NFTs sealed to your identity (NFTs tab) and
-        // the played-out hand is shown — BEFORE any winner is announced. No silent auto-resolve before you see cards.
-        try
-        {
-            foreach (var c in myCards)
-                _vault.AddSealed(CardNft.SealToPub(c.Index, System.Security.Cryptography.RandomNumberGenerator.GetBytes(32), _identityPub));
-            await Dispatcher.InvokeAsync(() => { RefreshCards(); Render(); Notify($"Blackjack dealt — your hand: {CardsStr(myCards)} ({BsvPoker.Core.Games.Blackjack.Value(myCards).Total}) vs dealer {CardsStr(dealerCards)} ({BsvPoker.Core.Games.Blackjack.Value(dealerCards).Total}). Playing the hand on-chain…"); });
-        }
-        catch { }
-
-        LastTape = tape;   // make this on-chain hand replayable in the Replay tab
-
-        int sent = 0;
-        foreach (var step in tape.Steps) { try { var (ok, _) = await BroadcastEverywhere(Chain.Serialize(step.Tx)); if (ok) sent++; } catch { } }
-
-        _ = SpvServerDiscoverAsync();   // re-sync the balance from the chain (authoritative)
-        // NOW the hand has been dealt, shown, and played out on-chain — report the result of THOSE cards.
-        bool youWin = tape.WinnerSeat == 0 && !tape.Split;
-        string verdict = tape.Split ? "PUSH (stakes returned)" : youWin ? "YOU WIN" : "dealer wins";
-        await Dispatcher.InvokeAsync(() => { Render(); Notify($"On-chain Blackjack result — your {CardsStr(myCards)} ({BsvPoker.Core.Games.Blackjack.Value(myCards).Total}) vs dealer {CardsStr(dealerCards)} ({BsvPoker.Core.Games.Blackjack.Value(dealerCards).Total}): {verdict}. {tape.Steps.Count} txs, pot {tape.Pot:N0} sat."); });
-        return $"On-chain Blackjack: {tape.Steps.Count} transactions broadcast ({sent} accepted), every move on-chain, your cards minted as NFTs.\nYour hand {CardsStr(myCards)} ({BsvPoker.Core.Games.Blackjack.Value(myCards).Total}) vs dealer {CardsStr(dealerCards)} ({BsvPoker.Core.Games.Blackjack.Value(dealerCards).Total}) → {verdict}. Pot {tape.Pot:N0} sat.";
     }
 
     /// <summary>

@@ -473,35 +473,6 @@ public partial class MainWindow : Window
         });
     }
 
-    /// <summary>Play a full ON-CHAIN Blackjack hand vs the dealer: every move a Bitcoin tx, cards as NFTs. The
-    /// wallet builds and broadcasts the whole transaction tape and re-syncs the balance from the chain.</summary>
-    private BlackjackWindow? _bjWindow;
-    private async System.Threading.Tasks.Task PlayBlackjack()
-    {
-        // Open the VISIBLE Blackjack table and show the hand the INSTANT it is dealt (before the on-chain
-        // broadcast finishes) — so clicking Blackjack always SHOWS a game, never "money gone, no screen".
-        Action<WalletView.BlackjackResult> onDealt = null!;
-        onDealt = r =>
-        {
-            if (_bjWindow == null || !_bjWindow.IsVisible)
-            {
-                _bjWindow = new BlackjackWindow(this);
-                _bjWindow.Closed += (_, _) => _bjWindow = null;
-                _bjWindow.Show();
-            }
-            _bjWindow.ShowHand(r, "Played fully on-chain. Open the Replay tab to step through every move.");
-        };
-        _wallet.OnBlackjackDealt += onDealt;
-        try
-        {
-            var status = await _wallet.RunOnChainBlackjack(20);   // 20-sat table (per-satoshi)
-            if (_wallet.LastTape != null) _replay?.Load(_wallet.LastTape);   // make the on-chain Blackjack hand replayable
-            // if for some reason no hand was dealt (e.g. unfunded), tell the user plainly — no silent loss
-            if (_wallet.LastBlackjack == null) MessageBox.Show(status, "On-chain Blackjack");
-        }
-        finally { _wallet.OnBlackjackDealt -= onDealt; }
-    }
-
     private static string CardStr(Card c)
     {
         string r = c.Rank switch { 14 => "A", 13 => "K", 12 => "Q", 11 => "J", 10 => "T", _ => c.Rank.ToString() };
