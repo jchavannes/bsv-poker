@@ -35,6 +35,19 @@ public sealed class P2PNode : IDisposable
     private const int MaxInboundQueue = 8192;         // per-node frames awaiting processing before we shed load
     private const int MaxPeerOutQueue = 4096;          // per-peer frames awaiting the wire before we shed load
 
+    // CONNECTION LIVENESS (robust cross-device play). A TCP connection through a NAT/firewall, or to a laptop
+    // that sleeps or has its cable pulled, can go HALF-OPEN: the socket stays "connected" but no bytes ever
+    // arrive again. The read loop blocks forever, the peer slot is never freed, and the dual-path redundancy
+    // silently has a dead path. So: (1) OS-level TCP keepalive probes the link; (2) every KeepAliveInterval we
+    // write a bare newline to each peer — a no-op frame the reader discards (acc.Length==0), but a WRITE that
+    // faults promptly on a dead socket and keeps NAT mappings warm; (3) a reaper drops any peer with no inbound
+    // bytes for PeerIdleTimeout, freeing the slot so discovery reconnects. A live peer is refreshed by its own
+    // keepalive traffic, so it is never reaped.
+    private static readonly TimeSpan KeepAliveInterval = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan PeerIdleTimeout = TimeSpan.FromSeconds(45);   // > KeepAliveInterval ⇒ live peers survive
+    private static readonly byte[] KeepAliveBytes = { (byte)'\n' };
+    private Timer? _keepAliveTimer;
+
     private readonly int _port;
     private readonly string _bindHost;
     private TcpListener? _listener;
@@ -74,6 +87,7 @@ public sealed class P2PNode : IDisposable
         public required TcpClient Sock;
         public required RateState Rate;
         public required BlockingCollection<byte[]> Out;
+        public long LastSeen;   // Environment.TickCount64 of the last inbound bytes — drives the idle reaper
     }
 
     // SECURITY: default to LOOPBACK. The node listens only on 127.0.0.1 until the user explicitly opts in
@@ -115,6 +129,7 @@ public sealed class P2PNode : IDisposable
         catch { _listener = new TcpListener(addr, 0); _listener.Start(); }
         BoundPort = ((IPEndPoint)_listener.LocalEndpoint).Port;
         StartConsumer();
+        _keepAliveTimer = new Timer(_ => { try { SendKeepAlives(); ReapIdle((long)PeerIdleTimeout.TotalMilliseconds); } catch { } }, null, KeepAliveInterval, KeepAliveInterval);
         _ = AcceptLoop(_listener);
         Subscribe(DirTopic, OnDirAnnounce);
         Subscribe(PresenceTopic, OnPresenceAnnounce);
@@ -183,8 +198,10 @@ public sealed class P2PNode : IDisposable
         var id = Guid.NewGuid();
         var rate = new RateState { Tokens = RateCapacityBytes, Last = Environment.TickCount64 };
         var outq = new BlockingCollection<byte[]>(new ConcurrentQueue<byte[]>(), MaxPeerOutQueue);
-        _peers[id] = new Peer { Sock = sock, Rate = rate, Out = outq };
+        var peer = new Peer { Sock = sock, Rate = rate, Out = outq, LastSeen = Environment.TickCount64 };
+        _peers[id] = peer;
         sock.NoDelay = true;
+        EnableTcpKeepAlive(sock);
 
         // WRITER: one dedicated thread per peer drains its outbound queue with blocking writes. A wedged
         // peer can only back up (then shed) its OWN queue — it cannot stall this node's other sends.
@@ -218,6 +235,7 @@ public sealed class P2PNode : IDisposable
                 {
                     int n = await stream.ReadAsync(bytes);
                     if (n <= 0) break;
+                    peer.LastSeen = Environment.TickCount64;   // any inbound bytes (incl. keepalive newlines) prove the peer is live
                     for (int i = 0; i < n; i++)
                     {
                         byte ch = bytes[i];
@@ -432,9 +450,54 @@ public sealed class P2PNode : IDisposable
 
     private static string RandomId() { Span<byte> b = stackalloc byte[12]; RandomNumberGenerator.Fill(b); return Convert.ToHexString(b).ToLowerInvariant(); }
 
+    // Ask the OS to probe the link with TCP keepalive (so the kernel itself tears down a dead connection). The
+    // tuning options are not available on every platform, so each is best-effort.
+    private static void EnableTcpKeepAlive(TcpClient sock)
+    {
+        try { sock.Client.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.KeepAlive, true); } catch { }
+        try { sock.Client.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveTime, 15); } catch { }
+        try { sock.Client.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveInterval, 5); } catch { }
+        try { sock.Client.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.TcpKeepAliveRetryCount, 3); } catch { }
+    }
+
+    /// <summary>Write a bare-newline keepalive to every peer. The receiving reader discards it (an empty frame),
+    /// but the WRITE faults promptly on a dead socket — which removes that peer — and keeps NAT mappings warm on
+    /// live ones. Called automatically on a timer; exposed for tests/diagnostics.</summary>
+    public void SendKeepAlives()
+    {
+        if (_closed) return;
+        foreach (var kv in _peers) { try { kv.Value.Out.TryAdd(KeepAliveBytes); } catch { } }
+    }
+
+    /// <summary>Drop every peer that has produced NO inbound bytes for longer than <paramref name="idleMs"/>
+    /// (a half-open connection the read loop would otherwise block on forever). Disposing the socket unblocks the
+    /// reader, whose finally-block frees the peer slot so discovery can reconnect. Returns the number reaped.</summary>
+    public int ReapIdle(long idleMs)
+    {
+        long now = Environment.TickCount64; int reaped = 0;
+        foreach (var kv in _peers.ToArray())
+        {
+            if (now - kv.Value.LastSeen <= idleMs) continue;
+            if (_peers.TryRemove(kv.Key, out var p))
+            {
+                reaped++;
+                try { p.Out.CompleteAdding(); } catch { }
+                try { p.Sock.Dispose(); } catch { }
+            }
+        }
+        return reaped;
+    }
+
+    /// <summary>The age (ms since last inbound bytes) of every connected peer — for liveness diagnostics/tests.</summary>
+    public IReadOnlyList<long> PeerIdleAgesMs() { long now = Environment.TickCount64; return _peers.Values.Select(p => now - p.LastSeen).ToList(); }
+
+    /// <summary>TEST/DIAGNOSTIC seam: backdate every peer's last-seen by <paramref name="ageMs"/> so a subsequent
+    /// <see cref="ReapIdle"/> can deterministically exercise half-open pruning without waiting on real timeouts.</summary>
+    public void ForcePeersStale(long ageMs) { long t = Environment.TickCount64 - ageMs; foreach (var p in _peers.Values) p.LastSeen = t; }
+
     public void Dispose()
     {
-        _closed = true; _reannounceTimer?.Dispose();
+        _closed = true; _reannounceTimer?.Dispose(); _keepAliveTimer?.Dispose();
         try { _listener?.Stop(); } catch { }
         try { _inbound.CompleteAdding(); } catch { }   // let the consumer thread fall out of its loop
         foreach (var kv in _peers) { try { kv.Value.Out.CompleteAdding(); } catch { } try { kv.Value.Sock.Dispose(); } catch { } }

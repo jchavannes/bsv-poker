@@ -23,7 +23,11 @@ namespace BsvPoker.Net;
 /// </summary>
 public sealed class NetBlackjack
 {
-    public enum Phase { WaitingForPlayer, Dealing, Playing, DealerPlay, Done }
+    // WaitingForPlayer → (seat) → Dealing → Playing → DealerPlay → HandOver → (auto re-deal) → Dealing …
+    // HandOver is the brief pause after a hand settles before the NEXT hand is dealt — the table keeps running
+    // hand after hand, like a real blackjack table, until you Leave. Done is terminal: the SESSION is over
+    // (fewer than two players remain, or you have left and cashed out).
+    public enum Phase { WaitingForPlayer, Dealing, Playing, DealerPlay, HandOver, Done }
 
     private readonly P2PNode _node;
     private readonly string _table;
@@ -44,10 +48,26 @@ public sealed class NetBlackjack
     private readonly ConcurrentDictionary<string, byte[]> _seatReveals = new();
     private bool _sentSeatCommit, _sentSeatReveal;
 
-    private string[]? _seats;                 // fixed seat order
+    private string[]? _roster;                // the table roster — every player who took a seat (fixed for the session)
+    private string[]? _seats;                 // the ACTIVE seats for the current hand (roster minus those who left/busted)
     private int _mySeat = -1;
     private readonly IReadOnlyList<Card> _cardSet;
     private readonly int _n;
+
+    // CONTINUOUS PLAY (a real table deals hand after hand until you leave). Each hand is numbered and every
+    // per-hand message carries that number, so a stale frame from a previous hand can never be applied to a new
+    // one (and an "act seq 0" from hand 2 cannot be deduped against the identical-looking one from hand 1).
+    private int _handNo = -1;
+    private long _handOverAt;                  // Environment.TickCount64 when the current hand settled
+    private const long HandPauseMs = 4500;     // pause to show the result before auto-dealing the next hand
+
+    // Bankroll per player (keyed by identity pubkey) carried across hands; the cash you walk away with on Leave.
+    private long _buyIn;
+    private readonly ConcurrentDictionary<string, long> _bankroll = new();
+    // A signed leave takes effect at a hand boundary: a player who announces "after hand k" plays hands ≤ k and is
+    // excluded from k+1 on. The explicit number makes the active set identical on every node regardless of timing.
+    private readonly ConcurrentDictionary<string, int> _leaveAfter = new();
+    private bool _leaving;
 
     // deal material
     private byte[] _ecGlobal = Array.Empty<byte>();
@@ -76,7 +96,15 @@ public sealed class NetBlackjack
 
     public Phase State { get; private set; } = Phase.WaitingForPlayer;
     public int MySeat => _mySeat;
-    public string[] SeatPubs => _seats ?? Array.Empty<string>();
+    public string[] SeatPubs => _seats ?? _roster ?? Array.Empty<string>();
+    /// <summary>The current hand number (1-based for display); -1 before the first hand.</summary>
+    public int HandNumber => _handNo + 1;
+    /// <summary>The cash you currently hold at the table (buy-in ± every hand's result) — what you cash out on Leave.</summary>
+    public long MyBankroll => _bankroll.TryGetValue(_myPubHex, out var b) ? b : 0;
+    /// <summary>True once the whole session is over (you left, or fewer than two players remain).</summary>
+    public bool SessionOver => State == Phase.Done;
+    /// <summary>True after you have asked to leave; you finish the current hand, then cash out.</summary>
+    public bool Leaving => _leaving;
     public IReadOnlyList<Card> MyHand => _mySeat >= 0 && _hands.Length > _mySeat ? _hands[_mySeat] : Array.Empty<Card>();
     public IReadOnlyList<Card> DealerCards => _dealer;
     public int ToAct => _toAct;
@@ -103,7 +131,9 @@ public sealed class NetBlackjack
             var seg = parts[i];
             if (seg.StartsWith("p", StringComparison.Ordinal) && int.TryParse(seg[1..], out var pc) && pc is >= 2 and <= 6) _seatCount = pc;
             else if (seg.StartsWith("b", StringComparison.Ordinal) && long.TryParse(seg[1..], out var b) && b is >= 1 and <= 1_000_000_000) _bet = b;
+            else if (seg.StartsWith("c", StringComparison.Ordinal) && long.TryParse(seg[1..], out var c) && c > 0) _buyIn = c;
         }
+        if (_buyIn <= 0) _buyIn = _bet * 50;   // default buy-in: 50 bets, so the table plays many hands
         _cardSet = Variants.CardSet(Variant.TexasHoldem);   // a standard 52-card deck
         _n = _cardSet.Count;
     }
@@ -162,8 +192,14 @@ public sealed class NetBlackjack
             lock (_gate)
             {
                 Send(new { t = "hello", pub = _myPubHex }, ephemeral: true);
-                if (_seats == null) { TryAssignSeats(); return; }
+                if (_leaving && _leaveAfter.TryGetValue(_myPubHex, out var la)) Send(new { t = "leave", after = la });   // keep telling peers I'm leaving until the hand turns over
+                if (_roster == null) { TryAssignSeats(); return; }
                 if (State == Phase.Done) return;
+                if (State == Phase.HandOver)
+                {
+                    if (Environment.TickCount64 - _handOverAt >= HandPauseMs) StartHand();   // deal the next hand — a real table never stops on its own
+                    return;
+                }
                 DriveDeal();
                 DriveReveals();
                 DriveGame();
@@ -177,7 +213,7 @@ public sealed class NetBlackjack
     private void SendSeatReveal() { if (_seatReveals.TryGetValue(_myPubHex, out var n)) Send(new { t = "seatreveal", n = Convert.ToHexString(n).ToLowerInvariant() }); }
     private void TryAssignSeats()
     {
-        if (_seats != null) return;
+        if (_roster != null) return;
         if (_players.Count < _seatCount) { Status = $"Waiting for players… ({_players.Count}/{_seatCount})"; return; }
         _seatCandidates ??= _players.Keys.OrderBy(x => x, StringComparer.Ordinal).Take(_seatCount).ToArray();
         var cands = _seatCandidates;
@@ -190,24 +226,67 @@ public sealed class NetBlackjack
         {
             var reveals = cands.Select(p => (Convert.FromHexString(p), _seatReveals[p])).ToList();
             var order = SeatOrder.Assign(cands.Select(Convert.FromHexString).ToList(), SeatOrder.JointSeed(reveals));
-            _seats = order.Select(i => cands[i]).ToArray();
-            _mySeat = Array.IndexOf(_seats, _myPubHex);
-            int s = Seats;
-            _hands = Enumerable.Range(0, s).Select(_ => new List<Card>()).ToArray();
-            _done = new bool[s]; _doubled = new bool[s]; _net = new long[s]; _outcome = new BjOutcome[s];
-            _betOf = Enumerable.Repeat(_bet, s).ToArray();
-            _drawNext = 2 * s + 2;
-            _ecGlobal = MentalPokerEC.NewScalar(); _ecPerCard = MentalPokerEC.NewPerCardScalars(_n); _ecPerm = RandomPerm(_n);
-            State = Phase.Dealing; Status = $"Hand starting — you are seat {_mySeat}. Shuffling…"; Raise();
+            _roster = order.Select(i => cands[i]).ToArray();
+            foreach (var p in _roster) _bankroll[p] = _buyIn;   // everyone buys in for the same amount
+            StartHand();                                        // deal the first hand; the table then runs continuously
         }
         else { int c = cands.Count(p => _seatCommits.ContainsKey(p)), r = cands.Count(p => _seatReveals.ContainsKey(p)); Status = $"Agreeing a fair seat order… commits {c}/{_seatCount}, reveals {r}/{_seatCount}"; }
+    }
+
+    // True if this roster player is still in for the given hand: present (bankroll covers a bet) and has not left.
+    private bool InFor(string pub, int hand) => _bankroll.GetValueOrDefault(pub) >= _bet && (!_leaveAfter.TryGetValue(pub, out var last) || hand <= last);
+
+    /// <summary>Deal the next hand: re-seat the players still in (bankroll ≥ bet, not left), reset all deal state.
+    /// If fewer than two remain the SESSION ends and everyone cashes out their bankroll.</summary>
+    private void StartHand()
+    {
+        if (_roster == null) return;
+        _handNo++;
+        var active = _roster.Where(p => InFor(p, _handNo)).ToArray();
+        if (active.Length < 2) { EndSession(); return; }
+        _seats = active;
+        _mySeat = Array.IndexOf(_seats, _myPubHex);
+        int s = Seats;
+        _hands = Enumerable.Range(0, s).Select(_ => new List<Card>()).ToArray();
+        _done = new bool[s]; _doubled = new bool[s]; _net = new long[s]; _outcome = new BjOutcome[s];
+        _betOf = Enumerable.Repeat(_bet, s).ToArray();
+        _drawNext = 2 * s + 2;
+        _toAct = -1; _applied = 0;
+        _dealer.Clear(); _opened.Clear(); _everNeeded.Clear(); _pendingDraw.Clear();
+        _shuf.Clear(); _rem.Clear(); _comm.Clear(); _maskShares.Clear(); _final = null;
+        _sentShuf = _sentRem = false;
+        _ecGlobal = MentalPokerEC.NewScalar(); _ecPerCard = MentalPokerEC.NewPerCardScalars(_n); _ecPerm = RandomPerm(_n); _ecNonce = Array.Empty<byte[]>();
+        if (_mySeat < 0) { State = Phase.Done; Status = $"You left the table with {MyBankroll} sat. The remaining players continue."; Raise(); return; }
+        State = Phase.Dealing; Status = $"Hand #{HandNumber} — you are seat {_mySeat}. Shuffling the deck (encrypted)…"; Raise();
+    }
+
+    // If a player we are still dealing this hand has actually left as of an earlier hand (we learned of their leave
+    // late), the active set for the CURRENT hand is wrong and the deal would wait on them forever. Re-derive and
+    // re-deal the same hand number with the corrected set. A no-op when membership already matches.
+    private void RecheckMembership()
+    {
+        if (_roster == null || _seats == null) return;
+        if (State is not (Phase.Dealing or Phase.Playing or Phase.DealerPlay)) return;
+        var active = _roster.Where(p => InFor(p, _handNo)).ToArray();
+        if (active.SequenceEqual(_seats)) return;     // membership unchanged — nothing to do
+        _handNo--;                                    // StartHand re-increments to the SAME hand number
+        StartHand();
+    }
+
+    private void EndSession()
+    {
+        State = Phase.Done; _toAct = -1;
+        Status = _leaving
+            ? $"You left the table. Cashed out {MyBankroll} sat."
+            : $"Table closed — not enough players to continue. You cash out {MyBankroll} sat.";
+        Raise();
     }
     private static int[] RandomPerm(int n) { var p = Enumerable.Range(0, n).ToArray(); for (int i = n - 1; i > 0; i--) { int j = (int)System.Security.Cryptography.RandomNumberGenerator.GetInt32(i + 1); (p[i], p[j]) = (p[j], p[i]); } return p; }
 
     // ---- the dealerless deal: shuffle + remask + hiding commitments (same as NetGame) ----
-    private void SendShuf() { if (_shuf.TryGetValue(_mySeat, out var p)) Send(new { t = "shuf", step = _mySeat, pts = PtsHex(p) }); }
-    private void SendRem() { if (_rem.TryGetValue(_mySeat, out var p)) Send(new { t = "rem", step = _mySeat, pts = PtsHex(p) }); }
-    private void SendComm() { if (_comm.TryGetValue(_mySeat, out var c)) Send(new { t = "comm", seat = _mySeat, c = PtsHex(c) }); }
+    private void SendShuf() { if (_shuf.TryGetValue(_mySeat, out var p)) Send(new { t = "shuf", h = _handNo, step = _mySeat, pts = PtsHex(p) }); }
+    private void SendRem() { if (_rem.TryGetValue(_mySeat, out var p)) Send(new { t = "rem", h = _handNo, step = _mySeat, pts = PtsHex(p) }); }
+    private void SendComm() { if (_comm.TryGetValue(_mySeat, out var c)) Send(new { t = "comm", h = _handNo, seat = _mySeat, c = PtsHex(c) }); }
     private void DriveDeal()
     {
         if (_seats == null || State != Phase.Dealing) return;
@@ -216,7 +295,7 @@ public sealed class NetBlackjack
             byte[][]? input = _mySeat == 0 ? MentalPokerEC.BaseDeck(_n) : (_shuf.TryGetValue(_mySeat - 1, out var prev) ? prev : null);
             if (input != null) _shuf[_mySeat] = MentalPokerEC.ShuffleMask(input, _ecGlobal, _ecPerm);
         }
-        if (_shuf.ContainsKey(_mySeat) && !_sentShuf) { _sentShuf = true; SendShuf(); }
+        if (_shuf.ContainsKey(_mySeat)) { _sentShuf = true; SendShuf(); }   // re-send each tick (deduped) so a peer that joins this hand late, or settled later, still catches up
         if (!_rem.ContainsKey(_mySeat) && _shuf.ContainsKey(Seats - 1))
         {
             byte[][]? input = _mySeat == 0 ? _shuf[Seats - 1] : (_rem.TryGetValue(_mySeat - 1, out var prev) ? prev : null);
@@ -228,7 +307,7 @@ public sealed class NetBlackjack
                 _comm[_mySeat] = comms; SendComm();
             }
         }
-        if (_rem.ContainsKey(_mySeat) && !_sentRem) { _sentRem = true; SendRem(); }
+        if (_rem.ContainsKey(_mySeat)) { _sentRem = true; SendRem(); }   // re-send each tick (deduped) for late/lagging peers
         if (_final == null && _rem.TryGetValue(Seats - 1, out var fin)) { _final = fin; State = Phase.Playing; Status = "Dealing the cards…"; }
         SendComm();
     }
@@ -243,7 +322,7 @@ public sealed class NetBlackjack
         if (_seats == null) return;
         for (int k = 0; k <= DealerUp; k++) if (k < _n) _everNeeded.Add(k);   // 2N player cards + dealer up
         foreach (var pos in _pendingDraw.Keys) if (pos < _n) _everNeeded.Add(pos);
-        if ((State == Phase.DealerPlay || State == Phase.Done) && DealerHole < _n) _everNeeded.Add(DealerHole);
+        if ((State is Phase.DealerPlay or Phase.HandOver or Phase.Done) && DealerHole < _n) _everNeeded.Add(DealerHole);
     }
 
     private void DriveReveals()
@@ -257,7 +336,7 @@ public sealed class NetBlackjack
             map[p.ToString()] = new[] { Convert.ToHexString(_ecPerCard[p]).ToLowerInvariant(), Convert.ToHexString(_ecNonce[p]).ToLowerInvariant() };
             if (!_maskShares.TryGetValue(p, out var mm)) { mm = new(); _maskShares[p] = mm; } mm[_mySeat] = _ecPerCard[p];   // record my own share
         }
-        Send(new { t = "reveal", seat = _mySeat, d = map });   // re-sent each tick (stable id ⇒ deduped; grows as draws happen)
+        Send(new { t = "reveal", h = _handNo, seat = _mySeat, d = map });   // re-sent each tick (stable id ⇒ deduped; grows as draws happen)
         TryOpen();
     }
 
@@ -307,7 +386,26 @@ public sealed class NetBlackjack
             if (State != Phase.Playing || _toAct != _mySeat) return;
             int seq = _applied;
             ApplyAction(_mySeat, a);
-            Send(new { t = "act", seq, seat = _mySeat, a = (int)a });
+            Send(new { t = "act", h = _handNo, seq, seat = _mySeat, a = (int)a });
+        }
+    }
+
+    /// <summary>Leave the table. You finish the hand in progress (your bet stands), then you are dealt out and
+    /// cash out your bankroll — the remaining players keep playing. If no hand is in progress you leave at once.
+    /// Real-table rule: you cannot pull a bet out of a hand that is already dealt.</summary>
+    public void Leave()
+    {
+        lock (_gate)
+        {
+            if (_leaving || State == Phase.Done) return;
+            _leaving = true;
+            int after = _handNo;                                   // I play up to and including the current hand
+            _leaveAfter[_myPubHex] = after;
+            Send(new { t = "leave", after });                      // tell every node so they deal me out next hand
+            if (State == Phase.Playing && _toAct == _mySeat) { int seq = _applied; ApplyAction(_mySeat, BjAction.Stand); Send(new { t = "act", h = _handNo, seq, seat = _mySeat, a = (int)BjAction.Stand }); }
+            if (State == Phase.HandOver || (_roster != null && _seats != null && _mySeat < 0)) { EndSession(); return; }
+            Status = $"Leaving after this hand (#{HandNumber}). You will cash out {MyBankroll} sat.";
+            Raise();
         }
     }
 
@@ -388,8 +486,12 @@ public sealed class NetBlackjack
             else if (d > p) { _outcome[s] = BjOutcome.DealerWin; _net[s] = -bet; }
             else { _outcome[s] = BjOutcome.Push; _net[s] = 0; }
         }
-        State = Phase.Done; _toAct = -1;
-        Status = "Hand complete. " + string.Join("  ", Enumerable.Range(0, Seats).Select(s => $"P{s}:{_outcome[s]}({(_net[s] >= 0 ? "+" : "")}{_net[s]})"));
+        for (int s = 0; s < Seats; s++) _bankroll.AddOrUpdate(_seats![s], _net[s], (_, b) => b + _net[s]);   // carry the result into each player's bankroll
+        State = Phase.HandOver; _toAct = -1; _handOverAt = Environment.TickCount64;
+        string results = string.Join("  ", Enumerable.Range(0, Seats).Select(s => $"P{s}:{_outcome[s]}({(_net[s] >= 0 ? "+" : "")}{_net[s]})"));
+        bool willEnd = _roster!.Count(p => InFor(p, _handNo + 1)) < 2;
+        Status = $"Hand #{HandNumber} complete. {results}.  Your bankroll: {MyBankroll} sat. " +
+                 (_leaving ? "Cashing you out…" : willEnd ? "Table closing — not enough players." : "Next hand starting…");
         Raise();
     }
 
@@ -404,8 +506,15 @@ public sealed class NetBlackjack
             if (t == "hello") { if (_players.TryAdd(pub, 1)) { lock (_gate) TryAssignSeats(); } return; }
             if (t == "seatcommit") { try { var c = Convert.FromHexString(root.GetProperty("c").GetString()!); if (c.Length == 32 && _seatCommits.TryAdd(pub, c)) { lock (_gate) TryAssignSeats(); } } catch { } return; }
             if (t == "seatreveal") { try { var n = Convert.FromHexString(root.GetProperty("n").GetString()!); if (n.Length == 32 && _seatCommits.TryGetValue(pub, out var c) && SeatOrder.VerifyReveal(c, n) && _seatReveals.TryAdd(pub, n)) { lock (_gate) TryAssignSeats(); } } catch { } return; }
+            // a signed leave: this player is dealt out after the named hand (the lowest such number wins — no take-backs).
+            // If we had already started a LATER hand still including them (their leave hadn't reached us yet), re-derive
+            // membership for the current hand so we stop waiting on a player who is gone — otherwise the deal deadlocks.
+            if (t == "leave") { try { int after = root.GetProperty("after").GetInt32(); _leaveAfter.AddOrUpdate(pub, after, (_, old) => Math.Min(old, after)); lock (_gate) RecheckMembership(); } catch { } return; }
             lock (_gate)
             {
+                // every per-hand message is tagged with its hand number; a stale frame from a previous hand is ignored,
+                // so the continuous re-deal never mixes state across hands (and identical "act" frames can't collide).
+                if (!root.TryGetProperty("h", out var hEl) || hEl.GetInt32() != _handNo) return;
                 int SeatOf(string p) => _seats == null ? -1 : Array.IndexOf(_seats, p);
                 switch (t)
                 {
