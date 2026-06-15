@@ -2452,6 +2452,10 @@ public sealed class WalletView : UserControl
     /// (e.g. the Blackjack pot funding/settlement) can land their real on-chain transactions.</summary>
     public System.Threading.Tasks.Task<(bool Ok, string Info)> BroadcastRaw(byte[] raw) => BroadcastEverywhere(raw);
 
+    /// <summary>A best-effort current chain height: the highest confirmation this wallet has seen, floored at a
+    /// 2026 mainnet baseline. Used to set a future nLockTime for the Blackjack pot's pre-signed refund.</summary>
+    public uint ApproxTipHeight => (uint)Math.Max(920_000, _w.History.Select(h => h.Height).DefaultIfEmpty(0).Max());
+
     /// <summary>Build the node-seed registry tx AND record it in this wallet (so it appears in Transactions
     /// immediately), returning the raw tx + its txid. Broadcast it with <see cref="PublishNodeSeedBroadcastAsync"/>.</summary>
     public (byte[]? Raw, string Txid, string Status) BuildAndRecordNodeSeed(byte[] nodePub33, string endpoint, int ttlSeconds)

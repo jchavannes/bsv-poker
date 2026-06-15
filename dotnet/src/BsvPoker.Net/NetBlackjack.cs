@@ -84,19 +84,38 @@ public sealed class NetBlackjack
     public Func<byte[], long, PotCoin?>? FundPot;
     /// <summary>Broadcast the fully co-signed settlement tx on-chain. Set by the app.</summary>
     public Action<byte[]>? OnSettlementTx;
+    /// <summary>Broadcast the pre-signed nLockTime REFUND if the cooperative settlement stalls (a griefer). Set by the app.</summary>
+    public Action<byte[]>? OnRecoveryTx;
+    /// <summary>The block height the refund unlocks at — set by the app to (current tip + ~30 days). 0 = no lock (tests).</summary>
+    public uint RecoveryLockHeight { get; set; }
     public long PotFee { get; set; } = 1;
     private byte[][] _potPubs = Array.Empty<byte[]>();        // roster identity pubs (seat order) = the n-of-n keys
     private byte[] _potScript = Array.Empty<byte>();
-    private readonly ConcurrentDictionary<string, PotCoin> _potIns = new();   // funder pubhex -> their escrowed coin
+    private readonly ConcurrentDictionary<string, PotCoin> _potIns = new();   // funder pubhex -> their escrowed coin (INITIAL per-player funding)
+    private List<BlackjackPot.PotIn> _pot = new();                             // the CURRENT pot coins (after funding; replaced by one coin after a split)
+    private int _potGen;                                                       // pot generation — bumped on each leaver-split so stale co-sigs can't cross
+    private bool _postSplit;                                                   // the current pot came from a split (already funded; only re-co-sign the recovery)
+    private bool _isSplit;                                                     // the in-flight co-signed tx is a leaver-split (pay leaver + re-escrow), not a final settlement
+    private string[]? _splitRemaining;                                         // who continues after the in-flight split
     private bool _funded;
     private bool _settleStarted, _settleDone;
     private Chain.Tx? _settleTx;
     private List<BlackjackPot.PotIn> _settleInputs = new();
     private readonly ConcurrentDictionary<string, string[]> _settleSigs = new();   // signer pubhex -> per-input sig hex
+    private long _settlingAt;                                // when settlement began (grace before broadcasting the refund)
+    private const long SettleGraceMs = 30_000;              // if not all co-sign within this, broadcast the pre-signed refund
+    // pre-signed nLockTime REFUND safety net (co-signed at funding, before any card): unwinds the pot to each
+    // player's stake if the cooperative settlement ever stalls. No stake can be stranded by a griefer.
+    private Chain.Tx? _recoveryTx;
+    private readonly ConcurrentDictionary<string, string[]> _recoverySigs = new();
+    private byte[]? _recoveryRaw;
+    private bool _recoveryBroadcast;
     private bool PotActive => FundPot != null;               // a real on-chain pot is in play
     private long MyStake => _buyIn * 2;                      // personal buy-in + an equal share of the house bankroll
-    public long PotValue => _potIns.Values.Sum(c => c.Value);
+    public long PotValue => _pot.Count > 0 ? _pot.Sum(c => c.Value) : _potIns.Values.Sum(c => c.Value);
     public bool PotSettled => _settleDone;
+    /// <summary>The fully co-signed nLockTime refund (the safety net) once assembled at funding; null until then.</summary>
+    public byte[]? RecoveryRaw => _recoveryRaw;
     /// <summary>The n-of-n pot keys in their canonical (roster/seat) order — the order the settlement is signed in.</summary>
     public IReadOnlyList<byte[]> PotPubs => _potPubs;
 
@@ -286,9 +305,18 @@ public sealed class NetBlackjack
         if (_roster == null) return;
         _handNo++;
         if (_dealerBankroll <= 0) { EndSession(); return; }   // the house is busted — a real-token table cannot keep paying
-        // A real-token (on-chain pot) table settles the moment anyone leaves: the whole pot is co-signed out to the
-        // standings and the table closes (re-host to keep playing). Bankroll-only tables let the others play on.
-        if (PotActive && _leaveAfter.Count > 0) { EndSession(); return; }
+        // On a real-token (on-chain pot) table, when someone leaves: if ≥2 players remain, SPLIT the pot on-chain —
+        // pay each leaver out and re-escrow the remainder so the rest play on; otherwise settle everyone and close.
+        if (PotActive)
+        {
+            var leavers = _roster.Where(p => !InFor(p, _handNo)).ToArray();
+            if (leavers.Length > 0)
+            {
+                var remain = _roster.Where(p => InFor(p, _handNo)).ToArray();
+                if (remain.Length < 2) { EndSession(); return; }
+                BeginSplit(leavers, remain); return;
+            }
+        }
         var active = _roster.Where(p => InFor(p, _handNo)).ToArray();
         if (active.Length < 2) { EndSession(); return; }
         _seats = active;
@@ -325,7 +353,7 @@ public sealed class NetBlackjack
         _toAct = -1;
         // A real-token table does not just stop — it SETTLES the pot on-chain to the final standings, co-signed by
         // everyone, then closes. A bankroll-only (headless) table just reports the cash-out.
-        if (PotActive && _potIns.Count >= (_roster?.Length ?? int.MaxValue) && !_settleDone) { BeginSettlement(); return; }
+        if (PotActive && _pot.Count > 0 && !_settleDone) { BeginSettlement(); return; }
         State = Phase.Done;
         Status = _leaving
             ? $"You left the table. Cashed out {MyBankroll} sat."
@@ -335,27 +363,69 @@ public sealed class NetBlackjack
 
     // ===== ON-CHAIN POT: funding (each player escrows their stake) and settlement (everyone co-signs the payout) =====
 
+    private List<BlackjackPot.PotIn> SortedPot() => _potIns.Values
+        .Select(c => new BlackjackPot.PotIn(c.Txid, c.Vout, c.Value))
+        .OrderBy(p => p.Txid, StringComparer.Ordinal).ThenBy(p => p.Vout).ToList();
+
     private void DriveFunding()
     {
         if (_roster == null) return;
-        if (!_funded && FundPot != null)
+        if (!_postSplit)
         {
-            var coin = FundPot(_potScript, MyStake);      // escrow my stake into the n-of-n pot (real on-chain coin)
-            if (coin != null) { _potIns[_myPubHex] = coin; _funded = true; }
+            // INITIAL funding: each player escrows their stake into the n-of-n pot (one real coin each)
+            if (!_funded && FundPot != null)
+            {
+                var coin = FundPot(_potScript, MyStake);
+                if (coin != null) { _potIns[_myPubHex] = coin; _funded = true; }
+            }
+            if (_potIns.TryGetValue(_myPubHex, out var mine))
+                Send(new { t = "potin", txid = mine.Txid, vout = mine.Vout, value = mine.Value });   // re-sent each tick (deduped)
+            if (!_roster.All(p => _potIns.ContainsKey(p))) { Status = $"Funding the pot on-chain… {_potIns.Count}/{_roster.Length} players staked."; return; }
+            if (_pot.Count == 0) _pot = SortedPot();
         }
-        if (_potIns.TryGetValue(_myPubHex, out var mine))
-            Send(new { t = "potin", txid = mine.Txid, vout = mine.Vout, value = mine.Value });   // re-sent each tick (deduped) until all collected
-        if (_roster.All(p => _potIns.ContainsKey(p))) StartHand();   // every stake is escrowed — begin play
-        else Status = $"Funding the pot on-chain… {_potIns.Count}/{_roster.Length} players staked.";
+
+        // BOTH paths: co-sign a fresh nLockTime REFUND for the CURRENT pot (per generation) before play resumes —
+        // a griefer can never strand the stake. Play begins only once the refund is fully co-signed and held.
+        if (_recoveryTx == null)
+        {
+            try { _recoveryTx = BlackjackPot.BuildSessionRecovery(_pot, _potPubs, StakesInRosterOrder(), PotFee, RecoveryLockHeight); }
+            catch { ResumePlay(); return; }   // refund couldn't be built — proceed (settlement still requires all sigs)
+        }
+        if (!_recoverySigs.ContainsKey(_myPubHex))
+        {
+            var sigs = new string[_pot.Count];
+            for (int j = 0; j < _pot.Count; j++) sigs[j] = Convert.ToHexString(BlackjackPot.SignSessionInput(_recoveryTx, j, _potPubs, _pot[j].Value, _priv)).ToLowerInvariant();
+            _recoverySigs[_myPubHex] = sigs;
+        }
+        Send(new { t = "recosig", g = _potGen, sigs = _recoverySigs[_myPubHex] });   // re-sent each tick (deduped) until all co-sign
+        if (_recoveryRaw == null && _roster.All(p => _recoverySigs.ContainsKey(p)))
+        {
+            var perInput = new List<IReadOnlyList<byte[]>>();
+            for (int j = 0; j < _pot.Count; j++) { var col = new List<byte[]>(); foreach (var pub in _roster) col.Add(Convert.FromHexString(_recoverySigs[pub][j])); perInput.Add(col); }
+            _recoveryRaw = Chain.Serialize(BlackjackPot.ApplySessionSigs(_recoveryTx, perInput));
+        }
+        if (_recoveryRaw != null) ResumePlay();   // safety net in hand — deal
+        else Status = $"Co-signing the refund safety net… {_recoverySigs.Count}/{_roster.Length}.";
     }
+
+    // The stakes the refund returns, in roster order. Initial pot: each player's own coin. Post-split single-coin
+    // pot: split the pot across the remaining players (the refund only needs to conserve the pot).
+    private long[] StakesInRosterOrder()
+    {
+        if (!_postSplit) return _roster!.Select(p => _potIns[p].Value).ToArray();
+        long potV = _pot.Sum(p => p.Value); int n = _roster!.Length;
+        long share = potV / n, extra = potV - share * n; var s = new long[n];
+        for (int i = 0; i < n; i++) s[i] = share + (i == n - 1 ? extra : 0);
+        return s;
+    }
+
+    private void ResumePlay() => StartHand();   // (re)deal on the current pot generation
 
     private void BeginSettlement()
     {
         if (_roster == null) { State = Phase.Done; return; }
-        State = Phase.Settling; _settleStarted = true;
-        // deterministic inputs: every escrowed pot coin, sorted identically on every node
-        _settleInputs = _potIns.Values.Select(c => new BlackjackPot.PotIn(c.Txid, c.Vout, c.Value))
-            .OrderBy(p => p.Txid, StringComparer.Ordinal).ThenBy(p => p.Vout).ToList();
+        State = Phase.Settling; _settleStarted = true; _isSplit = false;
+        _settleInputs = new List<BlackjackPot.PotIn>(_pot);   // the current pot coins (deterministic order)
         long pot = _settleInputs.Sum(p => p.Value);
         int n = _roster.Length;
         long residual = _dealerBankroll, share = residual / n, extra = residual - share * n;
@@ -366,7 +436,29 @@ public sealed class NetBlackjack
         final[big] -= PotFee;
         try { _settleTx = BlackjackPot.BuildSessionSettlement(_settleInputs, _potPubs, final, PotFee); }
         catch (Exception) { State = Phase.Done; Status = "Settlement could not be built (pot mismatch)."; Raise(); return; }
+        _settlingAt = Environment.TickCount64;
         Status = "Settling the pot on-chain — all players co-sign the payout…";
+        Raise();
+    }
+
+    // A LEAVER SPLIT: pay each leaving player their standing AND re-escrow the remainder into a NEW n-of-n pot of
+    // the players who continue — all co-signed by the CURRENT players. Built deterministically (same on every node).
+    private void BeginSplit(string[] leavers, string[] remaining)
+    {
+        if (_roster == null) return;
+        State = Phase.Settling; _settleStarted = true; _isSplit = true; _splitRemaining = remaining;
+        _settleInputs = new List<BlackjackPot.PotIn>(_pot);
+        long pot = _settleInputs.Sum(p => p.Value);
+        int n = _roster.Length; long share = _dealerBankroll / n;   // each player's share of the house residual at the leave
+        var leaverPubs = new List<byte[]>(); var leaverPayouts = new List<long>(); long leaversTotal = 0;
+        foreach (var p in _roster) if (Array.IndexOf(leavers, p) >= 0)
+        { long pay = _bankroll.GetValueOrDefault(p) + share; leaverPubs.Add(Convert.FromHexString(p)); leaverPayouts.Add(pay); leaversTotal += pay; }
+        long newPot = pot - leaversTotal - PotFee;
+        var remainingPubs = _roster.Where(p => Array.IndexOf(remaining, p) >= 0).Select(Convert.FromHexString).ToList();
+        try { _settleTx = BlackjackPot.BuildLeaverSplit(_settleInputs, leaverPubs, leaverPayouts, remainingPubs, newPot, PotFee); }
+        catch { State = Phase.Done; Status = "The leaver split could not be built."; Raise(); return; }
+        _settlingAt = Environment.TickCount64;
+        Status = "A player is leaving — co-signing the on-chain split (cash them out; the rest play on)…";
         Raise();
     }
 
@@ -380,9 +472,23 @@ public sealed class NetBlackjack
                 sigs[j] = Convert.ToHexString(BlackjackPot.SignSessionInput(_settleTx, j, _potPubs, _settleInputs[j].Value, _priv)).ToLowerInvariant();
             _settleSigs[_myPubHex] = sigs;
         }
-        Send(new { t = "settlesig", sigs = _settleSigs[_myPubHex] });   // re-sent each tick (deduped) until everyone has signed
-        if (_settleDone || !_roster.All(p => _settleSigs.ContainsKey(p))) { Status = $"Settling the pot on-chain… {_settleSigs.Count}/{_roster.Length} players co-signed."; return; }
-        // every player has co-signed: assemble each input's sigs in pubkey (roster) order and broadcast on-chain
+        Send(new { t = "settlesig", g = _potGen, sigs = _settleSigs[_myPubHex] });   // re-sent each tick (deduped) until everyone signs
+        if (_settleDone) return;
+        if (!_roster.All(p => _settleSigs.ContainsKey(p)))
+        {
+            // GRIEFING SAFETY: if not everyone co-signs within the grace window, broadcast the pre-signed nLockTime
+            // REFUND — no stake can be held hostage. It confirms after RecoveryLockHeight.
+            if (!_isSplit && _recoveryRaw != null && !_recoveryBroadcast && Environment.TickCount64 - _settlingAt > SettleGraceMs)
+            {
+                _recoveryBroadcast = true; _settleDone = true; State = Phase.Done;
+                try { OnRecoveryTx?.Invoke(_recoveryRaw); } catch { }
+                Status = "A player refused to co-sign the payout — the pre-signed refund was broadcast; every stake is returned after the timeout.";
+                Raise(); return;
+            }
+            Status = $"{(_isSplit ? "Splitting" : "Settling")} the pot on-chain… {_settleSigs.Count}/{_roster.Length} players co-signed.";
+            return;
+        }
+        // everyone co-signed: assemble each input's sigs in pubkey (roster) order and broadcast on-chain
         var perInput = new List<IReadOnlyList<byte[]>>();
         for (int j = 0; j < _settleInputs.Count; j++)
         {
@@ -391,10 +497,31 @@ public sealed class NetBlackjack
             perInput.Add(col);
         }
         var signed = BlackjackPot.ApplySessionSigs(_settleTx, perInput);
-        _settleDone = true; State = Phase.Done;
         try { OnSettlementTx?.Invoke(Chain.Serialize(signed)); } catch { }
+        if (_isSplit) { ContinueAfterSplit(signed); return; }
+        _settleDone = true; State = Phase.Done;
         Status = $"Pot settled on-chain — you cashed out {MyBankroll} sat (tx {Chain.Txid(signed)[..12]}…).";
         Raise();
+    }
+
+    // After the split tx is co-signed (identically on every node), reconfigure to the new pot/roster: the leavers
+    // are cashed out and done; the remaining players adopt the re-escrowed coin as a NEW generation pot, re-secure
+    // it with a fresh refund, and play on — no re-funding, no re-confirmation.
+    private void ContinueAfterSplit(Chain.Tx signed)
+    {
+        var newCoin = new BlackjackPot.PotIn(Chain.Txid(signed), (uint)(signed.Outs.Count - 1), signed.Outs[^1].Value);
+        bool iRemain = _splitRemaining != null && Array.IndexOf(_splitRemaining, _myPubHex) >= 0;
+        _potGen++;
+        _pot = new List<BlackjackPot.PotIn> { newCoin };
+        _roster = _splitRemaining;
+        _potPubs = _roster!.Select(Convert.FromHexString).ToArray();
+        _potScript = BlackjackPot.PotScript(_potPubs);
+        _dealerBankroll = newCoin.Value - _roster.Sum(p => _bankroll.GetValueOrDefault(p));   // residual backing the new pot
+        _potIns.Clear(); _settleSigs.Clear(); _settleTx = null; _settleInputs = new(); _isSplit = false; _splitRemaining = null;
+        _recoverySigs.Clear(); _recoveryTx = null; _recoveryRaw = null; _recoveryBroadcast = false;
+        _leaveAfter.Clear(); _settleDone = false; _settleStarted = false; _postSplit = true; _funded = true;
+        if (iRemain) { State = Phase.Funding; Status = "Player left — re-securing the new pot, then dealing on…"; Raise(); }
+        else { _leaving = true; State = Phase.Done; Status = $"You left — cashed out on-chain. The others play on."; Raise(); }
     }
 
     private static int[] RandomPerm(int n) { var p = Enumerable.Range(0, n).ToArray(); for (int i = n - 1; i > 0; i--) { int j = (int)System.Security.Cryptography.RandomNumberGenerator.GetInt32(i + 1); (p[i], p[j]) = (p[j], p[i]); } return p; }
@@ -636,8 +763,11 @@ public sealed class NetBlackjack
             if (t == "leave") { try { int after = root.GetProperty("after").GetInt32(); _leaveAfter.AddOrUpdate(pub, after, (_, old) => Math.Min(old, after)); lock (_gate) RecheckMembership(); } catch { } return; }
             // a player announces the pot coin they escrowed (only roster members count toward funding)
             if (t == "potin") { try { if (_roster != null && Array.IndexOf(_roster, pub) >= 0) { var c = new PotCoin(root.GetProperty("txid").GetString()!, root.GetProperty("vout").GetUInt32(), root.GetProperty("value").GetInt64()); _potIns.TryAdd(pub, c); } } catch { } return; }
-            // a player's co-signatures for the session settlement (one per pot input, in input order)
-            if (t == "settlesig") { try { if (_roster != null && Array.IndexOf(_roster, pub) >= 0) { var arr = root.GetProperty("sigs").EnumerateArray().Select(e => e.GetString()!).ToArray(); _settleSigs.TryAdd(pub, arr); } } catch { } return; }
+            // a player's co-signatures for the settlement/split (one per pot input). Tagged with the pot GENERATION
+            // so a stale co-sig from before a leaver-split can never be mixed into the new pot's signing.
+            if (t == "settlesig") { try { if (_roster != null && Array.IndexOf(_roster, pub) >= 0 && root.GetProperty("g").GetInt32() == _potGen) { var arr = root.GetProperty("sigs").EnumerateArray().Select(e => e.GetString()!).ToArray(); _settleSigs.TryAdd(pub, arr); } } catch { } return; }
+            // a player's co-signatures for the pre-signed nLockTime REFUND (per generation; collected before play)
+            if (t == "recosig") { try { if (_roster != null && Array.IndexOf(_roster, pub) >= 0 && root.GetProperty("g").GetInt32() == _potGen) { var arr = root.GetProperty("sigs").EnumerateArray().Select(e => e.GetString()!).ToArray(); _recoverySigs.TryAdd(pub, arr); } } catch { } return; }
             lock (_gate)
             {
                 // every per-hand message is tagged with its hand number; a stale frame from a previous hand is ignored,

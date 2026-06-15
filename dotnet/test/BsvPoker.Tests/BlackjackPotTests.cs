@@ -64,6 +64,39 @@ public static class BlackjackPotTests
             T.True(Chain.VerifyMultisigNofN(signed, 0, pubs, fund.Pot), "the FUNDED n-of-n pot is spent only with ALL players' signatures");
         });
 
+        T.Run("pre-signed nLockTime REFUND: griefing-safe — every stake comes back if the payout is never co-signed", () =>
+        {
+            var ks = Enumerable.Range(0, 3).Select(_ => Secp256k1.GenerateKeyPair()).ToArray();
+            var pubs = ks.Select(k => k.Pub).ToList();
+            // three per-player escrow coins (one each) into the same n-of-n pot, 10k stake each
+            var pot = new List<BlackjackPot.PotIn>
+            {
+                new("aa".PadRight(64, '1'), 0, 10_000),
+                new("bb".PadRight(64, '2'), 0, 10_000),
+                new("cc".PadRight(64, '3'), 0, 10_000),
+            };
+            var stakes = new long[] { 10_000, 10_000, 10_000 };
+
+            var refund = BlackjackPot.BuildSessionRecovery(pot, pubs, stakes, fee: 0, lockHeight: 950_000);
+            T.Eq((int)refund.LockTime, 950_000, "the refund is locked until the agreed height");
+            T.True(refund.Ins.All(i => i.Sequence != 0xffffffff), "inputs are non-final so the locktime binds");
+
+            // every player co-signs the refund AT FUNDING (here, all of them) — each input needs all three sigs
+            var perInput = new List<IReadOnlyList<byte[]>>();
+            for (int j = 0; j < pot.Count; j++)
+            {
+                var col = new List<byte[]>();
+                for (int p = 0; p < pubs.Count; p++) col.Add(BlackjackPot.SignSessionInput(refund, j, pubs, pot[j].Value, ks[p].Priv));
+                perInput.Add(col);
+            }
+            var signed = BlackjackPot.ApplySessionSigs(refund, perInput);
+            for (int j = 0; j < pot.Count; j++)
+                T.True(Chain.VerifyMultisigNofN(signed, j, pubs, pot[j].Value), $"refund input {j} is a valid n-of-n spend");
+            T.Eq(signed.Outs.Sum(o => o.Value), 30_000L, "the refund returns every stake (the whole pot)");
+            for (int i = 0; i < 3; i++)
+                T.Eq(T.Hex(signed.Outs[i].Script), T.Hex(Chain.P2pkhLockForPub(pubs[i])), $"player {i}'s stake is refunded to player {i}");
+        });
+
         T.Run("(n-1)-collusion FAILS: a settlement missing one player's real signature is rejected", () =>
         {
             var ks = Enumerable.Range(0, 3).Select(_ => Secp256k1.GenerateKeyPair()).ToArray();

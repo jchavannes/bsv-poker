@@ -140,4 +140,54 @@ public static class BlackjackPot
         for (int j = 0; j < sigsPerInputInPubOrder.Count; j++) tx = Chain.ApplyMultisigScriptSigN(tx, j, sigsPerInputInPubOrder[j]);
         return tx;
     }
+
+    /// <summary>A LEAVER SPLIT: when a player leaves an N-player (N&gt;2) table but two or more remain, spend every
+    /// current pot coin into one tx that PAYS each leaver their standing AND RE-ESCROWS the remainder into a NEW
+    /// n-of-n pot of the remaining players. Co-signed by ALL current players (same <see cref="SignSessionInput"/> /
+    /// <see cref="ApplySessionSigs"/>). The continuing stake never round-trips through a wallet, so play resumes
+    /// immediately with no re-confirmation. Outputs: each leaver's payout (in order), then the new pot at the end.</summary>
+    public static Chain.Tx BuildLeaverSplit(IReadOnlyList<PotIn> pot, IReadOnlyList<byte[]> leaverPubs, IReadOnlyList<long> leaverPayouts, IReadOnlyList<byte[]> remainingPubs, long newPotValue, long fee)
+    {
+        if (leaverPubs.Count != leaverPayouts.Count) throw new ArgumentException("a payout per leaver");
+        if (leaverPubs.Count < 1) throw new ArgumentException("need at least one leaver");
+        if (remainingPubs.Count < 2) throw new ArgumentException("group Blackjack needs >= 2 remaining players");
+        if (newPotValue <= 0 || fee < 0) throw new ArgumentException("bad split amounts");
+        long potValue = pot.Sum(p => p.Value), paid = leaverPayouts.Sum();
+        if (paid + newPotValue + fee != potValue) throw new ArgumentException($"split does not conserve the pot: {paid} + {newPotValue} + fee {fee} != {potValue}");
+        var outs = new List<Chain.TxOut>();
+        for (int i = 0; i < leaverPubs.Count; i++)
+            if (leaverPayouts[i] > 0) outs.Add(new Chain.TxOut(leaverPayouts[i], Chain.P2pkhLockForPub(leaverPubs[i])));
+        outs.Add(new Chain.TxOut(newPotValue, Chain.MultisigLockNofN(remainingPubs)));   // re-escrowed remainder = the NEW pot
+        var ins = pot.Select(p => new Chain.TxIn(p.Txid, p.Vout, Array.Empty<byte>(), 0xffffffff)).ToList();
+        return new Chain.Tx(2, ins, outs, 0);
+    }
+
+    /// <summary>The vout of the re-escrowed NEW pot output produced by <see cref="BuildLeaverSplit"/> (it is the
+    /// last output — after each positive leaver payout).</summary>
+    public static uint SplitNewPotVout(IReadOnlyList<long> leaverPayouts) => (uint)leaverPayouts.Count(p => p > 0);
+
+    /// <summary>The pre-agreed nLockTime RECOVERY for the per-player-escrow pot: spends EVERY pot coin (non-final
+    /// sequence so the locktime binds) and REFUNDS each player their original stake. Every player co-signs this at
+    /// FUNDING — before a card is dealt — so if the cooperative settlement ever stalls (a player griefs by refusing
+    /// to co-sign the payout) anyone can broadcast it after <paramref name="lockHeight"/> and no stake is stranded.
+    /// Safety (n-of-n, no theft) + liveness (pre-signed refund) with no covenant opcode. Signed/assembled with the
+    /// same <see cref="SignSessionInput"/> / <see cref="ApplySessionSigs"/> helpers as the settlement.</summary>
+    public static Chain.Tx BuildSessionRecovery(IReadOnlyList<PotIn> pot, IReadOnlyList<byte[]> playerPubs, IReadOnlyList<long> stakes, long fee, uint lockHeight)
+    {
+        if (playerPubs.Count != stakes.Count) throw new ArgumentException("a stake per player");
+        if (fee < 0) throw new ArgumentException("negative fee");
+        long potValue = pot.Sum(p => p.Value), refunded = stakes.Sum();
+        if (refunded != potValue) throw new ArgumentException($"recovery must refund the whole pot: {refunded} != {potValue}");
+        if (fee >= potValue) throw new ArgumentException("fee exceeds the pot");
+        var outs = new List<Chain.TxOut>();
+        for (int i = 0; i < playerPubs.Count; i++)
+        {
+            long refund = stakes[i] - (i == playerPubs.Count - 1 ? fee : 0);   // fee off the last share
+            if (refund < 0) throw new ArgumentException("a stake cannot cover the fee");
+            if (refund > 0) outs.Add(new Chain.TxOut(refund, Chain.P2pkhLockForPub(playerPubs[i])));
+        }
+        if (outs.Count == 0) throw new ArgumentException("no positive refunds");
+        var ins = pot.Select(p => new Chain.TxIn(p.Txid, p.Vout, Array.Empty<byte>(), 0xfffffffe)).ToList();   // non-final → locktime active
+        return new Chain.Tx(2, ins, outs, lockHeight);
+    }
 }

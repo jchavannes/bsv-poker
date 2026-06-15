@@ -318,6 +318,10 @@ public partial class MainWindow : Window
             return new NetBlackjack.PotCoin(Chain.Txid(tx), 0, value);
         });
         bj.OnSettlementTx = raw => { try { _ = _wallet.BroadcastRaw(raw); _ = BroadcastMove(raw); } catch { } };
+        // GRIEFING SAFETY: the pre-signed refund unlocks ~30 days out (≈4320 blocks); if a player ever refuses to
+        // co-sign the cooperative payout, the refund is broadcast and every stake comes back after the timeout.
+        bj.RecoveryLockHeight = _wallet.ApproxTipHeight + 4320;
+        bj.OnRecoveryTx = raw => { try { _ = _wallet.BroadcastRaw(raw); _ = BroadcastMove(raw); } catch { } };
         bj.Start();
         _bjGame = bj;
         var win = new BlackjackTableWindow(this, bj, _wallet.IdentityLabelFor);   // shows who is at the table (@handles)

@@ -159,6 +159,7 @@ public static class NetBlackjackTests
                 {
                     int idx = i; var w = wallets[i];
                     g[i].HandPauseMs = 400;
+                    g[i].RecoveryLockHeight = 950_000;   // the app sets this to (tip + ~30 days); any future height for the test
                     g[i].FundPot = (script, value) => { try { var sp = w.SpendAction(script, value, 1); return new NetBlackjack.PotCoin(Chain.Txid(sp.Tx), 0, value); } catch { return null; } };
                     g[i].OnSettlementTx = raw => settlements[idx] = raw;
                 }
@@ -169,6 +170,15 @@ public static class NetBlackjackTests
                 long pot = g[0].PotValue;
                 T.True(g.All(x => x.PotValue == pot), "every node agrees on the pot value");
                 T.Eq(pot, g[0].MyBankroll * 2 * N, "the pot equals every player's full stake (buy-in + house share)");
+
+                // GRIEFING SAFETY: before any card, every player holds the pre-signed nLockTime REFUND — a valid
+                // n-of-n spend of every pot coin that returns each stake, broadcastable if settlement ever stalls.
+                T.True(g.All(x => x.RecoveryRaw != null), "every player holds the pre-signed refund (no stake can be stranded)");
+                var rec = Chain.Deserialize(g[0].RecoveryRaw!);
+                for (int j = 0; j < rec.Ins.Count; j++)
+                    T.True(Chain.VerifyMultisigNofN(rec, j, g[0].PotPubs, pot / rec.Ins.Count), $"refund input {j} is a valid n-of-n spend (all co-signed at funding)");
+                T.True(rec.LockTime > 0 && rec.Ins.All(i => i.Sequence != 0xffffffff), "the refund is nLockTime-gated (non-final) — only valid after the timeout");
+                T.Eq(rec.Outs.Sum(o => o.Value), pot - g[0].PotFee, "the refund returns the whole pot (minus fee) to the stakers");
 
                 // play a couple of hands by standing, then one player leaves → the session settles on-chain
                 T.True(DriveStand(g, () => g.All(x => x.HandNumber >= 2), 60000), "a couple of hands play");
@@ -184,6 +194,46 @@ public static class NetBlackjackTests
                 for (int j = 0; j < tx.Ins.Count; j++)
                     T.True(Chain.VerifyMultisigNofN(tx, j, pubs, pot / tx.Ins.Count), $"pot input {j} is a valid n-of-n spend (all players co-signed)");
                 T.Eq(tx.Outs.Sum(o => o.Value), pot - g[0].PotFee, "the settlement pays out the whole pot (minus fee) to the players' standings");
+            }
+            finally { foreach (var x in g) { try { x.Stop(); } catch { } } foreach (var n in nodes) { try { n.Dispose(); } catch { } } }
+        });
+
+        T.Run("ON-CHAIN POT continuation: a player leaves a 3-handed table → the pot SPLITS, the other two play on", () =>
+        {
+            const int N = 3;
+            var (nodes, ids) = Mesh(N);
+            NetBlackjack[] g = Array.Empty<NetBlackjack>();
+            try
+            {
+                T.True(Until(() => nodes.All(n => n.PeerCount >= N - 1), 20000), "the 3 nodes form one mesh");
+                const string table = "t-bjsplit~p3~b10";
+                var wallets = ids.Select(_ => { var w = new OnChainWallet(WalletKeys.NewSeed()); w.Add(new OnChainWallet.Utxo("ff".PadRight(64, '8'), 0, 5_000_000, 0, 0)); return w; }).ToArray();
+                var splits = new List<byte[]>();
+                g = ids.Select((id, i) => new NetBlackjack(nodes[i], table, id.Priv, id.Pub)).ToArray();
+                for (int i = 0; i < N; i++)
+                {
+                    var w = wallets[i];
+                    g[i].HandPauseMs = 400; g[i].RecoveryLockHeight = 950_000;
+                    g[i].FundPot = (script, value) => { try { var sp = w.SpendAction(script, value, 1); return new NetBlackjack.PotCoin(Chain.Txid(sp.Tx), 0, value); } catch { return null; } };
+                    g[i].OnSettlementTx = raw => { lock (splits) splits.Add(raw); };
+                }
+                foreach (var x in g) x.Start();
+                T.True(Until(() => g.All(x => x.PotValue > 0 && x.MyHand.Count == 2), 40000), "the 3-player pot is funded and dealt");
+                long pot0 = g[0].PotValue;
+                T.True(DriveStand(g, () => g.All(x => x.HandNumber >= 2), 60000), "a hand plays");
+
+                // seat 0's player leaves; with two left the pot SPLITS on-chain and the other two keep playing
+                var leaver = g[0]; var stayers = new[] { g[1], g[2] };
+                leaver.Leave();
+                T.True(DriveStand(g, () => leaver.SessionOver, 90000), "the leaver is cashed out on-chain and done");
+
+                bool cont = DriveStand(stayers, () => stayers.All(x => x.PotValue > 0 && x.PotValue < pot0 && x.SeatPubs.Length == 2 && !x.SessionOver), 90000);
+                T.True(cont, "the remaining two continue on the smaller re-escrowed pot (a real 2-of-2)");
+                T.True(stayers.Select(x => x.PotValue).Distinct().Count() == 1, "the two agree on the new pot value");
+                int hAt = stayers.Max(x => x.HandNumber);
+                T.True(DriveStand(stayers, () => stayers.All(x => x.HandNumber > hAt), 90000), "more hands are dealt after the split");
+                T.True(splits.Count > 0, "an on-chain split/settlement tx was broadcast (leaver paid + remainder re-escrowed)");
+                T.True(!g.Any(x => x.CheatDetected), "no false cheat detection across the split");
             }
             finally { foreach (var x in g) { try { x.Stop(); } catch { } } foreach (var n in nodes) { try { n.Dispose(); } catch { } } }
         });
