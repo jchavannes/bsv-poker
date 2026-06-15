@@ -344,7 +344,7 @@ public sealed class GameView : UserControl
             foreach (var c in hand.Seats[me].Hole) _vault.AddCard(c.Index, System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
             _onCardsChanged();
         }
-        foreach (var c in hand.Seats[me].Hole) { var cv = new CardView(); cv.ShowCard(c); _botCards.Children.Add(cv); }
+        foreach (var c in hand.Seats[me].Hole) _botCards.Children.Add(MakeMyCard(c, null));   // YOUR cards are clickable
         // one group per opponent seat (holes are face-down sentinels of the variant's count until showdown)
         _topInfo.Text = hand.Seats.Count > 2 ? "Opponents" : "";
         foreach (var s in hand.Seats.Where(s => s.Seat != me))
@@ -373,6 +373,59 @@ public sealed class GameView : UserControl
         if (la is { CanBetOrRaise: true }) _bet.Text = la.MinRaiseTo.ToString();
     }
 
+    /// <summary>Charge a small on-chain fee for a card action (e.g. discarding to draw a replacement). Set by the
+    /// host (MainWindow) to fund + broadcast a real 1-sat tx; returns true if it was paid.</summary>
+    public Func<long, bool>? PayFee;
+
+    /// <summary>One of MY cards, made CLICKABLE: click it to select (gold lift) and open its actions — view it,
+    /// copy it, and (where the game allows) discard it and draw a replacement for a fee.</summary>
+    private CardView MakeMyCard(Card c, Action? onSwap)
+    {
+        var cv = new CardView(); cv.ShowCard(c); cv.SetSelectable(true);
+        cv.Clicked += clicked => ShowCardActions(c, onSwap);
+        return cv;
+    }
+
+    private void ShowCardActions(Card c, Action? onSwap)
+    {
+        var sp = new StackPanel { Margin = new Thickness(16) };
+        var big = new CardView(); big.ShowCard(c); big.Width = 96; big.Height = 138; big.HorizontalAlignment = HorizontalAlignment.Center;
+        sp.Children.Add(big);
+        sp.Children.Add(new TextBlock { Text = $"{c.RankLabel}{c.Glyph}", Foreground = Brushes.White, FontSize = 18, FontWeight = FontWeights.Bold, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 8, 0, 0) });
+        sp.Children.Add(new TextBlock { Text = "This is YOUR card — sealed on-chain as an NFT only you can open.", Foreground = new SolidColorBrush(Color.FromRgb(0xCF, 0xD8, 0xDC)), TextWrapping = TextWrapping.Wrap, MaxWidth = 240, TextAlignment = TextAlignment.Center, Margin = new Thickness(0, 4, 0, 10) });
+        var win = new Window { Title = "Card", SizeToContent = SizeToContent.WidthAndHeight, WindowStartupLocation = WindowStartupLocation.CenterOwner, Owner = Window.GetWindow(this), Background = new SolidColorBrush(Color.FromRgb(0x12, 0x12, 0x12)), ResizeMode = ResizeMode.NoResize };
+        var copy = Mk("Copy card", "#2E5A7A"); copy.Click += (_, _) => { try { for (int i = 0; i < 5; i++) { try { System.Windows.Clipboard.SetText($"{c.RankLabel}{c.Glyph}"); break; } catch { System.Threading.Thread.Sleep(40); } } } catch { } };
+        sp.Children.Add(copy);
+        if (onSwap != null)
+        {
+            var swap = Mk("Discard & draw a new card (pay 1 sat)", "#8A5A00");
+            swap.Click += (_, _) => { win.Close(); onSwap(); };
+            sp.Children.Add(swap);
+        }
+        else
+        {
+            sp.Children.Add(new TextBlock { Text = "(This variant deals community cards — there is no card swap. Discard/draw applies to draw games.)", Foreground = new SolidColorBrush(Color.FromRgb(0x9E, 0x9E, 0x9E)), TextWrapping = TextWrapping.Wrap, MaxWidth = 240, TextAlignment = TextAlignment.Center, FontSize = 11, Margin = new Thickness(0, 8, 0, 0) });
+        }
+        var close = Mk("Close", "#444444"); close.Click += (_, _) => win.Close(); sp.Children.Add(close);
+        win.Content = sp; win.ShowDialog();
+    }
+
+    // Discard hole card #idx in the PRACTICE hand and draw a fresh replacement, charging a real 1-sat fee.
+    private void SwapPracticeCard(int idx)
+    {
+        var st = _practice;
+        if (st == null || st.Complete || idx < 0 || idx >= st.Seats[0].Hole.Length) return;
+        if (PayFee != null && !PayFee(1)) { _msg.Text = "Could not pay the 1-sat draw fee — fund your wallet first."; return; }
+        // a fresh card not already on the table (hole + board + opponent holes)
+        var inPlay = new HashSet<int>(st.Seats.SelectMany(s => s.Hole).Where(c => !c.IsFaceDown).Select(c => c.Index).Concat(st.Board.Select(c => c.Index)));
+        var rnd = System.Security.Cryptography.RandomNumberGenerator.GetInt32(52);
+        int tries = 0; while (inPlay.Contains(rnd) && tries++ < 200) rnd = System.Security.Cryptography.RandomNumberGenerator.GetInt32(52);
+        st.Seats[0].Hole[idx] = Card.FromIndex(rnd);
+        _vault.AddCard(rnd, System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)); _onCardsChanged();
+        _msg.Text = $"Discarded a card and drew {Card.FromIndex(rnd).RankLabel}{Card.FromIndex(rnd).Glyph} (paid 1 sat, on-chain).";
+        Render();
+    }
+
     private void RenderPractice()
     {
         var st = _practice;
@@ -394,7 +447,7 @@ public sealed class GameView : UserControl
             foreach (var c in st.Seats[0].Hole) _vault.AddCard(c.Index, System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
             _onCardsChanged();
         }
-        foreach (var c in st.Seats[0].Hole) { var cv = new CardView(); cv.ShowCard(c); _botCards.Children.Add(cv); }
+        for (int i = 0; i < st.Seats[0].Hole.Length; i++) { int idx = i; _botCards.Children.Add(MakeMyCard(st.Seats[0].Hole[i], () => SwapPracticeCard(idx))); }   // clickable: select/discard/draw
         foreach (var c in st.Seats[1].Hole) { var cv = new CardView(); if (_botMode && !st.Complete) cv.ShowBack(); else cv.ShowCard(c); _topCards.Children.Add(cv); }
         for (int i = 0; i < 5; i++) { var cv = new CardView(); if (i < st.Board.Count) cv.ShowCard(st.Board[i]); else cv.ShowEmpty(); _board.Children.Add(cv); }
         _pot.Text = $"Pot: {st.Pot}";

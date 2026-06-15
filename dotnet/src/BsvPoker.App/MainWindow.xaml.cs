@@ -129,6 +129,7 @@ public partial class MainWindow : Window
         // lingers as a ghost "open" table after its host walks away.
         _game.OnLeaveTable += () => { StopBotNetGame(); try { _node.CloseAllOwnTables(); } catch { } };
         _game.SetIdentityLabelResolver(_wallet.IdentityLabelFor);   // the table shows your PSEUDONYM, not a raw key
+        _game.PayFee = PayCardFee;   // clicking a card → discard & draw charges a real on-chain fee
         GameHost.Content = _game;
 
         // Chat: every message is a Bitcoin transaction; peers are auto-discovered from on-chain Announce txs
@@ -602,6 +603,21 @@ public partial class MainWindow : Window
     /// <summary>Turn one of MY in-game moves into a REAL on-chain transaction (a typed Bet output funded ~1 sat
     /// from my wallet) and dual-path broadcast it (IP-to-IP to every peer AND to the nodes). Every move I make is
     /// a transaction. Only MY moves are funded here (the mover pays); peers fund their own. Silent if unfunded.</summary>
+    /// <summary>Charge a small on-chain fee for a card action (discard &amp; draw): fund a real tiny tx from the
+    /// wallet and broadcast it both paths. Returns true only if it was actually built + paid. Shows in the
+    /// Transactions tab like every other action.</summary>
+    private bool PayCardFee(long sat)
+    {
+        try
+        {
+            var (raw, _) = _wallet.FundTx(Chain.P2pkhLockForPub(_idPub), Math.Max(1, sat), 1);   // pay to self (a real tx) — records + is visible
+            if (raw == null) return false;
+            _ = BroadcastMove(raw);
+            return true;
+        }
+        catch { return false; }
+    }
+
     private void EmitMoveOnChain(NetGame.MoveRecord m)
     {
         if (!m.Mine || m.Kind != "bet") return;
