@@ -42,6 +42,28 @@ public static class BlackjackPotTests
             T.Eq(signed.Outs.Sum(o => o.Value), pot, "the settlement outputs conserve the pot");
         });
 
+        T.Run("3 players FUND one n-of-n pot (an input each), then the funded pot pays out co-signed — full lifecycle", () =>
+        {
+            var ks = Enumerable.Range(0, 3).Select(_ => Secp256k1.GenerateKeyPair()).ToArray();
+            var pubs = ks.Select(k => k.Pub).ToList();
+            // each player contributes a 100k coin, staking 10k into the pot (change 90k each)
+            var contribs = Enumerable.Range(0, 3).Select(i =>
+                new BlackjackPot.Contribution(new OnChainWallet.Utxo(((char)('a' + i)).ToString().PadRight(64, (char)('1' + i)), 0, 100_000, 0, 0), pubs[i], 10_000, pubs[i])).ToList();
+
+            var fund = BlackjackPot.BuildFunding(contribs, pubs, fee: 0);
+            T.Eq(fund.Pot, 30_000, "the pot is the sum of all stakes");
+            var tx = fund.Tx;
+            for (int i = 0; i < 3; i++) tx = BlackjackPot.SignInput(tx, i, ks[i].Priv, ks[i].Pub, 100_000);
+            T.True(BlackjackPot.VerifyFunding(tx, contribs, 0), "every player signed ONLY their own input; value is conserved");
+            T.True(Chain.VerifyP2pkhInput(tx, 0, pubs[0], 100_000) && Chain.VerifyP2pkhInput(tx, 2, pubs[2], 100_000), "each contribution input is independently valid");
+
+            // the pot (vout 0) can now be settled — and ONLY with all three signatures
+            var final = new long[] { fund.Pot, 0, 0 };   // any distribution summing to the pot
+            var settle = BlackjackPot.BuildSettlement(Chain.Txid(tx), 0, fund.Pot, pubs, final, fee: 0);
+            var signed = BlackjackPot.CoSign(settle, pubs, fund.Pot, ks.Select(k => k.Priv).ToList());
+            T.True(Chain.VerifyMultisigNofN(signed, 0, pubs, fund.Pot), "the FUNDED n-of-n pot is spent only with ALL players' signatures");
+        });
+
         T.Run("(n-1)-collusion FAILS: a settlement missing one player's real signature is rejected", () =>
         {
             var ks = Enumerable.Range(0, 3).Select(_ => Secp256k1.GenerateKeyPair()).ToArray();
