@@ -34,7 +34,7 @@ public static class NetBlackjackTests
     // Drive every node to STAND on its turn (deterministic). Returns when the predicate holds or it times out.
     private static bool DriveStand(NetBlackjack[] g, Func<bool> until, int ms) => Until(() =>
     {
-        foreach (var x in g) if (x.State == NetBlackjack.Phase.Playing && x.ToAct == x.MySeat) x.Act(BjAction.Stand);
+        foreach (var x in g) if (x.MyTurn) x.Act(BjAction.Stand);
         return until();
     }, ms);
 
@@ -318,8 +318,8 @@ public static class NetBlackjackTests
                 {
                     foreach (var x in g)
                     {
-                        if (x.State != NetBlackjack.Phase.Playing || x.ToAct != x.MySeat || x.AwaitingMyCard) continue;
-                        // NEVER act after 21: if our own logic ever offered a turn at >21 that is the bug.
+                        if (!x.MyTurn) continue;   // the single atomic "can I act" gate (its turn, not done/busted, not awaiting a card)
+                        // NEVER offered a turn after 21: MyTurn must be false the instant the hand busts.
                         T.True(Blackjack.Value(x.MyHand).Total <= 21, $"a turn is never offered after busting (had {Blackjack.Value(x.MyHand).Total})");
                         if (Blackjack.Value(x.MyHand).Total < 17) x.Act(BjAction.Hit); else x.Act(BjAction.Stand);
                     }

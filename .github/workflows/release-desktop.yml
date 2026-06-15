@@ -1,6 +1,6 @@
-# Build the pure-.NET native Windows app (single-file, self-contained WPF poker.exe — no installer, no
-# separate DLLs, no runtime prerequisite) on a Windows runner and attach it to the GitHub Release for the
-# pushed tag. Reproducible from CI. Code signing is a later step (currently unsigned).
+# Build the pure-.NET native Windows app (single-file, self-contained WPF poker.exe — no separate DLLs, no runtime
+# prerequisite) on a Windows runner, build the INSTALLER (Inno Setup) and the portable ZIP, and attach all three to
+# the GitHub Release for the pushed tag. Reproducible from CI. Code signing is a later step (currently unsigned).
 name: Release desktop app
 
 on:
@@ -27,23 +27,39 @@ jobs:
           dotnet build dotnet/BsvPoker.sln -c Release
           dotnet run --project dotnet/test/BsvPoker.Tests/BsvPoker.Tests.csproj -c Release --no-build
 
-      - name: Publish the single-file self-contained poker.exe
+      - name: Publish the single-file self-contained poker.exe + portable ZIP
         shell: pwsh
         run: |
-          dotnet publish dotnet/src/BsvPoker.App/BsvPoker.App.csproj -c Release -r win-x64 `
-            --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
-            -o dist
-          Remove-Item dist/*.pdb -ErrorAction SilentlyContinue
+          powershell -ExecutionPolicy Bypass -File installer/package.ps1
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "dotnet/src/BsvPoker.App/bin/Release/net8.0-windows/win-x64/publish/poker.exe" dist/poker.exe -Force
 
-      - name: Attach poker.exe to the release
+      - name: Build the installer (Inno Setup)
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer/BsvPoker.iss
+
+      - name: Collect release artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item dist/poker.exe out/ -Force
+          Copy-Item release/*.zip out/ -Force
+          Copy-Item installer/Output/*.exe out/ -Force
+
+      - name: Attach artifacts to the release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/poker.exe
+          files: |
+            out/poker.exe
+            out/*.zip
+            out/BSV-Poker-Setup-*.exe
 
-      - name: Upload poker.exe as a workflow artifact (non-tag runs)
+      - name: Upload artifacts (non-tag runs)
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: actions/upload-artifact@v4
         with:
-          name: poker-windows-x64
-          path: dist/poker.exe
+          name: bsv-poker-windows-x64
+          path: out/*

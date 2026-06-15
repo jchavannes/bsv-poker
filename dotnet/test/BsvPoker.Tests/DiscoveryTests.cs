@@ -14,6 +14,11 @@ namespace BsvPoker.Tests;
 /// </summary>
 public static class DiscoveryTests
 {
+    // ISOLATED rendezvous so a real running BSV Poker instance on this machine (its node on the well-known port +
+    // the shared temp rendezvous file) can never pollute these tests with phantom peers. The subnet sweep is also
+    // turned off in tests for the same reason; these tests drive discovery through explicit on-chain seeds instead.
+    private static readonly string _rv = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "bsvp-it-disc-" + System.Guid.NewGuid().ToString("N") + ".txt");
+
     private static bool Until(Func<bool> c, int ms)
     {
         var dl = Environment.TickCount64 + ms;
@@ -36,8 +41,8 @@ public static class DiscoveryTests
             {
                 // each node runs discovery; we hand A the endpoint it would have read from the on-chain registry
                 // for B (and vice-versa) — i.e. exactly the "seed" the global registry provides.
-                da = new PeerDiscovery(a, "127.0.0.1"); da.Start();
-                db = new PeerDiscovery(b, "127.0.0.1"); db.Start();
+                da = new PeerDiscovery(a, "127.0.0.1", _rv, false); da.Start();
+                db = new PeerDiscovery(b, "127.0.0.1", _rv, false); db.Start();
                 da.SetOnChainSeeds(new[] { ("127.0.0.1", b.BoundPort) });
                 db.SetOnChainSeeds(new[] { ("127.0.0.1", a.BoundPort) });
 
@@ -80,7 +85,7 @@ public static class DiscoveryTests
             PeerDiscovery? d = null;
             try
             {
-                d = new PeerDiscovery(a, "127.0.0.1"); d.Start();
+                d = new PeerDiscovery(a, "127.0.0.1", _rv, false); d.Start();
                 d.SetOnChainSeeds(new[] { ("127.0.0.1", 1) });   // port 1: nothing there
                 Thread.Sleep(500);
                 T.Eq(a.PeerCount, 0, "no phantom peer is formed from a dead seed");
@@ -98,8 +103,8 @@ public static class DiscoveryTests
             PeerDiscovery? da = null, db = null;
             try
             {
-                da = new PeerDiscovery(a, "127.0.0.1"); da.Start();
-                db = new PeerDiscovery(b, "127.0.0.1"); db.Start();
+                da = new PeerDiscovery(a, "127.0.0.1", _rv, false); da.Start();
+                db = new PeerDiscovery(b, "127.0.0.1", _rv, false); db.Start();
                 da.SetOnChainSeeds(new[] { ("127.0.0.1", b.BoundPort) });
                 db.SetOnChainSeeds(new[] { ("127.0.0.1", a.BoundPort) });
                 T.True(Until(() => a.PeerCount >= 1 && b.PeerCount >= 1, 8000), "the two nodes connect");

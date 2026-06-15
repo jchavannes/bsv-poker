@@ -6,6 +6,13 @@ dist/
 # Published single-file binaries (the release workflow produces poker.exe; it is not committed)
 *.exe
 
+# Release artifacts (built by installer/package.ps1 + build-setup.ps1; attached to GitHub Releases, not committed)
+release/
+installer/Output/
+installer/BSV-Poker-payload.zip
+installer/setup-bootstrap.ps1
+installer/_iexpress.sed
+
 # OS / editor / logs
 .DS_Store
 *.log

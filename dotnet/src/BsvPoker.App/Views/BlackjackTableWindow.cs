@@ -89,8 +89,8 @@ public sealed class BlackjackTableWindow : Window
         _playerInfo.Text = me.Count > 0 ? $"Your total: {Blackjack.Value(me).Total}" + (_bj.MySeat >= 0 ? $"   (seat {_bj.MySeat})" : "") : "";
         _bankInfo.Text = _bj.HandNumber > 0 ? $"Hand #{_bj.HandNumber}   ·   Your bankroll: {_bj.MyBankroll} sat   ·   House: {_bj.DealerBankroll} sat" : "";
 
-        // your turn — but NOT while a card you drew is still being revealed (you must see each card before acting)
-        bool myTurn = _bj.State == NetBlackjack.Phase.Playing && _bj.ToAct == _bj.MySeat && !_bj.AwaitingMyCard;
+        // your turn — atomic: it's your turn, you're not done (incl. busted), and no drawn card is still pending
+        bool myTurn = _bj.MyTurn;
         _hit.IsEnabled = _stand.IsEnabled = myTurn;
         _double.IsEnabled = myTurn && me.Count == 2;
         // Leave is offered while the table is live (it cashes you out after the current hand); once the session is

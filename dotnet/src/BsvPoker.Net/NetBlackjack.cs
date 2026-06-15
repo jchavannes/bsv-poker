@@ -170,6 +170,10 @@ public sealed class NetBlackjack
     /// <summary>True while waiting for a card you drew (Hit/Double) to be revealed by all players — you cannot act
     /// again until you SEE it, so you can never blow past a bust by clicking fast.</summary>
     public bool AwaitingMyCard { get { lock (_gate) return _mySeat >= 0 && _pendingDraw.ContainsValue(_mySeat); } }
+    /// <summary>The single source of truth for "can I act right now": it is my turn, I'm not done (stood/doubled/
+    /// busted), and I'm not waiting on a card I drew. Atomic (taken under the game lock) so it is never momentarily
+    /// true for a busted hand. The UI enables Hit/Stand/Double on this.</summary>
+    public bool MyTurn { get { lock (_gate) return State == Phase.Playing && _mySeat >= 0 && _toAct == _mySeat && !_done[_mySeat] && !_pendingDraw.ContainsValue(_mySeat); } }
     /// <summary>True once the whole session is over (you left, or fewer than two players remain).</summary>
     public bool SessionOver => State == Phase.Done;
     /// <summary>True after you have asked to leave; you finish the current hand, then cash out.</summary>
@@ -783,8 +787,12 @@ public sealed class NetBlackjack
         // consumed by DriveDealer — adding them here would index _hands[-1] and throw, freezing the dealer.
         foreach (var kv in _pendingDraw.Where(kv => kv.Value >= 0 && _opened.ContainsKey(kv.Key)).ToList())
         {
-            int pos = kv.Key, seat = kv.Value; _hands[seat].Add(_opened[pos]); _pendingDraw.Remove(pos);
+            int pos = kv.Key, seat = kv.Value;
+            _hands[seat].Add(_opened[pos]);
+            // Mark a bust DONE before clearing the pending-draw flag, so there is no instant where a busted hand looks
+            // "your turn" (the hand is over while the just-drawn card is still pending → AwaitingMyCard stays true).
             if (Blackjack.Value(_hands[seat]).Total > 21) { _outcome[seat] = BjOutcome.PlayerBust; _done[seat] = true; }
+            _pendingDraw.Remove(pos);
         }
     }
 

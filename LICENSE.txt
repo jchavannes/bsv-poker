@@ -1,0 +1,20 @@
+BSV Poker
+Copyright (c) 2026 the BSV Poker authors. All rights reserved.
+
+This software and its source code are proprietary. No licence to use, copy,
+modify, merge, publish, distribute, sublicense, or sell copies of the software
+is granted except by a separate written agreement with the copyright holder.
+
+The software builds on Bitcoin SV and uses standard cryptographic primitives.
+It is provided "AS IS", without warranty of any kind, express or implied,
+including but not limited to the warranties of merchantability, fitness for a
+particular purpose, and non-infringement. In no event shall the authors or
+copyright holders be liable for any claim, damages, or other liability, whether
+in an action of contract, tort, or otherwise, arising from, out of, or in
+connection with the software or the use or other dealings in the software.
+
+Real-token play involves real funds on the Bitcoin SV network. You are solely
+responsible for your wallet, keys, and any value you stake or transact. Keys
+and seeds never leave your device; loss of a seed means loss of the funds.
+
+To obtain a licence, or for any other enquiry, contact the copyright holder.

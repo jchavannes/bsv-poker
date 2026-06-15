@@ -10,6 +10,12 @@
     <LangVersion>latest</LangVersion>
     <AssemblyName>poker</AssemblyName>
     <RootNamespace>BsvPoker.App</RootNamespace>
+    <Product>BSV Poker</Product>
+    <Company>BSV Poker</Company>
+    <Description>BSV Poker — peer-to-peer, fully on-chain poker and group blackjack on Bitcoin SV.</Description>
+    <Version>1.0.0</Version>
+    <FileVersion>1.0.0.0</FileVersion>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
     <ApplicationIcon>poker.ico</ApplicationIcon>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>

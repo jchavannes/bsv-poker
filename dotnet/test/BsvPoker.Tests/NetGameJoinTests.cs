@@ -13,6 +13,10 @@ namespace BsvPoker.Tests;
 /// </summary>
 public static class NetGameJoinTests
 {
+    // ISOLATED rendezvous + no subnet sweep, so a real running BSV Poker instance on this machine can't pollute
+    // these loopback tests with phantom peers (the test nodes find each other via their own private rendezvous file).
+    private static readonly string _rv = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "bsvp-it-join-" + System.Guid.NewGuid().ToString("N") + ".txt");
+
     private static bool Until(Func<bool> c, int ms)
     {
         var dl = Environment.TickCount64 + ms;
@@ -44,8 +48,8 @@ public static class NetGameJoinTests
             NetGame? gA = null, gB = null;
             try
             {
-                da = new PeerDiscovery(a, "127.0.0.1"); da.Start();
-                db = new PeerDiscovery(b, "127.0.0.1"); db.Start();
+                da = new PeerDiscovery(a, "127.0.0.1", _rv, false); da.Start();
+                db = new PeerDiscovery(b, "127.0.0.1", _rv, false); db.Start();
                 da.SetOnChainSeeds(new[] { ("127.0.0.1", b.BoundPort) });
                 db.SetOnChainSeeds(new[] { ("127.0.0.1", a.BoundPort) });
                 T.True(Until(() => a.PeerCount >= 1 && b.PeerCount >= 1, 8000), "the two nodes connect");
@@ -112,7 +116,7 @@ public static class NetGameJoinTests
             PeerDiscovery? da = null, db = null; NetGame? gA = null, gB = null;
             try
             {
-                da = new PeerDiscovery(a, "127.0.0.1"); da.Start(); db = new PeerDiscovery(b, "127.0.0.1"); db.Start();
+                da = new PeerDiscovery(a, "127.0.0.1", _rv, false); da.Start(); db = new PeerDiscovery(b, "127.0.0.1", _rv, false); db.Start();
                 da.SetOnChainSeeds(new[] { ("127.0.0.1", b.BoundPort) }); db.SetOnChainSeeds(new[] { ("127.0.0.1", a.BoundPort) });
                 T.True(Until(() => a.PeerCount >= 1 && b.PeerCount >= 1, 8000), "nodes connect");
                 const string table = "t-swap~TexasHoldem~p2~s100~b2";
@@ -145,8 +149,8 @@ public static class NetGameJoinTests
             PeerDiscovery? da = null, db = null;
             try
             {
-                da = new PeerDiscovery(a, "127.0.0.1"); da.Start();
-                db = new PeerDiscovery(b, "127.0.0.1"); db.Start();
+                da = new PeerDiscovery(a, "127.0.0.1", _rv, false); da.Start();
+                db = new PeerDiscovery(b, "127.0.0.1", _rv, false); db.Start();
                 da.SetOnChainSeeds(new[] { ("127.0.0.1", b.BoundPort) });
                 db.SetOnChainSeeds(new[] { ("127.0.0.1", a.BoundPort) });
                 T.True(Until(() => a.PeerCount >= 1 && b.PeerCount >= 1, 8000), "the two nodes connect");
@@ -179,8 +183,8 @@ public static class NetGameJoinTests
             PeerDiscovery? da = null, db = null;
             try
             {
-                da = new PeerDiscovery(a, "127.0.0.1"); da.Start();
-                db = new PeerDiscovery(b, "127.0.0.1"); db.Start();
+                da = new PeerDiscovery(a, "127.0.0.1", _rv, false); da.Start();
+                db = new PeerDiscovery(b, "127.0.0.1", _rv, false); db.Start();
                 da.SetOnChainSeeds(new[] { ("127.0.0.1", b.BoundPort) });
                 db.SetOnChainSeeds(new[] { ("127.0.0.1", a.BoundPort) });
                 T.True(Until(() => a.PeerCount >= 1 && b.PeerCount >= 1, 8000), "the two nodes connect");

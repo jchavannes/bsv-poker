@@ -40,6 +40,7 @@ public sealed class PeerDiscovery : IDisposable
     private System.Threading.Timer? _timer;
     private volatile bool _closed;
     private int _sweepRunning;                  // guard so only one subnet sweep runs at a time
+    private readonly bool _subnetSweep;         // probe the local /24 (off in isolated/test mode)
     private string _selfTag = "";
     private string _loopbackTag = "";
 
@@ -47,10 +48,13 @@ public sealed class PeerDiscovery : IDisposable
     private readonly object _seedLock = new();
     private List<(string Host, int Port)> _onChainSeeds = new();
 
-    public PeerDiscovery(P2PNode node, string advertiseHost)
+    /// <summary>Create peer discovery. <paramref name="rendezvousPath"/> overrides the shared local rendezvous file
+    /// (tests pass a unique path so a real running instance can't pollute them); <paramref name="subnetSweep"/>
+    /// can disable the LAN /24 probe (tests turn it off for the same isolation reason). Production uses the defaults.</summary>
+    public PeerDiscovery(P2PNode node, string advertiseHost, string? rendezvousPath = null, bool subnetSweep = true)
     {
-        _node = node; _advertiseHost = advertiseHost;
-        _rendezvousPath = Path.Combine(Path.GetTempPath(), "bsvpoker-peers.txt");
+        _node = node; _advertiseHost = advertiseHost; _subnetSweep = subnetSweep;
+        _rendezvousPath = rendezvousPath ?? Path.Combine(Path.GetTempPath(), "bsvpoker-peers.txt");
     }
 
     public void Start()
@@ -84,7 +88,7 @@ public sealed class PeerDiscovery : IDisposable
         // sweep the local subnet every ~4s (a full /24 probe is cheap and parallel); finds same-network players
         // within a few seconds with no configuration. Skipped while a previous sweep is still running.
         long now = Environment.TickCount64;
-        if (now - _lastSweep > 4000) { _lastSweep = now; _ = SweepSubnetAsync(); }
+        if (_subnetSweep && now - _lastSweep > 4000) { _lastSweep = now; _ = SweepSubnetAsync(); }
     }
 
     // TCP subnet sweep: probe every host on the local /24 at the well-known port(s); dial any that accept. Pure
