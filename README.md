@@ -10,16 +10,26 @@ double-click and play. Pure C# / .NET, pure **secp256k1** (the BSV curve), BSV-n
 
 ---
 
+## Install (simplest first)
+
+- **Setup.exe** — download `BSV-Poker-Setup-<ver>.exe` from the [latest Release](https://github.com/prof-faustus/bsv-poker/releases/latest) and double-click. Per-user, no admin; Start-Menu + Desktop shortcuts; uninstall via Settings → Apps.
+- **Portable ZIP** — download `BSV-Poker-<ver>-win-x64.zip`, unzip, run `poker.exe` (fully self-contained — no .NET needed). To add shortcuts: `powershell -ExecutionPolicy Bypass -File Install-BsvPoker.ps1`.
+- **Just the exe** — `poker.exe` from the Release runs on its own.
+
+Your wallet/profile data is stored separately and is preserved across uninstall. See [docs/INSTALL.md](docs/INSTALL.md) and the full [User Guide](docs/USER_GUIDE.md).
+
 ## What it is
 
-`poker.exe` is one window with four tabs:
+`poker.exe` is one window with tabs:
 
 | Tab | What it does |
 |-----|--------------|
-| **Wallet** | A BSV-native deterministic wallet: one 32-byte master **seed** backs up everything; spending keys derive directly from it; receive addresses, send, transaction history, seed backup/restore, WIF export, signed messages, and optional password-at-rest (AES-256-GCM). Cards you hold appear here as NFTs. |
-| **Lobby** | Fully peer-to-peer (no server). Host a table for any of the six variants, connect to another player by their `IP:port`, see tables appear on the gossip mesh, join one, or **play a bot**. |
-| **Game** | The poker table: practice, vs-bot, and **networked multiplayer (2–6 players)** over the P2P mesh, with **true hole-card privacy** (commutative-encryption deal — you see only your own cards until showdown). Texas Hold'em engine with blinds, all-in side pots, showdown, and chip conservation; six variants. |
-| **Chat** | Encrypted messaging — direct messages and groups. Every message uses a **fresh ephemeral ECDH key per recipient** (no key reuse, ever) → HKDF → AES-256-GCM. The wire is ciphertext. History persists across restarts. |
+| **Wallet** | A BSV-native deterministic wallet: one 32-byte master **seed** backs up everything; spending keys derive directly from it; receive addresses, send, a live **Transactions** log of every action, seed backup/restore, WIF export, signed messages, and optional password-at-rest (AES-256-GCM). Cards you hold appear here as NFTs. |
+| **Lobby** | Fully peer-to-peer (no server). Host a poker table for any variant, **Host Blackjack (group)** for 2–6 seats, see tables on the gossip mesh, join one, **play your bot**, or **publish your node on-chain** so anyone can find you. |
+| **Game** | The poker table: practice, vs-bot, and **networked multiplayer (2–6 players)** with **true hole-card privacy** (commutative-encryption deal). |
+| **Group Blackjack** | A live multiplayer table (never one-on-one): a jointly-computed dealer, **deals instantly**, plays hand after hand, with a **real on-chain n-of-n pot funded in the background** (miner first-seen verified), bust/leave/cash-out, on-chain settlement, leaver-split, and a pre-signed refund. See [docs/GAMES.md](docs/GAMES.md). |
+| **Chat** | Encrypted messaging — direct, all, and named groups. Fresh ephemeral ECDH per recipient → HKDF → AES-256-GCM; the wire is ciphertext; offline-capable. |
+| **Replay / Help** | Step through an on-chain hand tape move by move, and in-app help. |
 
 Two copies of `poker.exe` on the same machine are two **different players** — each instance claims
 its own profile directory (exclusive file lock) with its own wallet and identity.
