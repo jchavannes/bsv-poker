@@ -17,6 +17,8 @@ namespace BsvPoker.App.Views;
 public sealed class BlackjackTableWindow : Window
 {
     private readonly NetBlackjack _bj;
+    private readonly Func<string, string?>? _labelFor;
+    private readonly TextBlock _players = new() { Foreground = new SolidColorBrush(Color.FromRgb(0xCF, 0xD8, 0xDC)), FontSize = 13, HorizontalAlignment = HorizontalAlignment.Center, TextWrapping = TextWrapping.Wrap, MaxWidth = 520, TextAlignment = TextAlignment.Center, Margin = new Thickness(0, 0, 0, 8) };
     private readonly StackPanel _dealerCards = new() { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
     private readonly StackPanel _playerCards = new() { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
     private readonly TextBlock _dealerInfo = new() { Foreground = Brushes.White, FontSize = 15, FontWeight = FontWeights.SemiBold, HorizontalAlignment = HorizontalAlignment.Center };
@@ -27,14 +29,15 @@ public sealed class BlackjackTableWindow : Window
 
     private static Button Mk(string t) => new() { Content = t, Width = 110, Margin = new Thickness(6), Padding = new Thickness(0, 8, 0, 8), Foreground = Brushes.White, BorderThickness = new Thickness(0), Background = new SolidColorBrush(Color.FromRgb(0x2E, 0x5A, 0x7A)) };
 
-    public BlackjackTableWindow(Window owner, NetBlackjack bj)
+    public BlackjackTableWindow(Window owner, NetBlackjack bj, Func<string, string?>? labelFor = null)
     {
-        _bj = bj; Owner = owner; Title = "Group Blackjack (multiplayer)";
+        _bj = bj; _labelFor = labelFor; Owner = owner; Title = "Group Blackjack (multiplayer)";
         Width = 600; Height = 560; WindowStartupLocation = WindowStartupLocation.CenterOwner;
         Background = new SolidColorBrush(Color.FromRgb(0x0B, 0x4A, 0x28));
 
         var root = new StackPanel { Margin = new Thickness(20) };
-        root.Children.Add(new TextBlock { Text = "Group Blackjack", FontSize = 22, FontWeight = FontWeights.Bold, Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 0, 0, 10) });
+        root.Children.Add(new TextBlock { Text = "Group Blackjack", FontSize = 22, FontWeight = FontWeights.Bold, Foreground = Brushes.White, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 0, 0, 8) });
+        root.Children.Add(_players);
         root.Children.Add(new TextBlock { Text = "Dealer (shared)", Foreground = new SolidColorBrush(Color.FromRgb(0xFF, 0xE0, 0x82)), HorizontalAlignment = HorizontalAlignment.Center, FontWeight = FontWeights.Bold });
         root.Children.Add(_dealerCards);
         root.Children.Add(_dealerInfo);
@@ -62,6 +65,10 @@ public sealed class BlackjackTableWindow : Window
     private void Refresh()
     {
         if (!Dispatcher.CheckAccess()) { Dispatcher.BeginInvoke(new Action(Refresh)); return; }
+        var seatPubs = _bj.SeatPubs;
+        _players.Text = seatPubs.Length == 0
+            ? (_bj.State == NetBlackjack.Phase.WaitingForPlayer ? _bj.Status : "")
+            : "Players at the table: " + string.Join(",  ", seatPubs.Select((p, i) => ((_labelFor?.Invoke(p)) ?? $"seat {i}") + (i == _bj.MySeat ? " (you)" : "")));
         _dealerCards.Children.Clear(); _playerCards.Children.Clear();
         var dealer = _bj.DealerCards;
         foreach (var c in dealer) { var cv = new CardView(); cv.ShowCard(c); _dealerCards.Children.Add(cv); }

@@ -351,7 +351,9 @@ public sealed class GameView : UserControl
         {
             bool theirTurn = !hand.Complete && hand.ToAct == s.Seat;
             var grp = new StackPanel { Orientation = Orientation.Vertical, Margin = new Thickness(12, 0, 12, 0), HorizontalAlignment = HorizontalAlignment.Center };
-            grp.Children.Add(new TextBlock { Text = $"Seat {s.Seat} — {s.Stack}{(s.Folded ? " (folded)" : "")}{(theirTurn ? "  ◀" : "")}", Foreground = Brushes.White, FontWeight = FontWeights.SemiBold, HorizontalAlignment = HorizontalAlignment.Center });
+            // show WHO this is — their @handle (resolved from their identity key), not just "Seat N"
+            string who = (ng.SeatPubs.Length > s.Seat ? _labelFor?.Invoke(ng.SeatPubs[s.Seat]) : null) ?? $"Seat {s.Seat}";
+            grp.Children.Add(new TextBlock { Text = $"{who} — {s.Stack}{(s.Folded ? " (folded)" : "")}{(theirTurn ? "  ◀" : "")}", Foreground = Brushes.White, FontWeight = FontWeights.SemiBold, HorizontalAlignment = HorizontalAlignment.Center });
             var cards = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
             foreach (var c in s.Hole) { var cv = new CardView(); if (c.IsFaceDown) cv.ShowBack(); else cv.ShowCard(c); cards.Children.Add(cv); }
             grp.Children.Add(cards);

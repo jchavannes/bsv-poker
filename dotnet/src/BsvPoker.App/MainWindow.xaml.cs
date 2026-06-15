@@ -308,7 +308,7 @@ public partial class MainWindow : Window
         var bj = new NetBlackjack(_node, tableId, _idPriv, _idPub);
         bj.Start();
         _bjGame = bj;
-        var win = new BlackjackTableWindow(this, bj);
+        var win = new BlackjackTableWindow(this, bj, _wallet.IdentityLabelFor);   // shows who is at the table (@handles)
         if (hosted) win.Closed += (_, _) => { try { _node.CloseTable(tableId); } catch { } };   // end the hosted table when the host closes it
         win.Show();
     }
