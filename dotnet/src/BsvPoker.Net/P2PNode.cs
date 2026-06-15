@@ -324,8 +324,11 @@ public sealed class P2PNode : IDisposable
             string sig = r.TryGetProperty("sig", out var se) ? se.GetString() ?? "" : "";
             if (string.IsNullOrEmpty(id)) { Drop("table: empty id"); return; }
             if (!VerifyHex(pub, TableCanon(id, name, members), sig)) { Drop("table: bad/missing signature"); return; }
+            // members < 0 is a CLOSE signal: the host left/ended the table — drop it from the directory NOW so it
+            // never lingers as a ghost "open" table waiting on the TTL.
+            if (members < 0) { _directory.TryRemove(id, out _); return; }
             if (!_directory.ContainsKey(id) && _directory.Count >= MaxDirectory) { var oldest = _directory.Keys.FirstOrDefault(); if (oldest != null) _directory.TryRemove(oldest, out _); }
-            _directory[id] = (name, members < 0 ? 0 : members, DateTime.UtcNow + EntryTtl);
+            _directory[id] = (name, members, DateTime.UtcNow + EntryTtl);
         }
         catch { Drop("table: parse error"); }
     }
@@ -378,6 +381,23 @@ public sealed class P2PNode : IDisposable
         _ = PublishAsync(DirTopic, Encoding.UTF8.GetBytes(TableJson(a)));
         return Task.FromResult(a);
     }
+
+    /// <summary>The ids of the tables THIS node is hosting (created here).</summary>
+    public IReadOnlyCollection<string> OwnTableIds => _ownTables.Keys.ToArray();
+
+    /// <summary>END a table this node hosts: stop re-announcing it, drop it locally, and tell every peer to drop
+    /// it immediately (a members=-1 close signal) so it never lingers as a ghost "open" table. Called when the
+    /// host leaves the table or closes the app.</summary>
+    public Task CloseTable(string id)
+    {
+        _ownTables.TryRemove(id, out _);          // stop re-announcing it
+        _directory.TryRemove(id, out _);          // drop it from our own view
+        var close = new TableAnnounce(id, "", -1);
+        return PublishAsync(DirTopic, Encoding.UTF8.GetBytes(TableJson(close)));   // peers drop it now
+    }
+
+    /// <summary>END every table this node hosts (e.g. on app close).</summary>
+    public void CloseAllOwnTables() { foreach (var id in _ownTables.Keys.ToArray()) { try { _ = CloseTable(id); } catch { } } }
 
     public IReadOnlyList<TableAnnounce> ListTables()
     {

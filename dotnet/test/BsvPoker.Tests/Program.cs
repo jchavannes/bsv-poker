@@ -59,6 +59,7 @@ OnChainWalletTests.All();
 CardNftTests.All();
 GameNftBindingTests.All();   // D-A: a card NFT is permanently bound to its game; cannot cross games
 OnChainChatTests.All();
+ChatDeliveryTests.All();   // a chat message is actually pushed IP-to-IP and ARRIVES (loopback-bind regression)
 TxLinkTests.All();
 SecurityHardeningTests.All();
 TwoPartyEscrowTests.All();

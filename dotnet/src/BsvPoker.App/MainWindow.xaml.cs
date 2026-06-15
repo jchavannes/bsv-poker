@@ -91,7 +91,7 @@ public partial class MainWindow : Window
             presence.Start();
             AnnouncePresence();
         };
-        Closed += (_, _) => { try { _wallet.VaultBackup(); } catch { } try { StopBotNetGame(); } catch { } foreach (var w in _botWindows.ToList()) { try { w.Close(); } catch { } } foreach (var b in _bots.ToList()) { try { b.Dispose(); } catch { } } try { _discovery?.Dispose(); } catch { } try { _bsvNode?.Dispose(); } catch { } try { _link?.Dispose(); } catch { } try { _node.Dispose(); } catch { } };
+        Closed += (_, _) => { try { _wallet.VaultBackup(); } catch { } try { _node.CloseAllOwnTables(); } catch { } try { StopBotNetGame(); } catch { } foreach (var w in _botWindows.ToList()) { try { w.Close(); } catch { } } foreach (var b in _bots.ToList()) { try { b.Dispose(); } catch { } } try { _discovery?.Dispose(); } catch { } try { _bsvNode?.Dispose(); } catch { } try { _link?.Dispose(); } catch { } try { _node.Dispose(); } catch { } };
     }
 
     private WalletView _wallet = null!;
@@ -125,7 +125,9 @@ public partial class MainWindow : Window
 
         _game = new GameView(_node, _idPriv, _idPub, _wallet.WalletVault, _wallet.RefreshCards);   // vault sealed to the OPENED wallet
         _game.OnMove += EmitMoveOnChain;   // EVERY move I make becomes a funded on-chain tx, dual-path broadcast
-        _game.OnLeaveTable += StopBotNetGame;   // leaving the table stops the bot's NetGame too
+        // Leaving the table stops the bot's NetGame AND ENDS any table this player hosts — so a table never
+        // lingers as a ghost "open" table after its host walks away.
+        _game.OnLeaveTable += () => { StopBotNetGame(); try { _node.CloseAllOwnTables(); } catch { } };
         _game.SetIdentityLabelResolver(_wallet.IdentityLabelFor);   // the table shows your PSEUDONYM, not a raw key
         GameHost.Content = _game;
 
@@ -167,7 +169,10 @@ public partial class MainWindow : Window
     {
         try
         {
-            _link = new TxLink(_currentNet, 0); // loopback by default; expose to LAN/Internet is an explicit opt-in
+            // Bind ALL interfaces so a peer can actually reach us: presence/chat advertise this machine's LAN IP,
+            // and a socket bound to loopback-only would refuse a connection to that LAN IP (even from the SAME
+            // machine) — which is exactly why one-to-one chat never arrived. Any-bind accepts loopback + LAN.
+            _link = new TxLink(_currentNet, 0, System.Net.IPAddress.Any);
             _link.OnTransaction += Ingest;      // transactions peers push to us directly, IP-to-IP
             _link.Start();
             var myHex = Convert.ToHexString(_idPub).ToLowerInvariant();

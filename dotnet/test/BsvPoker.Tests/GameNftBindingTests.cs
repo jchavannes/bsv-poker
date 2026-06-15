@@ -47,18 +47,21 @@ public static class GameNftBindingTests
             T.False(CardNft.BelongsToGame(lk, gameB, detailsA), "a mismatched gameId is rejected");
         });
 
-        T.Run("trade WITHIN the game: re-seal to the new owner keeps the SAME binding; new owner opens the card", () =>
+        T.Run("trade WITHIN the game: returns BOTH the resealed blob AND the lock; the lock commits to THAT blob", () =>
         {
             var lk = CardNft.NftLockForGame(sealed_, alice.Pub, gameA, detailsA);
             var parsed = CardNft.ParseGameNft(lk)!;
-            // Alice trades the card to Bob within game A
+            // Alice trades the card to Bob within game A — the transfer returns the new sealed blob AND the lock.
             var toBob = CardNft.TransferForGame(sealed_, alice.Priv, bob.Pub, gameA, detailsA);
-            T.True(CardNft.BelongsToGame(toBob, gameA, detailsA), "after the trade the card still belongs to game A");
-            var bobParsed = CardNft.ParseGameNft(toBob)!;
-            // Bob can now open the underlying card (the secret was re-sealed to Bob); Alice resealed from her copy
-            var bobSealed = CardNft.Transfer(sealed_, alice.Priv, bob.Pub);
-            T.True(CardNft.CanOpen(bobSealed, bob.Priv), "the new owner (Bob) can open the traded card");
-            T.False(bobParsed.Value.SealCommitment.AsSpan().SequenceEqual(parsed.Value.SealCommitment), "the re-seal changes the seal commitment (fresh ephemeral), binding unchanged");
+            T.True(CardNft.BelongsToGame(toBob.LockScript, gameA, detailsA), "after the trade the card still belongs to game A");
+            var bobParsed = CardNft.ParseGameNft(toBob.LockScript)!;
+            // THE FIX (was a defect): the returned blob is the EXACT one the lock commits to. Bob opens THIS blob,
+            // and its hash equals the script's seal commitment — the on-chain commitment and the payload match.
+            T.True(CardNft.CanOpen(toBob.SealedHex, bob.Priv), "the new owner (Bob) opens the EXACT blob the transfer produced");
+            T.False(CardNft.CanOpen(toBob.SealedHex, alice.Priv), "Alice can no longer open it after the transfer (she lost access)");
+            T.True(bobParsed.Value.SealCommitment.AsSpan().SequenceEqual(CardNft.SealCommitment(toBob.SealedHex)),
+                "the lock commits to EXACTLY the returned blob (H(sealed) == on-chain commitment) — no disconnect");
+            T.False(bobParsed.Value.SealCommitment.AsSpan().SequenceEqual(parsed.Value.SealCommitment), "the re-seal changed the seal commitment (fresh ephemeral); the game binding is unchanged");
         });
 
         T.Run("the game-details hash is order-independent over players but changes with the game's parameters", () =>

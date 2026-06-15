@@ -88,5 +88,31 @@ public static class DiscoveryTests
             }
             finally { try { d?.Dispose(); } catch { } a.Dispose(); }
         });
+
+        T.Run("a hosted table ENDS for peers the moment the host closes it (no lingering ghost table)", () =>
+        {
+            var ka = Secp256k1.GenerateKeyPair();
+            var kb = Secp256k1.GenerateKeyPair();
+            var a = new P2PNode(0, "127.0.0.1"); a.SetIdentity(ka.Priv, ka.Pub); a.StartAsync().Wait();
+            var b = new P2PNode(0, "127.0.0.1"); b.SetIdentity(kb.Priv, kb.Pub); b.StartAsync().Wait();
+            PeerDiscovery? da = null, db = null;
+            try
+            {
+                da = new PeerDiscovery(a, "127.0.0.1"); da.Start();
+                db = new PeerDiscovery(b, "127.0.0.1"); db.Start();
+                da.SetOnChainSeeds(new[] { ("127.0.0.1", b.BoundPort) });
+                db.SetOnChainSeeds(new[] { ("127.0.0.1", a.BoundPort) });
+                T.True(Until(() => a.PeerCount >= 1 && b.PeerCount >= 1, 8000), "the two nodes connect");
+
+                const string table = "t-leave~TexasHoldem~p2~s100~b2";
+                a.CreateTableAsync(table, "Alice's table").Wait();
+                T.True(Until(() => b.ListTables().Any(t => t.id == table), 8000), "B sees A's open table");
+
+                a.CloseTable(table).Wait();   // Alice leaves / ends the table
+                T.True(Until(() => b.ListTables().All(t => t.id != table), 8000), "the table DISAPPEARS for B immediately (not left as a ghost)");
+                T.True(a.ListTables().All(t => t.id != table), "and it is gone from A's own directory");
+            }
+            finally { try { da?.Dispose(); } catch { } try { db?.Dispose(); } catch { } a.Dispose(); b.Dispose(); }
+        });
     }
 }

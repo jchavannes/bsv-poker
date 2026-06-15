@@ -76,6 +76,7 @@ hostile-negative test:
 | Reveal commitment `d·G` LEAKS a hidden hole card (`(j+1)·C == d·M`) | HIDING commitment `SHA-256(d ‖ r)` with a random nonce — no curve relation to exploit; binding preserved | `RevealProofTests` (read-the-hidden-card attack succeeds vs `d·G`, fails vs the hiding commitment) |
 | DKG share replayable across sessions/dealers | Bind full context (session ‖ dealer ‖ recipient-index ‖ recipient-pub) as the AEAD AAD | `DistributedKeyGenTests` (a share will not open under a different session's context) |
 | Scalar-mult control flow leaks scalar bits (SPA/timing) | Montgomery ladder: fixed iterations, one add + one double per bit, constant-work swap | full crypto/EC suite unchanged (ladder is bit-for-bit equivalent); residual: variable-time `BigInteger` field ops (fixed-limb field = future work) |
+| Game-bound card NFT transfer returned only the lock (committing to `H(resealed)`) and discarded the resealed blob — new owner could never open the card | `TransferForGame` returns BOTH the resealed blob and the lock (`GameTransfer`), so the on-chain commitment and the encrypted payload always travel together | `GameNftBindingTests` (the new owner opens the EXACT returned blob; `H(sealed)` == the lock's commitment) |
 
 All red-team findings to date are fixed (each with a positive and a hostile-negative test). Tracked residual:
 variable-time `BigInteger` field arithmetic (full constant-time needs a fixed-limb field).

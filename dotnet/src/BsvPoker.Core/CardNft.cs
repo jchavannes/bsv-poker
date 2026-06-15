@@ -155,12 +155,20 @@ public static class CardNft
         return p is { } v && v.GameId.AsSpan().SequenceEqual(gameId16) && v.DetailsHash.AsSpan().SequenceEqual(gameDetailsHash32);
     }
 
+    /// <summary>The result of a game-bound transfer: BOTH the new owner's sealed blob AND the new locking script.
+    /// They MUST travel together — the script commits to <c>H(SealedHex)</c>, so the new owner needs the exact
+    /// <see cref="SealedHex"/> to open the card; returning the lock alone would leave the on-chain commitment and
+    /// the encrypted payload disconnected (the new owner could never open it).</summary>
+    public readonly record struct GameTransfer(string SealedHex, byte[] LockScript);
+
     /// <summary>Trade/update a game-bound card to a new owner WITHIN the same game: re-seal the secret to the new
-    /// owner and re-issue the NFT lock with the SAME gameId/detailsHash (the binding is permanent).</summary>
-    public static byte[] TransferForGame(string sealedHex, byte[] fromPriv32, byte[] toPub33, byte[] gameId16, byte[] gameDetailsHash32)
+    /// owner and re-issue the NFT lock with the SAME gameId/detailsHash (the binding is permanent). Returns BOTH
+    /// the resealed blob and the matching lock so the on-chain commitment and the payload can never be separated.</summary>
+    public static GameTransfer TransferForGame(string sealedHex, byte[] fromPriv32, byte[] toPub33, byte[] gameId16, byte[] gameDetailsHash32)
     {
         var resealed = Transfer(sealedHex, fromPriv32, toPub33);
-        return NftLockForGame(resealed, toPub33, gameId16, gameDetailsHash32);
+        var lockScript = NftLockForGame(resealed, toPub33, gameId16, gameDetailsHash32);
+        return new GameTransfer(resealed, lockScript);
     }
 
     private static byte[] Concat(byte[] a, byte[] b) { var o = new byte[a.Length + b.Length]; a.CopyTo(o, 0); b.CopyTo(o, a.Length); return o; }

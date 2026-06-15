@@ -55,7 +55,7 @@ public sealed class BotPlayer : IDisposable
         var k = WalletKeys.Account(_seed, 0, 0);
         Priv = k.Priv; Pub = k.Pub;
         _wallet = new OnChainWallet(_seed);
-        _link = new TxLink(net, 0);
+        _link = new TxLink(net, 0, System.Net.IPAddress.Any);   // reachable on LAN+loopback so messages/actions arrive
         _link.OnTransaction += Ingest;
         _link.Start();
         Endpoint = $"{localIp}:{_link.Port}";
