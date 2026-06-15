@@ -344,7 +344,9 @@ public sealed class GameView : UserControl
             foreach (var c in hand.Seats[me].Hole) _vault.AddCard(c.Index, System.Security.Cryptography.RandomNumberGenerator.GetBytes(32));
             _onCardsChanged();
         }
-        foreach (var c in hand.Seats[me].Hole) _botCards.Children.Add(MakeMyCard(c, null));   // YOUR cards are clickable
+        // YOUR cards are clickable: on your turn you can pay to discard one and draw a replacement (over the mesh).
+        bool canSwap = !hand.Complete && hand.ToAct == me;
+        for (int i = 0; i < hand.Seats[me].Hole.Length; i++) { int idx = i; _botCards.Children.Add(MakeMyCard(hand.Seats[me].Hole[i], canSwap ? () => ng.Swap(idx) : null)); }
         // one group per opponent seat (holes are face-down sentinels of the variant's count until showdown)
         _topInfo.Text = hand.Seats.Count > 2 ? "Opponents" : "";
         foreach (var s in hand.Seats.Where(s => s.Seat != me))

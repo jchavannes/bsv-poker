@@ -620,15 +620,24 @@ public partial class MainWindow : Window
 
     private void EmitMoveOnChain(NetGame.MoveRecord m)
     {
-        if (!m.Mine || m.Kind != "bet") return;
+        if (!m.Mine) return;
         try
         {
-            var handId = new byte[16]; BitConverter.GetBytes(m.HandNo).CopyTo(handId, 0);
-            byte action = m.Action switch { "Fold" => 0, "Check" => 1, "Call" => 2, "Bet" => 3, "Raise" => 4, "AllIn" => 5, _ => 9 };
-            var script = TxTemplates.BuildOutput(TxKind.Bet,
-                new[] { handId, new[] { (byte)Math.Max(0, m.Seat) }, new[] { action }, BitConverter.GetBytes(m.Amount) }, _idPub);
-            var (raw, _) = _wallet.FundTx(script, 1, 1);
-            if (raw != null) _ = BroadcastMove(raw);   // funded → every move on-chain, both paths
+            if (m.Kind == "bet")
+            {
+                var handId = new byte[16]; BitConverter.GetBytes(m.HandNo).CopyTo(handId, 0);
+                byte action = m.Action switch { "Fold" => 0, "Check" => 1, "Call" => 2, "Bet" => 3, "Raise" => 4, "AllIn" => 5, _ => 9 };
+                var script = TxTemplates.BuildOutput(TxKind.Bet,
+                    new[] { handId, new[] { (byte)Math.Max(0, m.Seat) }, new[] { action }, BitConverter.GetBytes(m.Amount) }, _idPub);
+                var (raw, _) = _wallet.FundTx(script, 1, 1);
+                if (raw != null) _ = BroadcastMove(raw);   // funded → every move on-chain, both paths
+            }
+            else if (m.Kind == "swap")
+            {
+                // PAID card swap: fund a real fee tx (to self) so the discard/draw is an on-chain action.
+                var (raw, _) = _wallet.FundTx(Chain.P2pkhLockForPub(_idPub), Math.Max(1, m.Amount), 1);
+                if (raw != null) _ = BroadcastMove(raw);
+            }
         }
         catch { /* a move broadcast must never crash the game; the in-session move already stands */ }
     }

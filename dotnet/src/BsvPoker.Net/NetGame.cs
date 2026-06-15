@@ -118,12 +118,21 @@ public sealed class NetGame
     private int HandSeats => _inPubs.Length;
     private int HoleCount => Variants.HoleCards(Variant);
     private int BoardStart => HoleCount * HandSeats;
-    // The only deck positions ever revealed: every seat's hole cards + up to 5 community board cards. We
-    // commit to exactly these (both sides derive the count identically from the seat count), so the
-    // commitment payload stays small on the wire.
-    private int RevealCount => Math.Min(_n, BoardStart + 5);
+    // Reveal positions: every seat's hole cards + up to 5 board cards + a REPLACEMENT slot per seat (so a player
+    // can pay to swap one hole card for a fresh one — the replacement is its own deck position, sealed to the
+    // owner until showdown, exactly like a hole). We commit to all of these.
+    private int ReplStart => BoardStart + 5;
+    private int ReplPos(int seat) => ReplStart + seat;                       // the one replacement slot for a seat
+    private int RevealCount => Math.Min(_n, ReplStart + HandSeats);
     private IEnumerable<int> HolePositions(int seat) => Enumerable.Range(seat * HoleCount, HoleCount);
     private IEnumerable<int> OtherSeatsHolePositions() => Enumerable.Range(0, HandSeats).Where(s => s != _myHandSeat).SelectMany(HolePositions);
+    // replacement positions of OTHER seats that have requested a swap — I reveal MY scalar for these so the
+    // swapping owner (and, at showdown, everyone) can unmask the new card. Empty unless someone swapped.
+    private IEnumerable<int> OtherSeatsSwapPositions() => _swaps.Keys.Where(s => s != _myHandSeat).Select(ReplPos);
+    private readonly Dictionary<int, int> _swaps = new();                    // seat -> the hole INDEX it replaced (one per seat)
+    private bool _swapApplied;                                               // true once MY swapped card has been unmasked into my hand
+    /// <summary>The on-chain fee a paid card swap costs (surfaced as a "swap" MoveRecord the app funds).</summary>
+    public long SwapFee { get; set; } = 1;
 
     public NetGame(P2PNode node, string tableId, byte[] myPriv, byte[] myPub)
     {
@@ -249,6 +258,7 @@ public sealed class NetGame
                     && Environment.TickCount64 - _progressTick > AbortMs) { Abort(); return; }
                 DriveDeal();
                 DriveStreet();
+                DriveSwaps();
                 Broadcast();
             }
         }
@@ -276,9 +286,9 @@ public sealed class NetGame
     // positions) — smaller than the shuf/rem frames already sent every tick during dealing — so we send them
     // every tick (idempotent, first-wins). Throttling them only delayed the deal and stalled it at 5–6 seats.
     private void SendComm() { if (_comm.TryGetValue(_myHandSeat, out var c)) Send(new { t = "comm", h = _handNo, seat = _myHandSeat, c = PtsHex(c) }); }
-    private void SendHoleD() { if (_final != null) Send(new { t = "holeD", h = _handNo, seat = _myHandSeat, d = ScalarMap(OtherSeatsHolePositions()) }); }
+    private void SendHoleD() { if (_final != null) Send(new { t = "holeD", h = _handNo, seat = _myHandSeat, d = ScalarMap(OtherSeatsHolePositions().Concat(OtherSeatsSwapPositions())) }); }
     private void SendBoardD() { if (Hand is { AwaitingBoard: true }) Send(new { t = "boardD", h = _handNo, seat = _myHandSeat, d = ScalarMap(Enumerable.Range(BoardStart + Hand.Board.Count, Hand.PendingBoardCount)) }); }
-    private void SendShowD() { if (Hand is { AwaitingShowdown: true }) Send(new { t = "showD", h = _handNo, seat = _myHandSeat, d = ScalarMap(HolePositions(_myHandSeat)) }); }
+    private void SendShowD() { if (Hand is { AwaitingShowdown: true }) Send(new { t = "showD", h = _handNo, seat = _myHandSeat, d = ScalarMap(HolePositions(_myHandSeat).Concat(_swaps.ContainsKey(_myHandSeat) ? new[] { ReplPos(_myHandSeat) } : Enumerable.Empty<int>())) }); }
 
     private void SendSeatCommit() { if (_seatCommits.TryGetValue(_myPubHex, out var c)) Send(new { t = "seatcommit", c = Convert.ToHexString(c).ToLowerInvariant() }); }
     private void SendSeatReveal() { if (_seatReveals.TryGetValue(_myPubHex, out var n)) Send(new { t = "seatreveal", n = Convert.ToHexString(n).ToLowerInvariant() }); }
@@ -358,7 +368,7 @@ public sealed class NetGame
         _ecNonce = Array.Empty<byte[]>();   // built with the commitments at remask (DriveDeal)
         _ecPerm = RandomPerm(_n);
         _shuf.Clear(); _rem.Clear(); _comm.Clear(); _final = null; _maskShares.Clear(); _boardStreetsSupplied.Clear();
-        _applied = 0; _handFinalized = false; Hand = null;
+        _applied = 0; _handFinalized = false; Hand = null; _swaps.Clear(); _swapApplied = false;
         _sentShuf = _sentRem = _sentHoleD = _sentShowD = false; _sentBoardKeys.Clear();
         State = Phase.Dealing;
         Status = $"Hand #{_handNo + 1} — you are seat {_myHandSeat}. Shuffling the deck (encrypted)…";
@@ -474,7 +484,9 @@ public sealed class NetGame
             var revealed = new Dictionary<int, Card[]>();
             foreach (var t in live)
             {
-                var hs = HolePositions(t.Seat).Select(TryUnmask).ToList();
+                // for a hole that was SWAPPED, the real card sits at the seat's replacement position, not the
+                // original hole position — unmask that instead so showdown evaluates the card actually held.
+                var hs = HolePositions(t.Seat).Select((pos, idx) => TryUnmask(_swaps.TryGetValue(t.Seat, out var sh) && sh == idx ? ReplPos(t.Seat) : pos)).ToList();
                 if (hs.Any(c => c == null)) return;
                 revealed[t.Seat] = hs.Select(c => c!.Value).ToArray();
             }
@@ -567,6 +579,13 @@ public sealed class NetGame
                     case "act":
                         if (!SeatBound(root, "seat", pub, out _)) return;
                         ApplyRemote(root); break;
+                    case "swap":
+                        // a player paid to replace one of their hole cards. Record WHICH hole; the replacement
+                        // position is then revealed to that seat (others include it in their holeD) so they — and,
+                        // at showdown, everyone — can unmask the new card. First-wins (one swap per seat per hand).
+                        if (!SeatBound(root, "seat", pub, out var sw)) return;
+                        { int hole = root.TryGetProperty("hole", out var he) ? he.GetInt32() : -1; if (hole >= 0 && hole < HoleCount) { _swaps.TryAdd(sw, hole); DriveSwaps(); } }
+                        break;
                 }
                 // a multiway deal/reveal is CPU-heavy (EC crypto for many seats) and can take a while; as long as
                 // NEW state keeps arriving the deal is making progress and must NOT be aborted. Abort only fires
@@ -655,6 +674,36 @@ public sealed class NetGame
             RaiseMove(new MoveRecord(_handNo, "bet", _myHandSeat, kind.ToString(), amount, true, null));
             if (Hand.Complete) FinalizeHand(); else DriveStreet();
         }
+    }
+
+    /// <summary>Called by the UI: PAY to discard one of my hole cards and draw a fresh replacement. Allowed once
+    /// per hand, while I hold cards. The replacement is a sealed deck position revealed only to me (and to all at
+    /// showdown, bound by its commitment). The fee is surfaced as a "swap" MoveRecord the app funds on-chain.</summary>
+    public void Swap(int holeIndex)
+    {
+        lock (_gate)
+        {
+            if (Hand == null || Hand.Complete || _myHandSeat < 0) return;
+            if (_swaps.ContainsKey(_myHandSeat)) { Status = "You already swapped a card this hand."; Raise(); return; }
+            if (holeIndex < 0 || holeIndex >= HoleCount) return;
+            _swaps[_myHandSeat] = holeIndex;
+            Send(new { t = "swap", h = _handNo, seat = _myHandSeat, hole = holeIndex });
+            RaiseMove(new MoveRecord(_handNo, "swap", _myHandSeat, "swap", SwapFee, true, null));   // app funds the fee on-chain
+            Status = "Discarding a card and drawing a replacement…"; Raise();
+        }
+    }
+
+    // When my replacement position has been revealed (every other seat handed me its scalar for it), unmask the
+    // new card and put it in my hand, replacing the discarded one. Idempotent (once per hand).
+    private void DriveSwaps()
+    {
+        if (Hand == null || _myHandSeat < 0 || _swapApplied) return;
+        if (!_swaps.TryGetValue(_myHandSeat, out var holeIdx)) return;
+        var c = TryUnmask(ReplPos(_myHandSeat));
+        if (c == null) return;
+        if (holeIdx >= 0 && holeIdx < Hand.Seats[_myHandSeat].Hole.Length) Hand.Seats[_myHandSeat].Hole[holeIdx] = c.Value;
+        _swapApplied = true;
+        Status = $"Swapped — you drew {c.Value}."; Raise();
     }
 
     private void Abort()

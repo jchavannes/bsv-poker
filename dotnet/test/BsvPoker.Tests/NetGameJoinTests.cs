@@ -103,6 +103,37 @@ public static class NetGameJoinTests
             finally { try { gMe?.Stop(); } catch { } try { gBot?.Stop(); } catch { } try { botNode?.Dispose(); } catch { } node.Dispose(); }
         });
 
+        T.Run("paid hole-swap: a player discards a hole, draws a PRIVATE replacement, and showdown settles with it", () =>
+        {
+            var ka = Secp256k1.GenerateKeyPair();
+            var kb = Secp256k1.GenerateKeyPair();
+            var a = new P2PNode(0, "127.0.0.1"); a.SetIdentity(ka.Priv, ka.Pub); a.StartAsync().Wait();
+            var b = new P2PNode(0, "127.0.0.1"); b.SetIdentity(kb.Priv, kb.Pub); b.StartAsync().Wait();
+            PeerDiscovery? da = null, db = null; NetGame? gA = null, gB = null;
+            try
+            {
+                da = new PeerDiscovery(a, "127.0.0.1"); da.Start(); db = new PeerDiscovery(b, "127.0.0.1"); db.Start();
+                da.SetOnChainSeeds(new[] { ("127.0.0.1", b.BoundPort) }); db.SetOnChainSeeds(new[] { ("127.0.0.1", a.BoundPort) });
+                T.True(Until(() => a.PeerCount >= 1 && b.PeerCount >= 1, 8000), "nodes connect");
+                const string table = "t-swap~TexasHoldem~p2~s100~b2";
+                gA = new NetGame(a, table, ka.Priv, ka.Pub); gA.Start();
+                gB = new NetGame(b, table, kb.Priv, kb.Pub); gB.Start();
+                T.True(Until(() => gA.Hand != null && gB.Hand != null && gA.MySeat >= 0 && gB.MySeat >= 0, 30000), "the hand is dealt to both");
+
+                var swapper = gA.MySeat == 0 ? gA : gB;
+                int origIdx = swapper.Hand!.Seats[swapper.MySeat].Hole[0].Index;
+                swapper.Swap(0);   // pay to discard hole 0 and draw a replacement
+                T.True(Until(() => swapper.Hand != null && swapper.Hand.Seats[swapper.MySeat].Hole[0].Index != origIdx, 30000),
+                    "the swapper drew a fresh REPLACEMENT card (private, revealed only to them)");
+
+                // play to showdown — the opponent must unmask the SWAPPED card or the hand could never complete
+                bool done = Until(() => { Drive(gA); Drive(gB); return gA.HandNumber >= 1 && gB.HandNumber >= 1; }, 60000);
+                T.True(done, "the hand reaches showdown and COMPLETES on both nodes (the swapped card revealed + unmasked correctly)");
+                T.True(!gA.Aborted && !gB.Aborted && !gA.CheatDetected && !gB.CheatDetected, "no abort, no false cheat from the swap");
+            }
+            finally { try { gA?.Stop(); } catch { } try { gB?.Stop(); } catch { } try { da?.Dispose(); } catch { } try { db?.Dispose(); } catch { } a.Dispose(); b.Dispose(); }
+        });
+
         T.Run("who's online directory: each node lists the other's signed @handle and reachable endpoint", () =>
         {
             var ka = Secp256k1.GenerateKeyPair();
