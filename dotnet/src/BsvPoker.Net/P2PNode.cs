@@ -16,7 +16,7 @@ namespace BsvPoker.Net;
 /// Hardened: connection cap, per-peer inbound rate limit, anti-eviction directory. Frames are
 /// newline-delimited JSON {t,d,id} (d = base64). Stdlib only.
 /// </summary>
-public sealed class P2PNode : IDisposable
+public sealed class P2PNode : IDisposable, IGameTransport
 {
     private const int MaxFrameBytes = 1 << 20;        // hard per-frame BYTE cap (byte-accurate, not chars)
     private const int MaxTopicBytes = 256;            // a topic string may not exceed this many UTF-8 bytes

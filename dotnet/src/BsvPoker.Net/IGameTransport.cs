@@ -12,6 +12,9 @@ public interface IGameTransport
     /// <summary>Subscribe to a table's messages; returns an unsubscribe action.</summary>
     Action Subscribe(string tableId, Action<string> onEvent);
 
-    /// <summary>Publish a message to a table; returns the number of recipients.</summary>
-    Task<int> PublishAsync(string tableId, byte[] payload);
+    /// <summary>Publish a message to a table; returns the number of recipients. <paramref name="id"/> is the dedup
+    /// key (re-publishing the same id is delivered once but may be re-flooded for catch-up); null ⇒ a fresh id.
+    /// This matches <see cref="P2PNode.PublishAsync"/> so the SAME game engines run over the TCP mesh, an in-memory
+    /// bus, or a browser transport (WebRTC / BroadcastChannel) with no engine change.</summary>
+    Task<int> PublishAsync(string tableId, byte[] payload, string? id = null);
 }

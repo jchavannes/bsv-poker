@@ -31,7 +31,7 @@ public sealed class NetBlackjack
     // Done is terminal: the session is over and the pot has been settled on-chain.
     public enum Phase { WaitingForPlayer, Funding, Dealing, Playing, DealerPlay, HandOver, Settling, Done }
 
-    private readonly P2PNode _node;
+    private readonly IGameTransport _node;
     private readonly string _table;
     private readonly byte[] _priv;
     private readonly string _myPubHex;
@@ -193,7 +193,7 @@ public sealed class NetBlackjack
     private int DealerUp => 2 * Seats;
     private int DealerHole => 2 * Seats + 1;
 
-    public NetBlackjack(P2PNode node, string tableId, byte[] myPriv, byte[] myPub)
+    public NetBlackjack(IGameTransport node, string tableId, byte[] myPriv, byte[] myPub)
     {
         _node = node; _table = tableId; _priv = myPriv; _myPubHex = Convert.ToHexString(myPub).ToLowerInvariant();
         _players[_myPubHex] = 1;

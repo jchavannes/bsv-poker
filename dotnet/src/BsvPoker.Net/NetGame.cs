@@ -24,7 +24,7 @@ public sealed class NetGame
 {
     public enum Phase { WaitingForPlayer, Dealing, Playing, Done }
 
-    private readonly P2PNode _node;
+    private readonly IGameTransport _node;
     private readonly string _table;
     private readonly byte[] _priv;
     private readonly string _myPubHex;
@@ -134,7 +134,7 @@ public sealed class NetGame
     /// <summary>The on-chain fee a paid card swap costs (surfaced as a "swap" MoveRecord the app funds).</summary>
     public long SwapFee { get; set; } = 1;
 
-    public NetGame(P2PNode node, string tableId, byte[] myPriv, byte[] myPub)
+    public NetGame(IGameTransport node, string tableId, byte[] myPriv, byte[] myPub)
     {
         _node = node; _table = tableId; _priv = myPriv; _myPubHex = Convert.ToHexString(myPub).ToLowerInvariant();
         _players[_myPubHex] = 1;
