@@ -57,10 +57,11 @@ public sealed class BsvNode : IDisposable
         return eps;
     }
 
-    /// <summary>Point the node at a specific peer (host:port). Dialed immediately and on every refill round.</summary>
+    /// <summary>Point the node at a specific peer (host:port). Added to the candidate set; the paced connect
+    /// loop dials it (and re-dials on drop) — NOT dialed immediately, so adding many manual peers never bursts.</summary>
     public void AddManualPeer(string host, int port)
     {
-        try { foreach (var ip in Dns.GetHostAddresses(host)) _manual.Add(new IPEndPoint(ip, port)); Log($"manual peer {host}:{port} added"); _ = ConnectAsync(host, port); }
+        try { lock (_manual) foreach (var ip in Dns.GetHostAddresses(host)) _manual.Add(new IPEndPoint(ip, port)); Log($"manual peer {host}:{port} added"); }
         catch (Exception ex) { Log($"manual peer {host}:{port} failed to resolve: {ex.Message}"); }
     }
 
@@ -70,32 +71,63 @@ public sealed class BsvNode : IDisposable
         if (_started) return; _started = true;
         var seeds = await ResolveSeedsAsync();
         Log($"resolved {seeds.Count} candidate peer(s) from {_net.DnsSeeds.Length} DNS seed(s) on {_net.Network}");
+        // Dial GENTLY. A polite P2P client must never fire a burst of new connections: on a normal home network
+        // a burst of simultaneous outbound :8333 dials trips per-IP new-connection-rate (flood/DoS) protection on
+        // the router or ISP, which then resets ALL our connections (even idle ones) and blocks reconnects. So we
+        // start AT MOST ONE new dial per second, cap concurrent dials, and back off per-endpoint on failure. A
+        // handful of peers is plenty for SPV header sync; addr gossip still expands the pool over time. Once the
+        // peer set is full and stable, no new connections are made at all.
         _ = Task.Run(async () =>
         {
             var rnd = new Random();
-            var cooldown = new Dictionary<string, long>();   // endpoint → earliest next-dial tick (avoid hammering/greylisting)
+            var gate = new object();
+            var cooldown = new Dictionary<string, long>();   // endpoint → earliest next-dial tick
+            var fails = new Dictionary<string, int>();        // endpoint → consecutive failures (exponential backoff)
             var inFlight = new HashSet<string>();
+            const int MaxInFlight = 4;                        // a few concurrent dials at most — never a burst
             while (!_cts.IsCancellationRequested)
             {
-                var candidates = _manual.Concat(seeds).Concat(_discovered.Values).ToList();
-                long now = Environment.TickCount64;
-                if (_peers.Count < maxPeers && candidates.Count > 0)
+                if (_peers.Count < maxPeers)
                 {
-                    foreach (var ep in candidates.OrderBy(_ => rnd.Next()))
+                    List<IPEndPoint> manualSnap; lock (_manual) manualSnap = _manual.ToList();
+                    var candidates = manualSnap.Concat(seeds).Concat(_discovered.Values).ToList();
+                    long now = Environment.TickCount64;
+                    string? key = null; IPEndPoint? ep = null;
+                    lock (gate)
                     {
-                        if (_peers.Count + inFlight.Count >= maxPeers) break;
-                        var key = $"{ep.Address}:{ep.Port}";
-                        if (_peers.ContainsKey(key) || inFlight.Contains(key)) continue;
-                        if (cooldown.TryGetValue(key, out var next) && now < next) continue;  // not yet — back off
-                        cooldown[key] = now + 20_000;            // re-dial window: public BSV nodes evict inbound fast,
-                                                                 // so we must re-establish peers briskly (still backed off
-                                                                 // enough to never hammer a single node into greylisting us)
-                        inFlight.Add(key);
-                        _ = ConnectAsync(ep.Address.ToString(), ep.Port).ContinueWith(_ => { lock (inFlight) inFlight.Remove(key); });
+                        if (inFlight.Count < MaxInFlight)
+                            foreach (var c in candidates.OrderBy(_ => rnd.Next()))
+                            {
+                                var k = $"{c.Address}:{c.Port}";
+                                if (_peers.ContainsKey(k) || inFlight.Contains(k)) continue;
+                                if (cooldown.TryGetValue(k, out var next) && now < next) continue;  // backing off
+                                key = k; ep = c; inFlight.Add(k);
+                                cooldown[k] = now + 15_000;   // per-endpoint floor: never re-dial one node too often
+                                break;                        // exactly ONE new dial per tick
+                            }
                     }
+                    if (key != null)
+                    {
+                        var k = key;
+                        _ = ConnectAsync(ep!.Address.ToString(), ep.Port).ContinueWith(t =>
+                        {
+                            bool ok = t.Status == TaskStatus.RanToCompletion && t.Result;
+                            lock (gate)
+                            {
+                                inFlight.Remove(k);
+                                if (ok) fails.Remove(k);
+                                else
+                                {
+                                    int n = fails.TryGetValue(k, out var c) ? c + 1 : 1; fails[k] = n;
+                                    // 30s, 60s, 120s … capped at 10 min, so a dead/unreachable node is not retried tightly
+                                    cooldown[k] = Environment.TickCount64 + Math.Min(30_000L * (1L << Math.Min(n - 1, 5)), 600_000L);
+                                }
+                            }
+                        });
+                    }
+                    else if (candidates.Count == 0) Log("no candidate peers — DNS seeds returned nothing; add a node manually (Tools → Network).");
                 }
-                else if (candidates.Count == 0) Log("no candidate peers — DNS seeds returned nothing; add a node manually (Tools → Network).");
-                try { await Task.Delay(1200, _cts.Token); } catch { return; }
+                try { await Task.Delay(1000, _cts.Token); } catch { return; }
             }
         });
     }

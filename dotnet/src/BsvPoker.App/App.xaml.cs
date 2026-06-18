@@ -55,10 +55,11 @@ public partial class App : Application
             var h160 = Base58.CheckDecode(address)[1..];
             L($"findcoins {address} (hash160 {Convert.ToHexString(h160).ToLowerInvariant()})");
             var node = new BsvNode(NetworkParams.For(BsvNetwork.Mainnet));
-            await node.StartAsync(16);
+            await node.StartAsync(8);
             foreach (var ip in new[] { "135.125.170.182", "198.154.93.204", "198.154.93.210", "198.154.93.212", "135.181.137.155", "141.95.126.79", "57.128.233.172", "57.128.216.248", "162.19.222.167" })
                 node.AddManualPeer(ip, 8333);
-            for (int i = 0; i < 40 && node.PeerCount < 1; i++) await System.Threading.Tasks.Task.Delay(1000);
+            // peers now connect at the gentle paced rate (~1 dial/s), so allow more time for the first handshake
+            for (int i = 0; i < 60 && node.PeerCount < 1; i++) await System.Threading.Tasks.Task.Delay(1000);
             L($"peers={node.PeerCount}");
             if (node.PeerCount < 1) { L("NO PEERS — cannot scan"); return; }
             var store = new HeaderStore(Path.Combine(Path.GetTempPath(), "poker_fc_hdrs.dat"));

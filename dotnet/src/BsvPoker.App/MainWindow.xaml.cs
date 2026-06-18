@@ -818,7 +818,7 @@ public partial class MainWindow : Window
         _ = System.Threading.Tasks.Task.Run(async () =>
         {
             var node = _bsvNode;
-            await node.StartAsync(16);
+            await node.StartAsync(8);
             // DNS seeds are flaky/greylist-prone; seed known-good public BSV nodes so we reliably connect (then
             // getaddr expands to the whole network). These are live /Bitcoin SV:1.2.0/ peers verified this session.
             if (net == BsvNetwork.Mainnet)
