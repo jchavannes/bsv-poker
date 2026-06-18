@@ -32,3 +32,6 @@ wallet*.json
 /_*.txt
 /_bg.*
 /_*.log*
+
+/.claude
+/.idea

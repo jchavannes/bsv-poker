@@ -818,12 +818,18 @@ public partial class MainWindow : Window
         _ = System.Threading.Tasks.Task.Run(async () =>
         {
             var node = _bsvNode;
-            await node.StartAsync(8);
-            // DNS seeds are flaky/greylist-prone; seed known-good public BSV nodes so we reliably connect (then
-            // getaddr expands to the whole network). These are live /Bitcoin SV:1.2.0/ peers verified this session.
+            // Mainnet: point at a single local/tunnelled BSV node (the host's tunnel, reached from this VM at the
+            // UTM shared-network gateway 192.168.64.1:8333) instead of discovering public
+            // peers. Manual-only mode means no DNS seeds and no gossip dialing, so the client never churns
+            // connections against the public network — which on some gateways gets this host's IP rate-limited or
+            // penalised. One trusted node serves headers/tx/blocks fine. (Other networks keep DNS discovery.)
             if (net == BsvNetwork.Mainnet)
-                foreach (var ip in new[] { "135.125.170.182", "198.154.93.204", "198.154.93.210", "198.154.93.212", "135.181.137.155", "141.95.126.79", "57.128.233.172", "57.128.216.248", "162.19.222.167" })
-                    node.AddManualPeer(ip, 8333);
+            {
+                await node.StartAsync(8, manualOnly: true);
+                node.AddManualPeer("192.168.64.1", 8333);
+            }
+            else
+                await node.StartAsync(8);
             while (ReferenceEquals(_headerStore, store))
             {
                 try

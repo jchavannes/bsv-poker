@@ -66,11 +66,15 @@ public sealed class BsvNode : IDisposable
     }
 
     /// <summary>Begin connecting to the live network (seeds → dial up to maxPeers, refilling as peers drop).</summary>
-    public async Task StartAsync(int maxPeers = 8)
+    public async Task StartAsync(int maxPeers = 8, bool manualOnly = false)
     {
         if (_started) return; _started = true;
-        var seeds = await ResolveSeedsAsync();
-        Log($"resolved {seeds.Count} candidate peer(s) from {_net.DnsSeeds.Length} DNS seed(s) on {_net.Network}");
+        // manualOnly: connect ONLY to peers added via AddManualPeer (e.g. a local/tunnelled node) — skip the DNS
+        // seeds and addr-gossip dialing entirely. Used when the client is pointed at a specific trusted node so it
+        // never dials the public network (no discovery churn, nothing to trip a gateway's per-host connection limits).
+        var seeds = manualOnly ? new List<IPEndPoint>() : await ResolveSeedsAsync();
+        if (manualOnly) Log($"manual-only mode on {_net.Network}: using configured peer(s), skipping DNS seeds");
+        else Log($"resolved {seeds.Count} candidate peer(s) from {_net.DnsSeeds.Length} DNS seed(s) on {_net.Network}");
         // Dial GENTLY. A polite P2P client must never fire a burst of new connections: on a normal home network
         // a burst of simultaneous outbound :8333 dials trips per-IP new-connection-rate (flood/DoS) protection on
         // the router or ISP, which then resets ALL our connections (even idle ones) and blocks reconnects. So we
@@ -90,7 +94,7 @@ public sealed class BsvNode : IDisposable
                 if (_peers.Count < maxPeers)
                 {
                     List<IPEndPoint> manualSnap; lock (_manual) manualSnap = _manual.ToList();
-                    var candidates = manualSnap.Concat(seeds).Concat(_discovered.Values).ToList();
+                    var candidates = manualOnly ? manualSnap : manualSnap.Concat(seeds).Concat(_discovered.Values).ToList();
                     long now = Environment.TickCount64;
                     string? key = null; IPEndPoint? ep = null;
                     lock (gate)
